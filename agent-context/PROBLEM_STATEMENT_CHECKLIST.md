@@ -10,10 +10,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Tool-call repetition detection.
 - [x] Step-limit safety handling.
 - [x] Multi-step edit, reread, and verification continuation.
-- [~] Multiple specialized role workers are supported by `TaskOrchestrator`.
+- [x] Registry-driven agents and specialist handoff are supported by
+      `MultiAgentOrchestrator`.
 - [~] Dependency-ordered task planning and bounded retry recovery exist.
 - [x] Attempt/time budgets and repeated-failure safeguards.
-- [ ] Model-driven planning, delegation, disagreement handling, and replanning.
+- [~] Delegation is supported; model-driven planning, disagreement handling,
+  and replanning remain.
 
 ## 2. Model and Hosting Constraints
 

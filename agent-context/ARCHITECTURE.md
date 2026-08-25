@@ -43,6 +43,20 @@ serializable orchestration state inside the existing project-isolated task
 record. Provider routing remains outside this boundary and can supply a
 different `LanguageModel` to each worker.
 
+The registry-driven runtime is the general multi-agent boundary. `AgentRunner`
+is only a generic model/tool conversation executor; it does not represent a
+role or contain a fixed agent. `MultiAgentOrchestrator` loads agent definitions
+by ID from an injected registry, resolves each agent's model and tools, and
+injects the generic `handoff_agent` tool. Agent definitions are data, so adding
+or changing an agent does not require changing orchestration code.
+
+A handoff contains a target agent ID, focused task, optional context, and
+reason. The child result is returned to the parent as a tool result. Unknown or
+disabled agents, duplicate active handoffs, excessive depth, excessive handoff
+count, cancellation, and time-budget violations are rejected or stopped.
+Agent definitions are stored globally; task and orchestration state remains
+project-isolated.
+
 ## Explicitly Not Implemented
 
 - Advanced scheduling

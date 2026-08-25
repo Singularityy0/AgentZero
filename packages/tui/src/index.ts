@@ -4,11 +4,13 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { config } from "dotenv";
 import {
-  AgentRunner,
+  MultiAgentOrchestrator,
   ToolRegistry,
+  type AgentDefinition,
   type AgentEvent,
   type ConversationMessage,
   type LanguageModel,
+  type MultiAgentEvent,
   type ToolCall,
 } from "@agentic-runtime/core";
 import { DEFAULT_OLLAMA_ENDPOINT, OllamaModel } from "@agentic-runtime/ollama";
@@ -27,8 +29,11 @@ const modelName =
   provider === "ollama"
     ? (process.env.OLLAMA_MODEL ?? "")
     : (process.env.OPENAI_MODEL ?? DEFAULT_OPENAI_MODEL);
+const DEFAULT_AGENT_ID = "general";
+const CODING_AGENT_ID = "coding-agent";
 
 const useColor = Boolean(output.isTTY) && !process.env.NO_COLOR;
+let stopActivity: (() => void) | undefined;
 const ansi = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
@@ -56,6 +61,82 @@ function createSystemMessage(rootPath: string): ConversationMessage {
     content:
       "You are an IDE assistant. Use the provided tools for workspace operations. For multi-step requests, continue calling tools until every requested step is complete. Use apply_patch for existing-file edits. The runtime handles approval; never ask the user to approve again after a tool has executed. Perform requested verification commands before answering. Do not fabricate tool results or output tool-call JSON as normal text." +
       instructionText,
+  };
+}
+
+function createDefaultCodingAgent(
+  systemMessage: ConversationMessage,
+): AgentDefinition {
+  return {
+    id: CODING_AGENT_ID,
+    name: "Coding Agent",
+    description:
+      "A disciplined software engineer that investigates, edits, verifies, and delegates specialist work.",
+    systemPrompt: `${systemMessage.content}
+
+You are the primary coding agent for this workspace. Work like a careful senior engineer:
+
+1. Understand the request and inspect the relevant files before changing anything.
+2. Use focused searches and reads; do not dump unrelated files into context.
+3. Form a concise implementation plan internally, then execute the smallest correct change.
+4. Preserve existing architecture, package boundaries, and project conventions.
+5. Use the appropriate workspace tools for edits. Never invent file contents or tool results.
+6. Delegate a focused subtask with handoff_agent when a registered specialist is better suited.
+7. After changes, reread affected files and run the most relevant build, typecheck, lint, or test command.
+8. Diagnose failures from their actual output, make a targeted correction, and verify again.
+9. Do not claim completion until the requested behavior and verification are complete.
+10. Keep user-facing updates concise and factual. Do not expose private chain-of-thought; report actions, findings, and verification results instead.
+
+When a tool requires approval, let the runtime request it. Do not ask for approval in normal prose and do not repeat an already completed tool call.
+`,
+    capabilities: [
+      "workspace-inspection",
+      "coding",
+      "debugging",
+      "testing",
+      "verification",
+      "delegation",
+    ],
+    allowedTools: [
+      "list_directory",
+      "read_file",
+      "write_file",
+      "create_file",
+      "delete_file",
+      "apply_patch",
+      "find_files",
+      "search_text",
+      "run_command",
+      "compile_code",
+      "run_code",
+      "format_code",
+      "syntax_check",
+    ],
+    maxSteps: 16,
+    enabled: true,
+  };
+}
+
+function createDefaultGeneralAgent(): AgentDefinition {
+  return {
+    id: DEFAULT_AGENT_ID,
+    name: "General Agent",
+    description:
+      "Meta-agent that understands requests, inspects the workspace, and delegates specialist work.",
+    systemPrompt: `You are the general meta-agent for this workspace. You coordinate work; you are not the implementation specialist.
+
+1. Understand the user's request and inspect only the files needed to classify it.
+2. For coding, debugging, file changes, builds, tests, or repository work, delegate to the registered ${CODING_AGENT_ID} using handoff_agent.
+3. Include a precise task and the relevant findings in the handoff context.
+4. For simple informational questions, answer directly without unnecessary delegation.
+5. When a specialist returns, summarize its result accurately and mention verification status.
+6. Never modify files or run shell commands directly. Let the coding specialist handle implementation and verification.
+7. Do not expose private chain-of-thought; report concise decisions, handoffs, and results.
+`,
+    capabilities: ["classification", "workspace-inspection", "delegation"],
+    allowedTools: ["list_directory", "read_file", "find_files", "search_text"],
+    maxSteps: 8,
+    enabled: true,
   };
 }
 
@@ -113,6 +194,12 @@ function printHelp(): void {
     `  ${paint(ansi.yellow, "/model")}                Show the active model`,
   );
   console.log(
+    `  ${paint(ansi.yellow, "/agents")}               List registered agents`,
+  );
+  console.log(
+    `  ${paint(ansi.yellow, "/agent <id>")}          Select the active agent`,
+  );
+  console.log(
     `  ${paint(ansi.yellow, "/exit")}                 Leave the TUI\n`,
   );
 }
@@ -132,6 +219,21 @@ function printSessions(sessions: SessionRecord[], activeId: string): void {
     const active =
       session.id === activeId ? paint(ansi.green, "  < active") : "";
     console.log(`  ${paint(ansi.dim, session.id)}  ${session.title}${active}`);
+  }
+  console.log();
+}
+
+function printAgents(agents: AgentDefinition[], activeId: string): void {
+  console.log(`\n${paint(ansi.cyan + ansi.bold, "REGISTERED AGENTS")}`);
+  for (const agent of agents) {
+    const marker = agent.id === activeId ? paint(ansi.green, "  < active") : "";
+    const status = agent.enabled
+      ? paint(ansi.green, "enabled")
+      : paint(ansi.red, "disabled");
+    console.log(
+      `  ${paint(ansi.bold, agent.id)}  ${agent.name}  ${status}${marker}`,
+    );
+    console.log(`    ${paint(ansi.dim, agent.description)}`);
   }
   console.log();
 }
@@ -183,6 +285,59 @@ function printEvent(event: AgentEvent): void {
   }
 }
 
+function printMultiAgentEvent(event: MultiAgentEvent): void {
+  if (event.type === "agent_started") {
+    console.log(
+      `${paint(ansi.magenta, "AGENT")} ${paint(ansi.bold, event.agentId)} ${paint(ansi.dim, `started at depth ${event.depth}`)}`,
+    );
+  } else if (event.type === "handoff_requested") {
+    console.log(
+      `${paint(ansi.yellow, "HANDOFF")} ${event.agentId} -> ${paint(ansi.bold, event.targetAgentId ?? "unknown")} ${paint(ansi.dim, event.reason ?? "")}`,
+    );
+  } else if (event.type === "handoff_completed") {
+    console.log(
+      `${paint(ansi.green, "RETURN")} ${event.targetAgentId ?? "agent"} -> ${paint(ansi.bold, event.agentId)}`,
+    );
+  } else if (
+    event.type === "handoff_rejected" ||
+    event.type === "agent_failed"
+  ) {
+    console.log(
+      `${paint(ansi.red, "AGENT ERROR")} ${paint(ansi.bold, event.agentId)} ${event.reason ?? event.output ?? ""}`,
+    );
+  }
+}
+
+function printAgentEvent(agentId: string, event: AgentEvent): void {
+  if (event.type === "model_request") {
+    stopActivityForAgent();
+    stopActivity = startActivity(
+      `Agent ${paint(ansi.white, agentId)} is thinking`,
+    );
+  } else if (event.type === "tool_requested") {
+    stopActivityForAgent();
+    console.log(
+      `${paint(ansi.cyan, "PLAN")} ${agentId} requested ${paint(ansi.bold, event.call.name)}`,
+    );
+  } else if (event.type === "tool_auto_approved") {
+    console.log(
+      `${paint(ansi.blue, "AUTO")} ${agentId} ${paint(ansi.bold, event.call.name)} ${paint(ansi.dim, "is safe to run")}`,
+    );
+  } else if (
+    event.type === "tool_completed" ||
+    event.type === "agent_completed" ||
+    event.type === "agent_safety_limit"
+  ) {
+    stopActivityForAgent();
+    printEvent(event);
+  }
+}
+
+function stopActivityForAgent(): void {
+  stopActivity?.();
+  stopActivity = undefined;
+}
+
 function summarizeResult(value: string): string {
   const singleLine = value.replace(/\s+/g, " ").trim();
   return singleLine.length > 120
@@ -193,80 +348,83 @@ function summarizeResult(value: string): string {
 async function main(): Promise<void> {
   const sessionStore = new SessionStore({ projectRoot: process.cwd() });
   const systemMessage = createSystemMessage(sessionStore.project.rootPath);
+  sessionStore.registerAgent(createDefaultGeneralAgent());
+  sessionStore.registerAgent(createDefaultCodingAgent(systemMessage));
+  const agents = sessionStore.listAgents();
+  const configuredAgentId = process.env.AGENT_ID ?? DEFAULT_AGENT_ID;
+  const selectedAgentId =
+    configuredAgentId && sessionStore.getAgent(configuredAgentId)?.enabled
+      ? configuredAgentId
+      : agents.find((agent) => agent.enabled)?.id;
+  if (!selectedAgentId) {
+    throw new Error(
+      "No enabled agents are registered. Add an agent to SQLite before starting the TUI.",
+    );
+  }
+  let activeAgentId: string = selectedAgentId;
   let activeSession =
     sessionStore.latestSession() ?? sessionStore.createSession();
   let messages: ConversationMessage[] = activeSession.messages.length
     ? activeSession.messages
     : [systemMessage];
   let activeTaskId: string | undefined;
-  let stopActivity: (() => void) | undefined;
   const readline = createInterface({ input, output });
   const model = createModel();
-  const registry = new ToolRegistry();
-  for (const tool of createIdeTools()) {
-    registry.register(tool);
-  }
-  const runner = new AgentRunner(model, registry, {
-    cwd: sessionStore.project.rootPath,
-    onEvent: async (event) => {
-      sessionStore.appendEvent({
-        sessionId: activeSession.id,
-        taskId: activeTaskId,
-        type: event.type,
-        payload: event as unknown as Record<string, unknown>,
-      });
-      if (event.type === "model_request") {
-        stopActivity?.();
-        stopActivity = startActivity(
-          `Model ${paint(ansi.white, modelName)} is thinking`,
-        );
-      } else if (event.type === "tool_requested") {
-        stopActivity?.();
-        stopActivity = undefined;
-        console.log(
-          `${paint(ansi.cyan, "PLAN")} model requested ${paint(ansi.bold, event.call.name)}`,
-        );
-      } else if (event.type === "tool_auto_approved") {
-        console.log(
-          `${paint(ansi.blue, "AUTO")} ${paint(ansi.bold, event.call.name)} ${paint(ansi.dim, "is safe to run without approval")}`,
-        );
-      } else if (
-        event.type === "tool_completed" ||
-        event.type === "agent_completed" ||
-        event.type === "agent_safety_limit"
-      ) {
-        stopActivity?.();
-        stopActivity = undefined;
-        printEvent(event);
+  const runtime = new MultiAgentOrchestrator(
+    sessionStore,
+    () => model,
+    (agent) => {
+      const registry = new ToolRegistry();
+      for (const tool of createIdeTools()) {
+        if (!agent.allowedTools || agent.allowedTools.includes(tool.name)) {
+          registry.register(tool);
+        }
       }
+      return registry;
     },
-    requestApproval: async (call, preview) => {
-      stopActivity?.();
-      stopActivity = undefined;
-      printToolCard(call, preview);
-      console.log(
-        `\n${paint(ansi.yellow + ansi.bold, "ALLOW THIS ACTION?")} ${paint(ansi.dim, "[y] yes  [n] no")}`,
-      );
-      let answer: string;
-      try {
-        answer = await readline.question(
-          `${paint(ansi.green, "permission>")} `,
+    {
+      cwd: sessionStore.project.rootPath,
+      requestApproval: async (call, preview) => {
+        stopActivityForAgent();
+        printToolCard(call, preview);
+        console.log(
+          `\n${paint(ansi.yellow + ansi.bold, "ALLOW THIS ACTION?")} ${paint(ansi.dim, "[y] yes  [n] no")}`,
         );
-      } catch (error) {
-        if (isReadlineClosed(error)) return false;
-        throw error;
-      }
-      const approved = answer.trim().toLowerCase() === "y";
-      console.log(
-        approved
-          ? paint(ansi.green, "Approved. Continuing...\n")
-          : paint(ansi.red, "Denied. The model will see the denial.\n"),
-      );
-      return approved;
+        let answer: string;
+        try {
+          answer = await readline.question(
+            `${paint(ansi.green, "permission>")} `,
+          );
+        } catch (error) {
+          if (isReadlineClosed(error)) return false;
+          throw error;
+        }
+        const approved = answer.trim().toLowerCase() === "y";
+        console.log(
+          approved
+            ? paint(ansi.green, "Approved. Continuing...\n")
+            : paint(ansi.red, "Denied. The agent will see the denial.\n"),
+        );
+        return approved;
+      },
+      onEvent: async (event) => {
+        sessionStore.appendEvent({
+          sessionId: activeSession.id,
+          taskId: activeTaskId,
+          type: event.type,
+          payload: event as unknown as Record<string, unknown>,
+        });
+        if (event.type === "agent_event" && event.agentEvent) {
+          printAgentEvent(event.agentId, event.agentEvent);
+        } else {
+          printMultiAgentEvent(event);
+        }
+      },
     },
-  });
+  );
 
   printBanner();
+  console.log(`${paint(ansi.dim, "Agent")} ${activeAgentId}`);
   console.log(`${paint(ansi.dim, "Session")} ${activeSession.id}\n`);
 
   try {
@@ -289,6 +447,25 @@ async function main(): Promise<void> {
       if (inputMessage === "/model") {
         console.log(
           `\n${paint(ansi.green, "ACTIVE MODEL")} ${modelName} ${paint(ansi.dim, `via ${provider}`)}\n`,
+        );
+        continue;
+      }
+      if (inputMessage === "/agents") {
+        printAgents(sessionStore.listAgents(), activeAgentId);
+        continue;
+      }
+      if (inputMessage.startsWith("/agent ")) {
+        const requestedId = inputMessage.slice("/agent ".length).trim();
+        const selected = sessionStore.getAgent(requestedId);
+        if (!selected || !selected.enabled) {
+          console.log(
+            `${paint(ansi.red, "Enabled agent not found:")} ${requestedId}\n`,
+          );
+          continue;
+        }
+        activeAgentId = selected.id;
+        console.log(
+          `${paint(ansi.green, "Active agent:")} ${selected.id} (${selected.name})\n`,
         );
         continue;
       }
@@ -348,22 +525,40 @@ async function main(): Promise<void> {
         type: "user_message",
         payload: { content: inputMessage },
       });
-      messages.push({ role: "user", content: inputMessage });
       console.log(
-        `\n${paint(ansi.blue, "TASK")} ${paint(ansi.dim, task.id)} ${paint(ansi.dim, "started")}`,
+        `\n${paint(ansi.blue, "TASK")} ${paint(ansi.dim, task.id)} ${paint(ansi.dim, "started with ")}${paint(ansi.bold, activeAgentId)}`,
       );
 
       try {
-        const result = await runner.run(messages);
+        const history = messages.filter((message) => message.role !== "system");
+        const result = await runtime.run(
+          activeAgentId,
+          inputMessage,
+          "",
+          history,
+        );
         stopActivity?.();
         stopActivity = undefined;
+        messages = result.messages ?? [
+          systemMessage,
+          ...history,
+          { role: "user", content: inputMessage },
+          { role: "assistant", content: result.text },
+        ];
         sessionStore.saveMessages(activeSession.id, messages);
         sessionStore.updateTask(task.id, {
-          status: "completed",
-          currentStage: "completed",
-          state: { ...task.state, completedSteps: ["agent run"] },
+          status: result.status,
+          currentStage: result.status === "completed" ? "completed" : "failed",
+          state: {
+            ...task.state,
+            completedSteps: ["multi-agent run"],
+            orchestrationRunId: result.runId,
+            handoffs: result.handoffs,
+          },
         });
-        sessionStore.updateSession(activeSession.id, { status: "idle" });
+        sessionStore.updateSession(activeSession.id, {
+          status: result.status === "completed" ? "idle" : "failed",
+        });
         console.log(
           `\n${paint(ansi.magenta + ansi.bold, "assistant>")}\n${result.text}\n`,
         );

@@ -155,9 +155,11 @@ export function parseJsonToolCalls(content: string): ToolCall[] {
     content.trim(),
     ...taggedCandidates,
     ...fencedCandidates,
+    ...extractJsonObjects(content),
     ...content.split(/\r?\n/),
   ].filter((value, index, values) => value && values.indexOf(value) === index);
   const calls: ToolCall[] = [];
+  const signatures = new Set<string>();
 
   for (const candidateText of candidates) {
     try {
@@ -167,19 +169,33 @@ export function parseJsonToolCalls(content: string): ToolCall[] {
       }
 
       const candidate = parsed as Record<string, unknown>;
+      const name =
+        typeof candidate.name === "string"
+          ? candidate.name
+          : typeof candidate.tool_name === "string"
+            ? candidate.tool_name
+            : undefined;
+      let arguments_: unknown = candidate.arguments;
+      if (typeof arguments_ === "string") {
+        arguments_ = JSON.parse(arguments_);
+      }
       if (
-        typeof candidate.name !== "string" ||
-        !candidate.arguments ||
-        typeof candidate.arguments !== "object" ||
-        Array.isArray(candidate.arguments)
+        !name ||
+        !arguments_ ||
+        typeof arguments_ !== "object" ||
+        Array.isArray(arguments_)
       ) {
         continue;
       }
 
+      const signature = JSON.stringify([name, arguments_]);
+      if (signatures.has(signature)) continue;
+      signatures.add(signature);
+
       calls.push({
         id: randomUUID(),
-        name: candidate.name,
-        arguments: candidate.arguments as Record<string, unknown>,
+        name,
+        arguments: arguments_ as Record<string, unknown>,
       });
     } catch {
       // Continue when the model response contains non-tool text.
@@ -187,4 +203,42 @@ export function parseJsonToolCalls(content: string): ToolCall[] {
   }
 
   return calls;
+}
+
+function extractJsonObjects(content: string): string[] {
+  const objects: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    if (quoted) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        quoted = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      quoted = true;
+    } else if (character === "{" && depth === 0) {
+      start = index;
+      depth = 1;
+    } else if (character === "{" && depth > 0) {
+      depth += 1;
+    } else if (character === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        objects.push(content.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return objects;
 }
