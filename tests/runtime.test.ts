@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AgentRunner,
+  MultiAgentOrchestrator,
   TaskOrchestrator,
   ToolRegistry,
   type LanguageModel,
@@ -326,6 +327,74 @@ test("TaskOrchestrator stops a repeated failure instead of looping", async () =>
   assert.match(state.failure ?? "", /stuck repeating/);
 });
 
+test("MultiAgentOrchestrator hands work to a registered specialist", async () => {
+  const agents = [
+    {
+      id: "lead",
+      name: "Lead",
+      description: "Coordinates work.",
+      systemPrompt: "You coordinate work.",
+      capabilities: ["delegation"],
+      enabled: true,
+    },
+    {
+      id: "network",
+      name: "Network specialist",
+      description: "Investigates network details.",
+      systemPrompt: "You investigate network details.",
+      capabilities: ["network"],
+      enabled: true,
+    },
+  ];
+  const events: string[] = [];
+  const models = new Map([
+    [
+      "lead",
+      new FakeModel([
+        assistantResponse("", [
+          {
+            id: "handoff-1",
+            name: "handoff_agent",
+            arguments: {
+              targetAgentId: "network",
+              task: "Inspect the network configuration.",
+              context: "The user needs details.",
+              reason: "The network specialist is better suited.",
+            },
+          },
+        ]),
+        assistantResponse("The specialist reported successfully."),
+      ]),
+    ],
+    ["network", new FakeModel([assistantResponse("Network details found.")])],
+  ]);
+  const runtime = new MultiAgentOrchestrator(
+    {
+      getAgent: (id) => agents.find((agent) => agent.id === id),
+      listAgents: () => agents,
+    },
+    (agent) => models.get(agent.id)!,
+    () => new ToolRegistry(),
+    {
+      cwd: process.cwd(),
+      requestApproval: async () => {
+        throw new Error("Agent handoffs must not ask for user approval.");
+      },
+      onEvent: (event) => {
+        events.push(`${event.type}:${event.agentId}`);
+      },
+    },
+  );
+
+  const result = await runtime.run("lead", "Get network details.");
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.handoffs, 1);
+  assert.match(result.text, /specialist reported/);
+  assert.ok(events.includes("agent_started:network"));
+  assert.ok(events.includes("handoff_completed:lead"));
+});
+
 test("createIdeTools exposes the separate IDE tool catalog", () => {
   assert.deepEqual(
     createIdeTools().map((tool) => tool.name),
@@ -466,6 +535,16 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
       tokenEstimate: 2,
     });
     first.setGlobalSetting("test.setting", "persisted");
+    first.registerAgent({
+      id: "network-specialist",
+      name: "Network Specialist",
+      description: "Investigates network issues.",
+      systemPrompt: "Focus on network diagnostics.",
+      capabilities: ["network", "diagnostics"],
+      allowedTools: ["read_file", "run_command"],
+      maxSteps: 6,
+      enabled: true,
+    });
     first.close();
 
     const second = new SessionStore({
@@ -483,6 +562,16 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
         "Pinned context",
       );
       assert.equal(second.getGlobalSetting("test.setting"), "persisted");
+      assert.deepEqual(second.getAgent("network-specialist"), {
+        id: "network-specialist",
+        name: "Network Specialist",
+        description: "Investigates network issues.",
+        systemPrompt: "Focus on network diagnostics.",
+        capabilities: ["network", "diagnostics"],
+        allowedTools: ["read_file", "run_command"],
+        maxSteps: 6,
+        enabled: true,
+      });
       assert.equal(
         (await createTaskCheckpointStore(second, task.id).load())?.runId,
         "checkpoint-run",

@@ -44,6 +44,20 @@ stops repeated failure fingerprints, and enforces total-attempt and time
 limits. `createTaskCheckpointStore` connects those checkpoints to a persisted
 SQLite task.
 
+## Registry-driven agents
+
+`MultiAgentOrchestrator` loads an `AgentDefinition` by ID from an injected
+`AgentRegistry`, resolves its model and tools, and runs its prompt through the
+generic `AgentRunner` tool loop. Each active agent receives a `handoff_agent`
+tool for delegating focused work to another enabled registry agent. Handoffs
+are bounded by depth, count, cancellation, and time limits and are returned to
+the parent as normalized tool results.
+
+The session package stores agent definitions in the global SQLite database.
+Definitions contain the name, description, system prompt, capabilities,
+allowed tools, enabled state, and optional step limit. Provider routing is
+injected through the model resolver and is not embedded in the agent runtime.
+
 ## OpenAI response example
 
 Set your API key in the shell; do not place it in source files:
@@ -84,8 +98,10 @@ OLLAMA_MODEL=your-local-model
 For OpenAI, use `MODEL_PROVIDER=openai` and set `OPENAI_API_KEY` and
 `OPENAI_MODEL`. The TUI persists conversation history in SQLite and shows
 model-requested tool calls for approval before execution. Available commands
-are `/help`, `/clear`, `/new`, `/sessions`, `/resume <id>`, `/model`, and
-`/exit`.
+are `/help`, `/clear`, `/new`, `/sessions`, `/resume <id>`, `/model`, `/agents`,
+`/agent <id>`, and `/exit`. If `coding-agent` is not registered, the TUI seeds
+its SQLite registry with a disciplined default coding agent. Existing custom
+agents are preserved, and `AGENT_ID` can override the default.
 
 Session data is stored outside the repository under the platform's local
 application-data directory. Global settings use a global database, while each
