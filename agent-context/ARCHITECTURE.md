@@ -28,6 +28,21 @@ These are future boundaries, not implemented modules:
 Keep the core package independent of specific LLM vendors and agent
 frameworks.
 
+`TaskOrchestrator` is the provider-neutral multi-agent workflow boundary. It
+executes a dependency-checked plan sequentially through role-specific workers
+(`planner`, `researcher`, `coder`, `verifier`, and `reviewer`). Sequential
+execution is intentional for the first reliable path: it prevents concurrent
+agents from conflicting over the same working tree. Workers can internally use
+`AgentRunner` and receive only scoped context plus prior step results.
+
+The orchestrator checkpoints before and after each step, resumes completed
+steps, retries failures with a per-step limit, detects repeated failure
+fingerprints, and enforces total-attempt and optional wall-clock budgets. The
+session package provides `createTaskCheckpointStore`, which stores the
+serializable orchestration state inside the existing project-isolated task
+record. Provider routing remains outside this boundary and can supply a
+different `LanguageModel` to each worker.
+
 ## Explicitly Not Implemented
 
 - Advanced scheduling

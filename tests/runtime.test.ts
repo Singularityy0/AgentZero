@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AgentRunner,
+  TaskOrchestrator,
   ToolRegistry,
   type LanguageModel,
   type ModelResponse,
@@ -13,7 +14,10 @@ import {
 import { executeCommand } from "../packages/command/dist/index.js";
 import { parseJsonToolCalls } from "../packages/ollama/dist/index.js";
 import { findFiles, searchText } from "../packages/search/dist/index.js";
-import { SessionStore } from "../packages/session/dist/index.js";
+import {
+  createTaskCheckpointStore,
+  SessionStore,
+} from "../packages/session/dist/index.js";
 import { createIdeTools } from "../packages/tools/dist/index.js";
 import { WorkspaceFileService } from "../packages/workspace/dist/index.js";
 
@@ -216,6 +220,112 @@ test("AgentRunner continues an interrupted edit and verification workflow", asyn
   assert.equal(result.text, "Build completed successfully.");
 });
 
+test("TaskOrchestrator runs dependent steps in order and checkpoints progress", async () => {
+  const calls: string[] = [];
+  const checkpoints: string[][] = [];
+  const worker = async ({ step }: { step: { id: string } }) => {
+    calls.push(step.id);
+    return {
+      success: true,
+      summary: `${step.id} complete`,
+      passed: step.id === "verify" ? true : undefined,
+    };
+  };
+  const orchestrator = new TaskOrchestrator(
+    { researcher: worker, coder: worker, verifier: worker },
+    {
+      runId: "run-order",
+      checkpoint: {
+        load: async () => undefined,
+        save: async (state) => {
+          checkpoints.push([...state.completedStepIds]);
+        },
+      },
+    },
+  );
+
+  const state = await orchestrator.run({
+    objective: "Implement and verify the change.",
+    steps: [
+      {
+        id: "research",
+        role: "researcher",
+        title: "Research",
+        prompt: "Inspect the code.",
+      },
+      {
+        id: "code",
+        role: "coder",
+        title: "Code",
+        prompt: "Implement the change.",
+        dependsOn: ["research"],
+      },
+      {
+        id: "verify",
+        role: "verifier",
+        title: "Verify",
+        prompt: "Run checks.",
+        dependsOn: ["code"],
+      },
+    ],
+  });
+
+  assert.deepEqual(calls, ["research", "code", "verify"]);
+  assert.deepEqual(state.completedStepIds, ["research", "code", "verify"]);
+  assert.equal(state.stage, "completed");
+  assert.ok(checkpoints.some((completed) => completed.length === 1));
+});
+
+test("TaskOrchestrator retries a failed worker within its limit", async () => {
+  let attempts = 0;
+  const orchestrator = new TaskOrchestrator(
+    {
+      coder: async () => {
+        attempts += 1;
+        return attempts === 1
+          ? { success: false, summary: "transient failure" }
+          : { success: true, summary: "fixed" };
+      },
+    },
+    { runId: "run-retry", maxAttemptsPerStep: 2 },
+  );
+
+  const state = await orchestrator.run({
+    objective: "Retry this implementation.",
+    steps: [{ id: "code", role: "coder", title: "Code", prompt: "Implement." }],
+  });
+
+  assert.equal(attempts, 2);
+  assert.equal(state.results.code?.attempts, 2);
+  assert.equal(state.stage, "completed");
+});
+
+test("TaskOrchestrator stops a repeated failure instead of looping", async () => {
+  let attempts = 0;
+  const orchestrator = new TaskOrchestrator(
+    {
+      coder: async () => {
+        attempts += 1;
+        return {
+          success: false,
+          summary: "same failure",
+          progressKey: "same-failure",
+        };
+      },
+    },
+    { runId: "run-stuck", maxAttemptsPerStep: 5 },
+  );
+
+  const state = await orchestrator.run({
+    objective: "Stop when stuck.",
+    steps: [{ id: "code", role: "coder", title: "Code", prompt: "Implement." }],
+  });
+
+  assert.equal(attempts, 2);
+  assert.equal(state.stage, "failed");
+  assert.match(state.failure ?? "", /stuck repeating/);
+});
+
 test("createIdeTools exposes the separate IDE tool catalog", () => {
   assert.deepEqual(
     createIdeTools().map((tool) => tool.name),
@@ -329,6 +439,18 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
     first.saveMessages(session.id, messages);
     const task = first.createTask(session.id, "Test persistence");
     first.updateTask(task.id, { status: "running", currentStage: "testing" });
+    const checkpoint = createTaskCheckpointStore(first, task.id);
+    await checkpoint.save({
+      runId: "checkpoint-run",
+      objective: task.prompt,
+      stage: "implementing",
+      completedStepIds: [],
+      results: {},
+      attempts: {},
+      totalAttempts: 0,
+      startedAt: 1,
+      updatedAt: 2,
+    });
     first.appendEvent({
       sessionId: session.id,
       taskId: task.id,
@@ -361,6 +483,10 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
         "Pinned context",
       );
       assert.equal(second.getGlobalSetting("test.setting"), "persisted");
+      assert.equal(
+        (await createTaskCheckpointStore(second, task.id).load())?.runId,
+        "checkpoint-run",
+      );
     } finally {
       second.close();
       await rm(root, { recursive: true, force: true });

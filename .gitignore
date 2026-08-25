@@ -12,3 +12,6 @@ target/
 # Local tooling
 .DS_Store
 Thumbs.db
+
+# Temporary workspace files
+tmp/

@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import type { ConversationMessage } from "@agentic-runtime/core";
+import type {
+  ConversationMessage,
+  OrchestrationCheckpointStore,
+  OrchestrationState,
+} from "@agentic-runtime/core";
 
 export type SessionStatus =
   "idle" | "running" | "paused" | "completed" | "failed";
@@ -245,6 +249,17 @@ export class SessionStore {
     return task;
   }
 
+  getTask(taskId: string): TaskRecord | undefined {
+    const row = this.projectDb
+      .prepare(
+        `SELECT tasks.* FROM tasks
+         JOIN sessions ON sessions.id = tasks.session_id
+         WHERE tasks.id = ? AND sessions.project_id = ?`,
+      )
+      .get(taskId, this.project.id) as SqliteTask | undefined;
+    return row ? deserializeTask(row) : undefined;
+  }
+
   updateTask(
     taskId: string,
     update: Partial<Pick<TaskRecord, "status" | "currentStage" | "state">>,
@@ -393,6 +408,37 @@ export class SessionStore {
   }
 }
 
+export function createTaskCheckpointStore(
+  store: SessionStore,
+  taskId: string,
+): OrchestrationCheckpointStore {
+  return {
+    async load() {
+      const task = store.getTask(taskId);
+      const checkpoint = task?.state.orchestration;
+      return isOrchestrationState(checkpoint) ? checkpoint : undefined;
+    },
+    async save(state) {
+      const task = store.getTask(taskId);
+      if (!task) throw new Error(`Task not found: ${taskId}`);
+      const status =
+        state.stage === "completed"
+          ? "completed"
+          : state.stage === "failed"
+            ? "failed"
+            : state.stage === "paused"
+              ? "paused"
+              : "running";
+      store.updateTask(taskId, {
+        status,
+        currentStage: state.stage,
+        state: { ...task.state, orchestration: state },
+      });
+      store.updateSession(task.sessionId, { status });
+    },
+  };
+}
+
 export function loadProjectInstructions(rootPath: string): string[] {
   const paths = [
     join(rootPath, "AGENTS.md"),
@@ -424,6 +470,17 @@ interface SqliteEvent {
   created_at: number;
 }
 
+interface SqliteTask {
+  id: string;
+  session_id: string;
+  prompt: string;
+  status: TaskStatus;
+  current_stage: string;
+  state_json: string;
+  created_at: number;
+  updated_at: number;
+}
+
 interface SqliteContextItem {
   id: string;
   project_id: string;
@@ -449,6 +506,35 @@ function deserializeSession(row: SqliteSession): SessionRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function deserializeTask(row: SqliteTask): TaskRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    prompt: row.prompt,
+    status: row.status,
+    currentStage: row.current_stage,
+    state: JSON.parse(row.state_json) as Record<string, unknown>,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function isOrchestrationState(value: unknown): value is OrchestrationState {
+  if (!value || typeof value !== "object") return false;
+  const state = value as Partial<OrchestrationState>;
+  return (
+    typeof state.runId === "string" &&
+    typeof state.objective === "string" &&
+    typeof state.stage === "string" &&
+    Array.isArray(state.completedStepIds) &&
+    typeof state.results === "object" &&
+    typeof state.attempts === "object" &&
+    typeof state.totalAttempts === "number" &&
+    typeof state.startedAt === "number" &&
+    typeof state.updatedAt === "number"
+  );
 }
 
 function initializeGlobalDatabase(db: DatabaseSync): void {

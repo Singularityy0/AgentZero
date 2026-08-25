@@ -19,3 +19,18 @@ export type {
 export { AgentRunner } from "./agent.js";
 export type { AgentRunResult, AgentRunnerOptions } from "./agent.js";
 export type { AgentEvent } from "./events.js";
+export {
+  TaskOrchestrator,
+  type AgentRole,
+  type AgentWorker,
+  type AgentWorkRequest,
+  type AgentWorkResult,
+  type OrchestrationCheckpointStore,
+  type OrchestrationEvent,
+  type OrchestrationPlan,
+  type OrchestrationStage,
+  type OrchestrationState,
+  type OrchestrationStep,
+  type StepResult,
+  type TaskOrchestratorOptions,
+} from "./orchestrator.js";

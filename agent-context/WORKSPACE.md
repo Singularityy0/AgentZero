@@ -92,6 +92,11 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
   task/event progress, tool action cards, previews, and styled permission prompts.
 - Tool approval is fail-safe: explicitly read-only workspace/search tools run
   automatically, while mutations and all shell-backed tools require approval.
+- `@agentic-runtime/core` now exposes `TaskOrchestrator`, a bounded sequential
+  multi-agent workflow with dependency checks, retries, stuck-failure detection,
+  time/attempt budgets, and checkpoint callbacks.
+- `@agentic-runtime/session` exposes `createTaskCheckpointStore` to persist and
+  resume orchestration state inside project-isolated SQLite task records.
 - The agent runner continues explicit multi-step coding requests when a model
   stops after an intermediate tool result, requiring requested mutation,
   reread, and verification stages.

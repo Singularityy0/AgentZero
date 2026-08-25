@@ -93,3 +93,7 @@
 - Extended the Ollama fallback parser to recognize tagged and fenced JSON tool
   calls, preventing model-emitted `<tool_response>` calls from being displayed
   as ordinary assistant text.
+- Added the provider-neutral `TaskOrchestrator` with dependency-ordered role
+  workers, bounded retries, repeated-failure detection, time/attempt budgets,
+  lifecycle events, and checkpoint callbacks. Added the SQLite task checkpoint
+  adapter and tests for ordering, retries, stuck tasks, and persistence.

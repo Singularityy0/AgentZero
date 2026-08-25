@@ -6,13 +6,14 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## 1. Multi-Agent Orchestration
 
-- [~] Agent loop exists through `AgentRunner`.
+- [x] Agent loop exists through `AgentRunner`.
 - [x] Tool-call repetition detection.
 - [x] Step-limit safety handling.
 - [x] Multi-step edit, reread, and verification continuation.
-- [ ] Multiple specialized agents working together.
-- [ ] Task planning, delegation, disagreement handling, and replanning.
-- [ ] Agent spawning limits and orchestration-level failure recovery.
+- [~] Multiple specialized role workers are supported by `TaskOrchestrator`.
+- [~] Dependency-ordered task planning and bounded retry recovery exist.
+- [x] Attempt/time budgets and repeated-failure safeguards.
+- [ ] Model-driven planning, delegation, disagreement handling, and replanning.
 
 ## 2. Model and Hosting Constraints
 

@@ -34,6 +34,16 @@ formatting, and syntax checks require approval and show a preview when one is
 available. New tools require approval unless they explicitly declare
 `approval: "auto"` in their core tool definition.
 
+## Orchestration
+
+`TaskOrchestrator` in `@agentic-runtime/core` runs a bounded, sequential plan
+through role-specific workers. Steps can depend on earlier steps, and each
+worker receives the objective, scoped context, and completed results. The
+orchestrator checkpoints before and after steps, retries transient failures,
+stops repeated failure fingerprints, and enforces total-attempt and time
+limits. `createTaskCheckpointStore` connects those checkpoints to a persisted
+SQLite task.
+
 ## OpenAI response example
 
 Set your API key in the shell; do not place it in source files:
