@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type {
-  AgentDefinition,
   ConversationMessage,
   OrchestrationCheckpointStore,
   OrchestrationState,
@@ -395,56 +394,6 @@ export class SessionStore {
     return row?.value;
   }
 
-  registerAgent(agent: AgentDefinition): AgentDefinition {
-    const now = Date.now();
-    this.globalDb
-      .prepare(
-        `INSERT INTO agents
-         (id, name, description, system_prompt, capabilities_json, allowed_tools_json, max_steps, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           name = excluded.name,
-           description = excluded.description,
-           system_prompt = excluded.system_prompt,
-           capabilities_json = excluded.capabilities_json,
-           allowed_tools_json = excluded.allowed_tools_json,
-           max_steps = excluded.max_steps,
-           enabled = excluded.enabled,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        agent.id,
-        agent.name,
-        agent.description,
-        agent.systemPrompt,
-        JSON.stringify(agent.capabilities),
-        agent.allowedTools ? JSON.stringify(agent.allowedTools) : null,
-        agent.maxSteps ?? null,
-        agent.enabled ? 1 : 0,
-        now,
-        now,
-      );
-    return agent;
-  }
-
-  getAgent(id: string): AgentDefinition | undefined {
-    const row = this.globalDb
-      .prepare("SELECT * FROM agents WHERE id = ?")
-      .get(id) as SqliteAgent | undefined;
-    return row ? deserializeAgent(row) : undefined;
-  }
-
-  listAgents(): AgentDefinition[] {
-    const rows = this.globalDb
-      .prepare("SELECT * FROM agents ORDER BY name, id")
-      .all() as unknown as SqliteAgent[];
-    return rows.map(deserializeAgent);
-  }
-
-  removeAgent(id: string): void {
-    this.globalDb.prepare("DELETE FROM agents WHERE id = ?").run(id);
-  }
-
   buildContext(taskId: string | undefined, maxCharacters: number): string {
     const items = this.listContextItems(taskId);
     let remaining = maxCharacters;
@@ -532,19 +481,6 @@ interface SqliteTask {
   updated_at: number;
 }
 
-interface SqliteAgent {
-  id: string;
-  name: string;
-  description: string;
-  system_prompt: string;
-  capabilities_json: string;
-  allowed_tools_json: string | null;
-  max_steps: number | null;
-  enabled: number;
-  created_at: number;
-  updated_at: number;
-}
-
 interface SqliteContextItem {
   id: string;
   project_id: string;
@@ -585,21 +521,6 @@ function deserializeTask(row: SqliteTask): TaskRecord {
   };
 }
 
-function deserializeAgent(row: SqliteAgent): AgentDefinition {
-  return {
-    id: row.id,
-    name: row.name,
-    description: row.description,
-    systemPrompt: row.system_prompt,
-    capabilities: JSON.parse(row.capabilities_json) as string[],
-    allowedTools: row.allowed_tools_json
-      ? (JSON.parse(row.allowed_tools_json) as string[])
-      : undefined,
-    maxSteps: row.max_steps ?? undefined,
-    enabled: row.enabled === 1,
-  };
-}
-
 function isOrchestrationState(value: unknown): value is OrchestrationState {
   if (!value || typeof value !== "object") return false;
   const state = value as Partial<OrchestrationState>;
@@ -626,18 +547,6 @@ function initializeGlobalDatabase(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS credential_references (
       provider_id TEXT PRIMARY KEY,
       secret_reference TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS agents (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      description TEXT NOT NULL,
-      system_prompt TEXT NOT NULL,
-      capabilities_json TEXT NOT NULL,
-      allowed_tools_json TEXT,
-      max_steps INTEGER,
-      enabled INTEGER NOT NULL DEFAULT 1,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
     );
   `);
 }

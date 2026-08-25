@@ -97,12 +97,6 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
   time/attempt budgets, and checkpoint callbacks.
 - `@agentic-runtime/session` exposes `createTaskCheckpointStore` to persist and
   resume orchestration state inside project-isolated SQLite task records.
-- `SessionStore` persists registry-driven agent definitions, and
-  `MultiAgentOrchestrator` resolves agents by ID with bounded `handoff_agent`
-  delegation instead of hardcoded role implementations.
-- The TUI uses `MultiAgentOrchestrator` directly, bootstraps a SQLite-backed
-  `coding-agent` when needed, and supports `/agents` plus `/agent <id>` for
-  selecting registered agents.
 - The agent runner continues explicit multi-step coding requests when a model
   stops after an intermediate tool result, requiring requested mutation,
   reread, and verification stages.

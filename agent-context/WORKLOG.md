@@ -97,13 +97,3 @@
   workers, bounded retries, repeated-failure detection, time/attempt budgets,
   lifecycle events, and checkpoint callbacks. Added the SQLite task checkpoint
   adapter and tests for ordering, retries, stuck tasks, and persistence.
-- Added SQLite-backed `AgentDefinition` records and the registry-driven
-  `MultiAgentOrchestrator`. Agents are resolved by ID, receive per-agent model
-  and tool resolvers, and can hand off focused work through bounded
-  `handoff_agent` calls. Added registry and specialist-handoff tests.
-- Wired the TUI through `MultiAgentOrchestrator`, including SQLite agent
-  bootstrap/selection, `/agents`, `/agent <id>`, history forwarding, nested
-  handoff display, and persisted multi-agent events.
-- Added a persistent default `coding-agent` definition with disciplined inspect,
-  edit, delegate, and verify instructions. The TUI seeds it only when missing
-  and selects it by default while preserving custom agents.
