@@ -18,10 +18,11 @@ These are future boundaries, not implemented modules:
 - `openai`: OpenAI provider adapter and response API boundary
 - `ollama`: Ollama local provider adapter and response API boundary
 - `tui`: terminal presentation layer depending on the OpenAI provider
-- `powershell`: concrete PowerShell tool implementation
-- `tools`: semantic IDE tools using workspace/search services and PowerShell
+- `command`: cross-platform native shell command executor
+- `tools`: semantic IDE tools using workspace/search services and command execution
 - `workspace`: workspace-bound file service with hashes, diffs, and atomic writes
 - `search`: packaged ripgrep search service
+- `session`: SQLite persistence for global settings and project state
 - future Rust components: performance-sensitive or native integrations
 
 Keep the core package independent of specific LLM vendors and agent
@@ -42,14 +43,14 @@ The core `LanguageModel` interface is provider-neutral. `OpenAIModel` and
 `MODEL_PROVIDER`; the `AgentRunner` owns the model/tool loop, while the TUI
 owns presentation and approval decisions.
 
-PowerShell execution is isolated in its own package. Commands require approval,
-run with `-NoProfile` and `-NonInteractive`, have a timeout and output limit,
-and do not receive the OpenAI API key.
+Command execution is isolated in its own package. The executor selects
+`cmd.exe` on Windows and `/bin/sh` on Linux/macOS, unless explicitly configured.
+Commands require approval, have a timeout and output limit, and do not receive
+the OpenAI API key.
 
 The IDE-facing tools in `packages/tools` use Node-based workspace and search
-services for IDE operations. The generic `run_powershell_command` tool and
-project command tools use the PowerShell executor for operations that require a
-shell.
+services for IDE operations. The generic `run_command` tool and project command
+tools use the platform command executor for operations that require a shell.
 
 The `workspace` service uses `diff` to generate previews and rejects stale file
 changes when the expected content no longer matches. The `search` service uses
@@ -58,6 +59,12 @@ changes when the expected content no longer matches. The `search` service uses
 `ToolRegistry` validates every model argument object with `ajv` before the
 `AgentRunner` asks for approval. Mutating tools provide a preview to the TUI;
 the TUI displays that preview before allowing execution.
+
+Session persistence is split by scope: global SQLite stores user settings and
+credential references, while a project SQLite database stores sessions, tasks,
+events, context items, and future checkpoints. The project ID is derived from
+the canonical project root, and all project queries are scoped to that ID.
+The TUI is only the current client; it does not own durable conversation state.
 
 `AgentRunner` also tracks tool name/argument signatures during a run. If a
 model repeats an identical call, it stops safely and returns the previous tool

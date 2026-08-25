@@ -4,7 +4,7 @@ Minimal TypeScript monorepo workspace for building an agent runtime.
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 22.5 or newer
 - pnpm 9 or newer
 
 ## Getting started
@@ -16,14 +16,23 @@ pnpm build
 
 The workspace contains framework-neutral runtime contracts in
 `@agentic-runtime/core`, an `@agentic-runtime/openai` provider, a guarded
-`@agentic-runtime/powershell` backend, separate IDE tools in
-`@agentic-runtime/tools`, and an interactive TUI.
+cross-platform command backend in `@agentic-runtime/command`, separate IDE
+tools in `@agentic-runtime/tools`, and an interactive TUI.
 
 IDE tooling uses established libraries: `diff` for patches and diffs, `ajv` for
 tool argument validation, `@vscode/ripgrep` for fast search, and `execa` for
-process execution. File operations use Node's workspace service; PowerShell is
-reserved for explicit shell and project commands. Language-specific
+process execution. File operations use Node's workspace service; command
+execution uses the host operating system's native shell. Language-specific
 intelligence is intentionally not included yet.
+
+## Tool approval policy
+
+The runtime uses a fail-safe tool approval policy. Read-only workspace tools
+(`list_directory`, `read_file`, `find_files`, and `search_text`) run
+automatically. File mutations, PowerShell commands, builds, code execution,
+formatting, and syntax checks require approval and show a preview when one is
+available. New tools require approval unless they explicitly declare
+`approval: "auto"` in their core tool definition.
 
 ## OpenAI response example
 
@@ -63,9 +72,15 @@ OLLAMA_MODEL=your-local-model
 ```
 
 For OpenAI, use `MODEL_PROVIDER=openai` and set `OPENAI_API_KEY` and
-`OPENAI_MODEL`. The TUI keeps conversation history and shows model-requested
-tool calls for approval before execution. Available commands are `/help`,
-`/clear`, `/model`, and `/exit`.
+`OPENAI_MODEL`. The TUI persists conversation history in SQLite and shows
+model-requested tool calls for approval before execution. Available commands
+are `/help`, `/clear`, `/new`, `/sessions`, `/resume <id>`, `/model`, and
+`/exit`.
+
+Session data is stored outside the repository under the platform's local
+application-data directory. Global settings use a global database, while each
+project has a separate database keyed by the canonical project path. API keys
+are still supplied through `.env` and are not stored in SQLite.
 
 ## Scripts
 

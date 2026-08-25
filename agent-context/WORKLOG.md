@@ -60,6 +60,11 @@
   `tool_name`) and verified the requested model-file edit/build workflow.
 - Changed step-limit handling to return a visible warning instead of failing the
   entire TUI request.
+- Added SQLite-backed global/project session management with persisted sessions,
+  tasks, events, context items, and global settings, plus `/new`, `/sessions`,
+  and `/resume` TUI commands.
+- Verified the TUI starts with SQLite session state and the session command
+  path; full persistence is covered by the automated test suite.
 - Strengthened workflow continuation prompts with the original user request and
   explicit next-tool requirements after the model stopped at `read_file`.
 - Removed a hallucinated nonexistent `constants.js` import from the test edit,
@@ -76,3 +81,15 @@
 - Verified Ollama connectivity and the complete local agent loop: the model
   requested `list_directory`, PowerShell-backed execution completed, and the
   model summarized the result.
+- Reworked the TUI presentation layer with ANSI color, live model activity,
+  task progress, tool cards, previews, and clearer approval prompts. Verified
+  build, lint, formatting, and all existing runtime tests.
+- Added explicit tool approval metadata. Read-only workspace/search tools are
+  auto-approved; mutations and shell-backed commands remain approval-gated by
+  default, with a regression test for the auto-approval path.
+- Replaced the PowerShell-only command boundary with the cross-platform
+  `@agentic-runtime/command` package. Commands now use `cmd.exe` on Windows and
+  `/bin/sh` on Linux/macOS, with the agent-facing tool renamed to `run_command`.
+- Extended the Ollama fallback parser to recognize tagged and fenced JSON tool
+  calls, preventing model-emitted `<tool_response>` calls from being displayed
+  as ordinary assistant text.

@@ -15,6 +15,7 @@
     "@agentic-runtime/core": "workspace:*",
     "@agentic-runtime/openai": "workspace:*",
     "@agentic-runtime/ollama": "workspace:*",
+    "@agentic-runtime/session": "workspace:*",
     "@agentic-runtime/tools": "workspace:*",
     "dotenv": "^16.4.7"
   }

@@ -10,8 +10,10 @@ import {
   type ModelResponse,
   type Tool,
 } from "../packages/core/dist/index.js";
-import { executePowerShellCommand } from "../packages/powershell/dist/index.js";
+import { executeCommand } from "../packages/command/dist/index.js";
+import { parseJsonToolCalls } from "../packages/ollama/dist/index.js";
 import { findFiles, searchText } from "../packages/search/dist/index.js";
+import { SessionStore } from "../packages/session/dist/index.js";
 import { createIdeTools } from "../packages/tools/dist/index.js";
 import { WorkspaceFileService } from "../packages/workspace/dist/index.js";
 
@@ -108,6 +110,31 @@ test("AgentRunner returns a denied tool result to the model", async () => {
   assert.match(toolMessage?.content ?? "", /denied by the user/);
 });
 
+test("AgentRunner auto-approves explicitly read-only tools", async () => {
+  const registry = new ToolRegistry().register({
+    ...echoTool(),
+    approval: "auto",
+  });
+  const model = new FakeModel([
+    assistantResponse("", [
+      { id: "call-auto", name: "echo", arguments: { value: "safe" } },
+    ]),
+    assistantResponse("The read-only tool completed."),
+  ]);
+  let approvalRequests = 0;
+
+  const result = await new AgentRunner(model, registry, {
+    cwd: process.cwd(),
+    requestApproval: async () => {
+      approvalRequests += 1;
+      return false;
+    },
+  }).run([{ role: "user", content: "Inspect it." }]);
+
+  assert.equal(approvalRequests, 0);
+  assert.equal(result.text, "The read-only tool completed.");
+});
+
 test("AgentRunner reports the tool step limit without throwing", async () => {
   const call = { id: "call-3", name: "echo", arguments: { value: "loop" } };
   const registry = new ToolRegistry().register(echoTool());
@@ -201,7 +228,7 @@ test("createIdeTools exposes the separate IDE tool catalog", () => {
       "apply_patch",
       "find_files",
       "search_text",
-      "run_powershell_command",
+      "run_command",
       "compile_code",
       "run_code",
       "format_code",
@@ -258,9 +285,11 @@ test("search uses ripgrep for file and text discovery", async () => {
   );
 });
 
-test("PowerShell executor returns bounded command results", async () => {
-  const result = await executePowerShellCommand(
-    "Write-Output agentic-runtime-test",
+test("Command executor runs a native shell command with bounded results", async () => {
+  const result = await executeCommand(
+    process.platform === "win32"
+      ? "echo agentic-runtime-test"
+      : "printf agentic-runtime-test",
     {
       cwd: process.cwd(),
       signal: new AbortController().signal,
@@ -271,4 +300,70 @@ test("PowerShell executor returns bounded command results", async () => {
   assert.equal(result.exitCode, 0);
   assert.equal(result.isError, false);
   assert.match(result.output, /agentic-runtime-test/);
+});
+
+test("Ollama fallback parses tagged JSON tool calls", () => {
+  const calls = parseJsonToolCalls(`<tool_response>
+{
+  "name": "run_command",
+  "arguments": { "command": "ipconfig" }
+}
+</tool_response>`);
+
+  assert.deepEqual(calls[0]?.name, "run_command");
+  assert.deepEqual(calls[0]?.arguments, { command: "ipconfig" });
+});
+
+test("SessionStore persists project-isolated sessions, tasks, events, and context", () => {
+  return (async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentic-session-"));
+    const globalDatabasePath = join(root, "global.db");
+    const projectDatabasePath = join(root, "project.db");
+    const first = new SessionStore({
+      projectRoot: root,
+      globalDatabasePath,
+      projectDatabasePath,
+    });
+    const session = first.createSession("Persistent test");
+    const messages = [{ role: "user" as const, content: "Remember this." }];
+    first.saveMessages(session.id, messages);
+    const task = first.createTask(session.id, "Test persistence");
+    first.updateTask(task.id, { status: "running", currentStage: "testing" });
+    first.appendEvent({
+      sessionId: session.id,
+      taskId: task.id,
+      type: "test_event",
+      payload: { ok: true },
+    });
+    first.addContextItem({
+      taskId: task.id,
+      source: "user",
+      content: "Pinned context",
+      priority: "critical",
+      pinned: true,
+      tokenEstimate: 2,
+    });
+    first.setGlobalSetting("test.setting", "persisted");
+    first.close();
+
+    const second = new SessionStore({
+      projectRoot: root,
+      globalDatabasePath,
+      projectDatabasePath,
+    });
+    try {
+      const restored = second.getSession(session.id);
+      assert.equal(restored?.title, "Persistent test");
+      assert.deepEqual(restored?.messages, messages);
+      assert.equal(second.listEvents(session.id)[0]?.type, "test_event");
+      assert.equal(
+        second.listContextItems(task.id)[0]?.content,
+        "Pinned context",
+      );
+      assert.equal(second.getGlobalSetting("test.setting"), "persisted");
+    } finally {
+      second.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  })();
 });

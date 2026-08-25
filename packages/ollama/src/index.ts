@@ -87,7 +87,7 @@ export class OllamaModel implements LanguageModel {
       const toolCalls =
         nativeToolCalls.length > 0
           ? nativeToolCalls
-          : parseJsonToolCall(body.message.content);
+          : parseJsonToolCalls(body.message.content);
       const message: AssistantMessage = {
         role: "assistant",
         content: body.message.content,
@@ -142,10 +142,21 @@ function toToolCall(call: OllamaToolCall): ToolCall {
   };
 }
 
-function parseJsonToolCall(content: string): ToolCall[] {
-  const candidates = [content.trim(), ...content.split(/\r?\n/)].filter(
-    (value, index, values) => value && values.indexOf(value) === index,
-  );
+export function parseJsonToolCalls(content: string): ToolCall[] {
+  const taggedCandidates = [
+    ...content.matchAll(
+      /<(?:tool_response|tool_call)>\s*([\s\S]*?)\s*<\/(?:tool_response|tool_call)>/gi,
+    ),
+  ].map((match) => match[1] ?? "");
+  const fencedCandidates = [
+    ...content.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/gi),
+  ].map((match) => match[1] ?? "");
+  const candidates = [
+    content.trim(),
+    ...taggedCandidates,
+    ...fencedCandidates,
+    ...content.split(/\r?\n/),
+  ].filter((value, index, values) => value && values.indexOf(value) === index);
   const calls: ToolCall[] = [];
 
   for (const candidateText of candidates) {

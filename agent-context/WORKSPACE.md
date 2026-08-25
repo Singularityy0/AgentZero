@@ -10,7 +10,8 @@
 
 ## Toolchain
 
-- Node.js 20 or newer is required; the setup was verified with Node.js 24.
+- Node.js 22.5 or newer is required for the built-in `node:sqlite` API; the
+  setup was verified with Node.js 24.
 - pnpm 9 or newer is required.
 - The pinned package manager is `pnpm@9.15.5`.
 - TypeScript uses strict checking, ES2022, and NodeNext modules.
@@ -25,6 +26,7 @@ packages/tui/src/        Interactive terminal chat interface
 packages/tools/src/      Separate IDE-facing tools
 packages/workspace/src/  Safe file operations and patch/diff service
 packages/search/src/     Ripgrep-backed text and file search
+packages/session/src/    SQLite global/project/session persistence
 examples/                Placeholder for runnable examples
 rust/                    Placeholder for future Rust packages/components
 agent-context/           Persistent context for coding agents
@@ -50,7 +52,7 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
 
 - The workspace installs successfully with pnpm.
 - `@agentic-runtime/core`, `@agentic-runtime/openai`, and
-  `@agentic-runtime/ollama`, `@agentic-runtime/powershell`,
+  `@agentic-runtime/ollama`, `@agentic-runtime/command`,
   `@agentic-runtime/search`, `@agentic-runtime/tools`,
   `@agentic-runtime/tui`, and `@agentic-runtime/workspace` compile successfully.
 - ESLint and Prettier checks pass.
@@ -60,14 +62,15 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
   Responses API.
 - `@agentic-runtime/ollama` implements the same `LanguageModel` interface using
   Ollama's `/api/chat` endpoint and supports structured tool calls.
-- `@agentic-runtime/tui` exposes the `agentic-tui` CLI and streams a simple
-  multi-turn conversation with approval-based tool execution. It loads `.env`
-  and selects the provider using `MODEL_PROVIDER`.
-- `@agentic-runtime/powershell` executes approved commands with `pwsh`, a
-  timeout, bounded output, a sanitized environment, and `execa` process
-  handling.
+- `@agentic-runtime/tui` exposes the `agentic-tui` CLI, loads `.env`, selects
+  the provider using `MODEL_PROVIDER`, and persists sessions through SQLite.
+- `@agentic-runtime/session` separates global settings from project-isolated
+  sessions, tasks, events, and context items. It supports session resume.
+- `@agentic-runtime/command` executes approved commands through the host native
+  shell (`cmd.exe` on Windows, `/bin/sh` on Linux/macOS), with a timeout,
+  bounded output, a sanitized environment, and `execa` process handling.
 - `@agentic-runtime/tools` exposes separate `list_directory`, `read_file`,
-  `write_file`, `create_file`, `delete_file`, `run_powershell_command`,
+  `write_file`, `create_file`, `delete_file`, `run_command`,
   `apply_patch`, `find_files`, `search_text`, `compile_code`, `run_code`,
   `format_code`, and `syntax_check` tools.
 - `@agentic-runtime/workspace` provides workspace-bound file reads, writes,
@@ -85,6 +88,10 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
 - The agent runner stops identical repeated tool calls within one run and
   returns the previous result instead of exhausting the step limit; safety-limit
   runs now return a visible warning instead of throwing.
+- The TUI now renders a colorful ANSI activity view with model-thinking status,
+  task/event progress, tool action cards, previews, and styled permission prompts.
+- Tool approval is fail-safe: explicitly read-only workspace/search tools run
+  automatically, while mutations and all shell-backed tools require approval.
 - The agent runner continues explicit multi-step coding requests when a model
   stops after an intermediate tool result, requiring requested mutation,
   reread, and verification stages.
@@ -98,5 +105,6 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
   rereading, and build execution.
 - `tests/runtime.test.ts` covers registry behavior, agent tool execution,
   approval denial, step limits, the IDE tool catalog, workspace diffs/conflicts,
-  ripgrep search, and PowerShell execution.
-- No git repository has been initialized in this directory yet.
+  ripgrep search, and cross-platform command execution.
+- Git repository initialized on `main`; the initial workspace commit is
+  `bca0b3b`. The configured GitHub push was blocked by network/authentication.
