@@ -2,6 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Rigza - AgentZero</title>
@@ -12,92 +15,114 @@
         
         <!-- Pane 1: Chat & Thoughts -->
         <div id="chat-panel" class="pane">
-          <h2>Agent Chat & Thoughts</h2>
-          <div class="chat-history" id="chat-history">
+          <div class="pane-header">
+            <span class="status-dot pulse"></span>
+            AI Chat
+          </div>
+          <div class="pane-content chat-history" id="chat-history">
             <div class="message user">
-              <span class="sender">User</span>
-              <p>Optimize the sorting algorithm in <span class="file-tag" data-file="singu.rs" data-line="4-13">singu.rs:4-13</span></p>
+              <span class="sender">You</span>
+              <div class="bubble">
+                Optimize the sorting algorithm in <span class="file-tag" data-file="singu.rs" data-line="4-13">singu.rs:4-13</span>
+              </div>
             </div>
             <div class="message agent">
-              <span class="sender">Rigza Architect</span>
-              <div class="thought-stream">
-                <span class="pulsating-dot"></span> Thinking: I will replace bubble sort with a faster algorithm...
+              <span class="sender">Rigza</span>
+              <div class="bubble">
+                <div class="thought-stream">
+                  <span class="status-dot pulse" style="background: #60a5fa;"></span> Writing <span class="file-tag">singu.rs</span>
+                </div>
+                I have drafted a patch replacing bubble sort with `sort_unstable()`. Please review the diff.
               </div>
-              <p>I have drafted a patch. Please review the diff in the adjacent pane.</p>
             </div>
           </div>
           <div class="chat-input-container">
-            <input type="text" id="chat-input" placeholder="Ask AgentZero... (use /bytheway for zero-context)" />
-            <button id="send-btn">Send</button>
+            <div class="chat-input-wrapper">
+              <input type="text" id="chat-input" placeholder="Ask Rigza anything..." />
+              <kbd class="enter-key">⏎</kbd>
+            </div>
           </div>
         </div>
 
         <!-- Pane 2: Diff Reviewer -->
         <div id="diff-panel" class="pane">
-          <h2>Visual AST Diff Reviewer</h2>
-          <div class="diff-viewer" id="diff-viewer">
+          <div class="pane-header">
+            <span class="status-dot" style="background: #f59e0b;"></span>
+            Visual Diff Reviewer
+          </div>
+          <div class="pane-content diff-viewer" id="diff-viewer">
             <div class="diff-hunk">
               <div class="hunk-header">
-                <span>singu.rs:4-13</span>
+                <span>singu.rs</span>
                 <div class="hunk-actions">
-                  <button class="btn-approve" title="Approve [a]">A</button>
-                  <button class="btn-reject" title="Reject [r]">R</button>
+                  <button class="btn-approve" title="Approve [a]">Approve</button>
+                  <button class="btn-reject" title="Reject [r]">Reject</button>
                 </div>
               </div>
               <pre class="diff-content">
-<span class="diff-remove">- fn bubble_sort(arr: &mut [i32]) {</span>
-<span class="diff-remove">-     // ... bubble sort implementation</span>
-<span class="diff-remove">- }</span>
-<span class="diff-add">+ fn quick_sort(arr: &mut [i32]) {</span>
-<span class="diff-add">+     arr.sort_unstable();</span>
-<span class="diff-add">+ }</span>
+<div class="diff-line diff-remove">- fn bubble_sort(arr: &mut [i32]) {</div>
+<div class="diff-line diff-remove">-     // ... bubble sort implementation</div>
+<div class="diff-line diff-remove">- }</div>
+<div class="diff-line diff-add">+ fn quick_sort(arr: &mut [i32]) {</div>
+<div class="diff-line diff-add">+     arr.sort_unstable();</div>
+<div class="diff-line diff-add">+ }</div>
               </pre>
             </div>
           </div>
         </div>
 
-        <!-- Pane 3: Observability DAG -->
-        <div id="dag-panel" class="pane">
-          <h2>Observability DAG</h2>
-          <div class="metrics">
-            <div class="metric-card">
-              <span>S_task Cost</span>
-              <strong>$0.002</strong>
-            </div>
-            <div class="metric-card">
-              <span>Latency</span>
-              <strong>1.2s</strong>
-            </div>
+        <!-- Pane 4: Settings Vault -->
+        <div id="vault-panel" class="pane">
+          <div class="pane-header">
+            <span class="status-dot" style="background: #10b981;"></span>
+            API Vault
           </div>
-          <div class="dag-visualizer">
-            <div class="dag-node success">Architect (Groq)</div>
-            <div class="dag-edge">↓</div>
-            <div class="dag-node active">Coder (Ollama)</div>
+          <div class="pane-content">
+            <form id="vault-form">
+              <div class="input-group">
+                <label for="groq-key">Groq API Key</label>
+                <input id="groq-key" class="vault-input" type="password" placeholder="gsk_..." />
+              </div>
+              
+              <div class="input-group">
+                <label for="gemini-key">Gemini API Key</label>
+                <input id="gemini-key" class="vault-input" type="password" placeholder="AIzaSy..." />
+              </div>
+
+              <div class="input-group">
+                <label for="cerebras-key">Cerebras API Key</label>
+                <input id="cerebras-key" class="vault-input" type="password" placeholder="csk_..." />
+              </div>
+
+              <button type="submit" class="btn-primary" style="width: 100%; margin-top: 0.5rem;">Save to Vault</button>
+            </form>
+            <p id="vault-status" style="font-size: 0.7rem; color: #10b981; margin-top: 0.5rem; text-align: center;"></p>
           </div>
         </div>
 
-        <!-- Pane 4: Settings Vault -->
-        <div id="vault-panel" class="pane">
-          <h2>API Key Vault</h2>
-          <form id="vault-form">
-            <div class="input-group">
-              <label for="groq-key">Groq API Key</label>
-              <input id="groq-key" type="password" placeholder="gsk_..." />
+        <!-- Pane 3: Observability DAG -->
+        <div id="dag-panel" class="pane">
+          <div class="pane-header">
+            <span class="status-dot" style="background: #8b5cf6;"></span>
+            Observability DAG
+          </div>
+          <div class="pane-content" style="align-items: center;">
+            <div class="metrics" style="width: 100%; display: flex; gap: 1rem; margin-bottom: 1.5rem;">
+              <div class="metric-card">
+                <span>S_task Cost</span>
+                <strong>$0.002</strong>
+              </div>
+              <div class="metric-card">
+                <span>Latency</span>
+                <strong>1.2s</strong>
+              </div>
             </div>
-            
-            <div class="input-group">
-              <label for="gemini-key">Gemini API Key</label>
-              <input id="gemini-key" type="password" placeholder="AIzaSy..." />
+            <div class="dag-visualizer" style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem; width: 100%;">
+              <div class="dag-node">Architect (Groq)</div>
+              <div style="color: var(--text-muted); font-size: 0.8rem;">↓</div>
+              <div class="dag-node active">Coder (Ollama)</div>
             </div>
-
-            <div class="input-group">
-              <label for="cerebras-key">Cerebras API Key</label>
-              <input id="cerebras-key" type="password" placeholder="csk_..." />
-            </div>
-
-            <button type="submit">Save to Vault</button>
-          </form>
-          <p id="vault-status"></p>
+          </div>
         </div>
 
       </div>
