@@ -16,13 +16,9 @@
     }
   },
   "dependencies": {
-    "@agentic-runtime/command": "workspace:*",
     "@agentic-runtime/core": "workspace:*",
+    "@agentic-runtime/command": "workspace:*",
     "@agentic-runtime/search": "workspace:*",
-    "@agentic-runtime/workspace": "workspace:*",
-    "@mozilla/readability": "^0.6.0",
-    "crawlee": "^3.18.1",
-    "jsdom": "^30.0.1",
-    "simple-git": "^3.36.0"
+    "@agentic-runtime/workspace": "workspace:*"
   }
 }

@@ -1,15 +1,8 @@
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import matter from "gray-matter";
 import type {
   AgentDefinition,
   ConversationMessage,
@@ -407,15 +400,14 @@ export class SessionStore {
     this.globalDb
       .prepare(
         `INSERT INTO agents
-         (id, name, description, system_prompt, capabilities_json, allowed_tools_json, delegates_to, max_steps, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (id, name, description, system_prompt, capabilities_json, allowed_tools_json, max_steps, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            description = excluded.description,
            system_prompt = excluded.system_prompt,
            capabilities_json = excluded.capabilities_json,
            allowed_tools_json = excluded.allowed_tools_json,
-           delegates_to = excluded.delegates_to,
            max_steps = excluded.max_steps,
            enabled = excluded.enabled,
            updated_at = excluded.updated_at`,
@@ -427,22 +419,12 @@ export class SessionStore {
         agent.systemPrompt,
         JSON.stringify(agent.capabilities),
         agent.allowedTools ? JSON.stringify(agent.allowedTools) : null,
-        agent.delegatesTo ?? null,
         agent.maxSteps ?? null,
         agent.enabled ? 1 : 0,
         now,
         now,
       );
     return agent;
-  }
-
-  updateAgent(
-    id: string,
-    updates: Partial<Omit<AgentDefinition, "id">>,
-  ): AgentDefinition {
-    const current = this.getAgent(id);
-    if (!current) throw new Error(`Agent not found: ${id}`);
-    return this.registerAgent({ ...current, ...updates, id });
   }
 
   getAgent(id: string): AgentDefinition | undefined {
@@ -459,11 +441,8 @@ export class SessionStore {
     return rows.map(deserializeAgent);
   }
 
-  removeAgent(id: string): boolean {
-    const result = this.globalDb
-      .prepare("DELETE FROM agents WHERE id = ?")
-      .run(id);
-    return result.changes > 0;
+  removeAgent(id: string): void {
+    this.globalDb.prepare("DELETE FROM agents WHERE id = ?").run(id);
   }
 
   buildContext(taskId: string | undefined, maxCharacters: number): string {
@@ -512,77 +491,14 @@ export function createTaskCheckpointStore(
 }
 
 export function loadProjectInstructions(rootPath: string): string[] {
-  const path = join(rootPath, "AGENTS.md");
-  return existsSync(path)
-    ? [`## ${path}\n\n${readFileSync(path, "utf8")}`]
-    : [];
-}
-
-export function loadProjectAgents(rootPath: string): AgentDefinition[] {
-  const agentsPath = join(rootPath, ".agentic", "agents");
-  if (!existsSync(agentsPath)) return [];
-
-  return readdirSync(agentsPath, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => parseAgentFile(join(agentsPath, entry.name)));
-}
-
-function parseAgentFile(path: string): AgentDefinition {
-  const parsed = matter(readFileSync(path, "utf8"));
-  const data = parsed.data as Record<string, unknown>;
-  const id = requireAgentField(data, "id", path);
-  const name = requireAgentField(data, "name", path);
-  const description = requireAgentField(data, "description", path);
-  const systemPrompt = parsed.content.trim();
-  if (!systemPrompt) throw new Error(`Agent file has an empty prompt: ${path}`);
-
-  const maxSteps = data.maxSteps;
-  if (
-    maxSteps !== undefined &&
-    (typeof maxSteps !== "number" ||
-      !Number.isInteger(maxSteps) ||
-      maxSteps < 1)
-  ) {
-    throw new Error(`Agent file has an invalid maxSteps value: ${path}`);
-  }
-
-  return {
-    id,
-    name,
-    description,
-    systemPrompt,
-    capabilities: stringList(data.capabilities),
-    allowedTools: stringList(data.allowedTools),
-    ...(typeof data.delegatesTo === "string" && data.delegatesTo.trim()
-      ? { delegatesTo: data.delegatesTo.trim() }
-      : {}),
-    ...(typeof maxSteps === "number" ? { maxSteps } : {}),
-    enabled: data.enabled !== false,
-  };
-}
-
-function requireAgentField(
-  data: Record<string, unknown>,
-  field: string,
-  path: string,
-): string {
-  const value = data[field];
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`Agent file requires a non-empty ${field}: ${path}`);
-  }
-  return value.trim();
-}
-
-function stringList(value: unknown): string[] {
-  if (value === undefined) return [];
-  const values = Array.isArray(value) ? value : [value];
-  if (values.some((item) => typeof item !== "string" || !item.trim())) {
-    throw new Error(
-      "Agent capabilities and allowedTools must contain strings.",
-    );
-  }
-  return [...new Set(values.map((item) => (item as string).trim()))];
+  const paths = [
+    join(rootPath, "AGENTS.md"),
+    join(rootPath, "agent-context", "WORKSPACE.md"),
+    join(rootPath, "agent-context", "ARCHITECTURE.md"),
+  ];
+  return paths
+    .filter(existsSync)
+    .map((path) => `## ${path}\n\n${readFileSync(path, "utf8")}`);
 }
 
 interface SqliteSession {
@@ -623,7 +539,6 @@ interface SqliteAgent {
   system_prompt: string;
   capabilities_json: string;
   allowed_tools_json: string | null;
-  delegates_to: string | null;
   max_steps: number | null;
   enabled: number;
   created_at: number;
@@ -680,7 +595,6 @@ function deserializeAgent(row: SqliteAgent): AgentDefinition {
     allowedTools: row.allowed_tools_json
       ? (JSON.parse(row.allowed_tools_json) as string[])
       : undefined,
-    ...(row.delegates_to ? { delegatesTo: row.delegates_to } : {}),
     maxSteps: row.max_steps ?? undefined,
     enabled: row.enabled === 1,
   };
@@ -720,18 +634,12 @@ function initializeGlobalDatabase(db: DatabaseSync): void {
       system_prompt TEXT NOT NULL,
       capabilities_json TEXT NOT NULL,
       allowed_tools_json TEXT,
-      delegates_to TEXT,
       max_steps INTEGER,
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
   `);
-  try {
-    db.exec("ALTER TABLE agents ADD COLUMN delegates_to TEXT");
-  } catch {
-    // Existing databases already have the column.
-  }
 }
 
 function initializeProjectDatabase(db: DatabaseSync): void {

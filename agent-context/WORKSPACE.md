@@ -103,22 +103,13 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
 - The TUI uses `MultiAgentOrchestrator` directly, maintains SQLite-backed
   `general` and `coding-agent` definitions, defaults to the meta-agent, and
   supports `/agents` plus `/agent <id>` for selection.
-- Restricted agents can use `delegatesTo`; blocked tool calls are converted to
-  automatic specialist handoffs instead of being executed or silently lost.
-- Custom agents can be created, edited, listed, selected, and deleted from the
-  TUI with `/agent-create`, `/agent-edit`, `/agents`, `/agent`, and
-  `/agent-delete`; definitions persist in the global SQLite database.
-- Versioned project agents can be defined in `.agentic/agents/*.md` using YAML
-  frontmatter plus a Markdown system prompt; these are imported at TUI startup.
 - The agent runner continues explicit multi-step coding requests when a model
   stops after an intermediate tool result, requiring requested mutation,
   reread, and verification stages.
 - No-op mutations are detected and do not count as a changed file when deciding
   whether a reread is required.
-- The default agent safety budget is 24 model steps to allow read, edit,
+- The default agent safety budget is 12 model steps to allow read, edit,
   approval, verification, and final-response workflows.
-- Ollama requests time out after 45 seconds by default; `OLLAMA_TIMEOUT_MS` can
-  override the interactive request limit.
 - An isolated Ollama IDE test successfully created and read a TypeScript file
   through `create_file` and `read_file`.
 - The multi-step edit workflow has been tested through inspection, patching,
@@ -126,8 +117,5 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
 - `tests/runtime.test.ts` covers registry behavior, agent tool execution,
   approval denial, step limits, the IDE tool catalog, workspace diffs/conflicts,
   ripgrep search, and cross-platform command execution.
-- `@agentic-runtime/tools` includes bounded `browse_url` and `crawl_site` web
-  tools, plus structured read-only and approval-gated Git tools backed by
-  Mozilla Readability, JSDOM, Crawlee, and simple-git.
 - Git repository initialized on `main`; the initial workspace commit is
   `bca0b3b`. The configured GitHub push was blocked by network/authentication.

@@ -111,21 +111,3 @@
   to inspection and `handoff_agent`, delegates coding/debugging work to
   `coding-agent`, and is refreshed alongside the reserved coding definition so
   older bootstrap records cannot retain unsafe behavior.
-- Enforced restricted-agent delegation with automatic proxies for blocked tools,
-  and added coverage for a blocked `write_file` request being handed to the
-  configured coding agent.
-- Added established-library web and Git tooling: Readability/JSDOM article
-  extraction, bounded same-domain Crawlee crawling, and simple-git status,
-  diff, log, branch, stage, commit, checkout, and push operations.
-- Fixed TUI tool routing so the general agent can directly use read-only web and
-  Git tools, increased default agent budgets to 24 steps, and instructed agents
-  not to emulate specialized tools with shell commands.
-- Added a configurable Ollama request timeout (`OLLAMA_TIMEOUT_MS`, default 45
-  seconds) with an explicit timeout error instead of an indefinite-looking TUI
-  spinner.
-- Added persistent custom-agent CRUD through the TUI, including prompted
-  definition fields, validation, active-agent deletion protection, and reserved
-  default-agent safeguards.
-- Separated project rules from agent definitions by adding `.agentic/agents/*.md`
-  discovery with YAML frontmatter, startup import, and a shared researcher
-  definition example.

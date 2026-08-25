@@ -57,12 +57,6 @@ count, cancellation, and time-budget violations are rejected or stopped.
 Agent definitions are stored globally; task and orchestration state remains
 project-isolated.
 
-Tool boundaries are enforced by the orchestrator, not only by prompts. If an
-agent has `allowedTools` and `delegatesTo`, every blocked registered tool is
-exposed as an automatic delegation proxy to the target agent. This prevents a
-small model from bypassing a meta-agent by emitting a blocked tool name as if it
-were available.
-
 ## Explicitly Not Implemented
 
 - Advanced scheduling
@@ -90,24 +84,6 @@ tools use the platform command executor for operations that require a shell.
 The `workspace` service uses `diff` to generate previews and rejects stale file
 changes when the expected content no longer matches. The `search` service uses
 `@vscode/ripgrep` and normalizes results to workspace-relative paths.
-
-Web and Git capabilities are exposed as specialized tools in
-`packages/tools/src/web-git.ts`. Web browsing uses `@mozilla/readability` and
-`jsdom` without executing page scripts; crawling uses Crawlee with same-domain
-and request-count limits. Read-only Git inspection uses `simple-git`, while
-staging, commits, checkout, and pushes remain approval-gated.
-
-The TUI exposes read-only web and Git tools directly to the general agent, while
-mutation tools remain available to the coding agent through the normal approval
-boundary. Agent prompts explicitly select specialized tools instead of shell
-emulation, and the default per-agent model budget is 24 steps.
-
-Runtime agent definitions can be versioned with a project in
-`.agentic/agents/*.md`. YAML frontmatter stores the registry fields and the
-Markdown body stores the system prompt. `AGENTS.md` is intentionally separate:
-it contains project rules loaded into the coding prompt, not agent identity or
-permissions. Project files are imported into the global registry at TUI startup;
-reserved built-in IDs cannot be overridden.
 
 `ToolRegistry` validates every model argument object with `ajv` before the
 `AgentRunner` asks for approval. Mutating tools provide a preview to the TUI;

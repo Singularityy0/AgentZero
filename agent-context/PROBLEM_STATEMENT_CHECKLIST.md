@@ -82,12 +82,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Compile, run, format, and syntax-check tools.
 - [x] Approval before mutations and side effects.
 - [x] Workspace path restrictions and sanitized command environment.
-- [~] Web browsing and bounded same-domain crawling exist; a search-engine tool
-  remains.
-- [~] Git branch, commit, diff, and related operations exist; merge tooling
-  remains.
-- [~] Git mutations require explicit approval; package-install side effects do
-  not yet have a dedicated approval flow.
+- [ ] Web search tool.
+- [ ] Git branch, commit, diff, merge, and related operations.
+- [ ] Explicit approval flow for Git and package-install side effects.
 
 ## 9. Style and Project Memory
 
@@ -140,4 +137,4 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 4. Context compaction and resumable checkpoints.
 5. Block-level HITL review.
 6. Observability dashboard.
-7. Web search, Git merge support, and complete documentation.
+7. Web/Git tools and complete documentation.

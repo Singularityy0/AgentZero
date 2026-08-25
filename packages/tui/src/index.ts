@@ -17,7 +17,6 @@ import { DEFAULT_OLLAMA_ENDPOINT, OllamaModel } from "@agentic-runtime/ollama";
 import { DEFAULT_OPENAI_MODEL, OpenAIModel } from "@agentic-runtime/openai";
 import {
   loadProjectInstructions,
-  loadProjectAgents,
   SessionStore,
   type SessionRecord,
 } from "@agentic-runtime/session";
@@ -32,7 +31,6 @@ const modelName =
     : (process.env.OPENAI_MODEL ?? DEFAULT_OPENAI_MODEL);
 const DEFAULT_AGENT_ID = "general";
 const CODING_AGENT_ID = "coding-agent";
-const RESERVED_AGENT_IDS = new Set([DEFAULT_AGENT_ID, CODING_AGENT_ID]);
 
 const useColor = Boolean(output.isTTY) && !process.env.NO_COLOR;
 let stopActivity: (() => void) | undefined;
@@ -61,7 +59,7 @@ function createSystemMessage(rootPath: string): ConversationMessage {
   return {
     role: "system",
     content:
-      "You are an IDE assistant. Use the provided specialized tools for workspace, web, and Git operations. For multi-step requests, continue calling tools until every requested step is complete. Use browse_url for web pages, crawl_site for site crawling, and the git_* tools for Git operations; never replace a specialized tool call with a shell command or invented Python code. Use apply_patch for existing-file edits. The runtime handles approval; never ask the user to approve again after a tool has executed. Perform requested verification commands before answering. Do not fabricate tool results or output tool-call JSON as normal text." +
+      "You are an IDE assistant. Use the provided tools for workspace operations. For multi-step requests, continue calling tools until every requested step is complete. Use apply_patch for existing-file edits. The runtime handles approval; never ask the user to approve again after a tool has executed. Perform requested verification commands before answering. Do not fabricate tool results or output tool-call JSON as normal text." +
       instructionText,
   };
 }
@@ -86,9 +84,8 @@ You are the primary coding agent for this workspace. Work like a careful senior 
 6. Delegate a focused subtask with handoff_agent when a registered specialist is better suited.
 7. After changes, reread affected files and run the most relevant build, typecheck, lint, or test command.
 8. Diagnose failures from their actual output, make a targeted correction, and verify again.
- 9. Do not claim completion until the requested behavior and verification are complete.
+9. Do not claim completion until the requested behavior and verification are complete.
 10. Keep user-facing updates concise and factual. Do not expose private chain-of-thought; report actions, findings, and verification results instead.
-11. Always call the named specialized tool when one exists. Do not emulate browse_url, crawl_site, or git_* with run_command, shell commands, or code snippets.
 
 When a tool requires approval, let the runtime request it. Do not ask for approval in normal prose and do not repeat an already completed tool call.
 `,
@@ -114,18 +111,8 @@ When a tool requires approval, let the runtime request it. Do not ask for approv
       "run_code",
       "format_code",
       "syntax_check",
-      "browse_url",
-      "crawl_site",
-      "git_status",
-      "git_diff",
-      "git_log",
-      "git_branches",
-      "git_add",
-      "git_commit",
-      "git_checkout",
-      "git_push",
     ],
-    maxSteps: 24,
+    maxSteps: 16,
     enabled: true,
   };
 }
@@ -147,20 +134,8 @@ function createDefaultGeneralAgent(): AgentDefinition {
 7. Do not expose private chain-of-thought; report concise decisions, handoffs, and results.
 `,
     capabilities: ["classification", "workspace-inspection", "delegation"],
-    allowedTools: [
-      "list_directory",
-      "read_file",
-      "find_files",
-      "search_text",
-      "browse_url",
-      "crawl_site",
-      "git_status",
-      "git_diff",
-      "git_log",
-      "git_branches",
-    ],
-    delegatesTo: CODING_AGENT_ID,
-    maxSteps: 24,
+    allowedTools: ["list_directory", "read_file", "find_files", "search_text"],
+    maxSteps: 8,
     enabled: true,
   };
 }
@@ -225,15 +200,6 @@ function printHelp(): void {
     `  ${paint(ansi.yellow, "/agent <id>")}          Select the active agent`,
   );
   console.log(
-    `  ${paint(ansi.yellow, "/agent-create <id>")}   Create and persist an agent`,
-  );
-  console.log(
-    `  ${paint(ansi.yellow, "/agent-edit <id>")}     Edit and persist an agent`,
-  );
-  console.log(
-    `  ${paint(ansi.yellow, "/agent-delete <id>")}   Delete a custom agent`,
-  );
-  console.log(
     `  ${paint(ansi.yellow, "/exit")}                 Leave the TUI\n`,
   );
 }
@@ -270,133 +236,6 @@ function printAgents(agents: AgentDefinition[], activeId: string): void {
     console.log(`    ${paint(ansi.dim, agent.description)}`);
   }
   console.log();
-}
-
-type PromptReader = { question(prompt: string): Promise<string> };
-
-async function collectAgentFields(
-  readline: PromptReader,
-  id: string,
-  current?: AgentDefinition,
-): Promise<AgentDefinition> {
-  const ask = async (label: string, fallback = ""): Promise<string> => {
-    const answer = await readline.question(
-      `${label}${fallback ? ` [${fallback}]` : ""}: `,
-    );
-    return answer.trim() || fallback;
-  };
-  const name = await ask("Name", current?.name);
-  const description = await ask("Description", current?.description);
-  const systemPrompt = await ask("System prompt", current?.systemPrompt);
-  const capabilities = splitList(
-    await ask(
-      "Capabilities (comma-separated)",
-      current?.capabilities.join(", "),
-    ),
-  );
-  const allowedTools = splitList(
-    await ask(
-      "Allowed tools (comma-separated; blank means no tools)",
-      current?.allowedTools?.join(", "),
-    ),
-  );
-  const delegatesTo = await ask(
-    "Delegate target (optional)",
-    current?.delegatesTo,
-  );
-  const maxSteps = Number(
-    await ask("Maximum model steps", String(current?.maxSteps ?? 16)),
-  );
-  const enabled = (
-    await ask("Enabled? (yes/no)", current?.enabled === false ? "no" : "yes")
-  ).toLowerCase();
-  if (!name || !description || !systemPrompt) {
-    throw new Error("Name, description, and system prompt are required.");
-  }
-  if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 100) {
-    throw new Error(
-      "Maximum model steps must be an integer between 1 and 100.",
-    );
-  }
-  return {
-    id,
-    name,
-    description,
-    systemPrompt,
-    capabilities,
-    allowedTools,
-    ...(delegatesTo ? { delegatesTo } : {}),
-    maxSteps,
-    enabled: !["no", "n", "false", "0"].includes(enabled),
-  };
-}
-
-async function createAgent(
-  readline: PromptReader,
-  store: SessionStore,
-  id: string,
-): Promise<void> {
-  validateAgentId(id);
-  if (store.getAgent(id)) throw new Error(`Agent already exists: ${id}`);
-  store.registerAgent(await collectAgentFields(readline, id));
-  console.log(`${paint(ansi.green, "Created and persisted agent:")} ${id}\n`);
-}
-
-async function editAgent(
-  readline: PromptReader,
-  store: SessionStore,
-  id: string,
-): Promise<void> {
-  validateCustomAgent(id);
-  const current = store.getAgent(id);
-  if (!current) throw new Error(`Agent not found: ${id}`);
-  store.updateAgent(id, await collectAgentFields(readline, id, current));
-  console.log(`${paint(ansi.green, "Updated and persisted agent:")} ${id}\n`);
-}
-
-async function deleteAgent(
-  readline: PromptReader,
-  store: SessionStore,
-  id: string,
-  activeId: string,
-): Promise<void> {
-  validateCustomAgent(id);
-  if (!store.getAgent(id)) throw new Error(`Agent not found: ${id}`);
-  if (id === activeId)
-    throw new Error("Select another agent before deleting the active agent.");
-  const answer = await readline.question(`Type DELETE to remove ${id}: `);
-  if (answer.trim() !== "DELETE") {
-    console.log(`${paint(ansi.yellow, "Deletion cancelled.")}\n`);
-    return;
-  }
-  store.removeAgent(id);
-  console.log(`${paint(ansi.green, "Deleted persisted agent:")} ${id}\n`);
-}
-
-function validateCustomAgent(id: string): void {
-  validateAgentId(id);
-  if (RESERVED_AGENT_IDS.has(id)) {
-    throw new Error(`The reserved agent cannot be edited or deleted: ${id}`);
-  }
-}
-
-function validateAgentId(id: string): void {
-  if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(id)) {
-    throw new Error(
-      "Agent ID must use 2-64 lowercase letters, numbers, or hyphens.",
-    );
-  }
-}
-
-function splitList(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ];
 }
 
 function startActivity(label: string): () => void {
@@ -511,15 +350,6 @@ async function main(): Promise<void> {
   const systemMessage = createSystemMessage(sessionStore.project.rootPath);
   sessionStore.registerAgent(createDefaultGeneralAgent());
   sessionStore.registerAgent(createDefaultCodingAgent(systemMessage));
-  for (const agent of loadProjectAgents(sessionStore.project.rootPath)) {
-    if (RESERVED_AGENT_IDS.has(agent.id)) {
-      console.log(
-        `${paint(ansi.yellow, "Ignoring project agent that conflicts with reserved ID:")} ${agent.id}\n`,
-      );
-      continue;
-    }
-    sessionStore.registerAgent(agent);
-  }
   const agents = sessionStore.listAgents();
   const configuredAgentId = process.env.AGENT_ID ?? DEFAULT_AGENT_ID;
   const selectedAgentId =
@@ -543,10 +373,12 @@ async function main(): Promise<void> {
   const runtime = new MultiAgentOrchestrator(
     sessionStore,
     () => model,
-    () => {
+    (agent) => {
       const registry = new ToolRegistry();
       for (const tool of createIdeTools()) {
-        registry.register(tool);
+        if (!agent.allowedTools || agent.allowedTools.includes(tool.name)) {
+          registry.register(tool);
+        }
       }
       return registry;
     },
@@ -620,49 +452,6 @@ async function main(): Promise<void> {
       }
       if (inputMessage === "/agents") {
         printAgents(sessionStore.listAgents(), activeAgentId);
-        continue;
-      }
-      if (inputMessage.startsWith("/agent-create ")) {
-        try {
-          await createAgent(
-            readline,
-            sessionStore,
-            inputMessage.slice("/agent-create ".length).trim(),
-          );
-        } catch (error) {
-          console.log(
-            `${paint(ansi.red, "Agent creation failed:")} ${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        }
-        continue;
-      }
-      if (inputMessage.startsWith("/agent-edit ")) {
-        try {
-          await editAgent(
-            readline,
-            sessionStore,
-            inputMessage.slice("/agent-edit ".length).trim(),
-          );
-        } catch (error) {
-          console.log(
-            `${paint(ansi.red, "Agent update failed:")} ${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        }
-        continue;
-      }
-      if (inputMessage.startsWith("/agent-delete ")) {
-        try {
-          await deleteAgent(
-            readline,
-            sessionStore,
-            inputMessage.slice("/agent-delete ".length).trim(),
-            activeAgentId,
-          );
-        } catch (error) {
-          console.log(
-            `${paint(ansi.red, "Agent deletion failed:")} ${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        }
         continue;
       }
       if (inputMessage.startsWith("/agent ")) {
@@ -813,7 +602,6 @@ function createModel(): LanguageModel {
       model: modelName,
       endpoint: process.env.OLLAMA_ENDPOINT ?? DEFAULT_OLLAMA_ENDPOINT,
       apiKey: process.env.OLLAMA_API_KEY,
-      timeoutMs: parsePositiveInteger(process.env.OLLAMA_TIMEOUT_MS, 45_000),
     });
   }
   if (provider === "openai") {
@@ -823,15 +611,6 @@ function createModel(): LanguageModel {
     return new OpenAIModel({ apiKey, model: modelName });
   }
   throw new Error(`Unsupported MODEL_PROVIDER: ${provider}`);
-}
-
-function parsePositiveInteger(
-  value: string | undefined,
-  fallback: number,
-): number {
-  if (value === undefined) return fallback;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 void main();
