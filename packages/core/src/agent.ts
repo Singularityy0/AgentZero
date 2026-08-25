@@ -1,4 +1,5 @@
 import type { ConversationMessage, ToolCall, ToolMessage } from "./messages.js";
+import type { AgentEvent } from "./events.js";
 import type { LanguageModel } from "./model.js";
 import { ToolRegistry } from "./tool-registry.js";
 import type {
@@ -12,6 +13,7 @@ export interface AgentRunnerOptions {
   maxSteps?: number;
   requestApproval: (call: ToolCall, preview?: string) => Promise<boolean>;
   signal?: AbortSignal;
+  onEvent?: (event: AgentEvent) => void | Promise<void>;
 }
 
 export interface AgentRunResult {
@@ -39,12 +41,22 @@ export class AgentRunner {
     const workflow = createWorkflowState(messages);
 
     for (let step = 0; step < this.maxSteps; step += 1) {
+      await this.emit({
+        type: "model_request",
+        messageCount: messages.length,
+        toolCount: this.tools.list().length,
+      });
       const response = await this.model.respond({
         messages,
         tools: this.tools.list(),
       });
       messages.push(response.message);
       lastResponseText = response.text;
+      await this.emit({
+        type: "model_response",
+        text: response.text,
+        toolCallCount: response.toolCalls.length,
+      });
 
       if (response.toolCalls.length === 0) {
         const followUp = workflow.followUp(executedToolNames, hadNoOpMutation);
@@ -52,11 +64,13 @@ export class AgentRunner {
           messages.push({ role: "user", content: followUp });
           continue;
         }
+        await this.emit({ type: "agent_completed", text: response.text });
         return { text: response.text, messages };
       }
 
       for (const call of response.toolCalls) {
         executedToolNames.push(call.name);
+        await this.emit({ type: "tool_requested", call });
         const signature = JSON.stringify([call.name, call.arguments]);
         if (signature === previousSignature && previousResult) {
           const text =
@@ -77,6 +91,7 @@ export class AgentRunner {
         }
         previousSignature = signature;
         previousResult = result;
+        await this.emit({ type: "tool_completed", call, result });
         messages.push(this.toToolMessage(call, result));
       }
     }
@@ -84,7 +99,12 @@ export class AgentRunner {
     const text = lastResponseText
       ? `${lastResponseText}\n\n[Agent stopped after reaching the ${this.maxSteps}-step safety limit.]`
       : `[Agent stopped after reaching the ${this.maxSteps}-step safety limit. Tools executed: ${executedToolNames.join(", ") || "none"}]`;
+    await this.emit({ type: "agent_safety_limit", text });
     return { text, messages };
+  }
+
+  private async emit(event: AgentEvent): Promise<void> {
+    await this.options.onEvent?.(event);
   }
 
   private async executeTool(call: ToolCall): Promise<ToolResult> {
@@ -105,22 +125,26 @@ export class AgentRunner {
       };
     }
 
-    const previewContext: ToolPreviewContext = { cwd: this.options.cwd };
-    let preview: string | undefined;
-    try {
-      preview = tool.preview
-        ? await tool.preview(call.arguments, previewContext)
-        : undefined;
-    } catch (error) {
-      return {
-        output: `Unable to prepare tool preview: ${error instanceof Error ? error.message : String(error)}`,
-        isError: true,
-      };
-    }
+    if (tool.approval !== "auto") {
+      const previewContext: ToolPreviewContext = { cwd: this.options.cwd };
+      let preview: string | undefined;
+      try {
+        preview = tool.preview
+          ? await tool.preview(call.arguments, previewContext)
+          : undefined;
+      } catch (error) {
+        return {
+          output: `Unable to prepare tool preview: ${error instanceof Error ? error.message : String(error)}`,
+          isError: true,
+        };
+      }
 
-    const approved = await this.options.requestApproval(call, preview);
-    if (!approved) {
-      return { output: "Tool execution denied by the user.", isError: true };
+      const approved = await this.options.requestApproval(call, preview);
+      if (!approved) {
+        return { output: "Tool execution denied by the user.", isError: true };
+      }
+    } else {
+      await this.emit({ type: "tool_auto_approved", call });
     }
 
     const context: ToolExecutionContext = {

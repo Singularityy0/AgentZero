@@ -14,6 +14,8 @@ export type {
   ToolExecutionContext,
   ToolPreviewContext,
   ToolResult,
+  ToolApproval,
 } from "./tools.js";
 export { AgentRunner } from "./agent.js";
 export type { AgentRunResult, AgentRunnerOptions } from "./agent.js";
+export type { AgentEvent } from "./events.js";
