@@ -2,7 +2,10 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  approval?: ToolApproval;
 }
+
+export type ToolApproval = "auto" | "ask";
 
 export interface ToolExecutionContext {
   cwd: string;

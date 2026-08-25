@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@agentic-runtime/core": "workspace:*",
-    "@agentic-runtime/powershell": "workspace:*",
+    "@agentic-runtime/command": "workspace:*",
     "@agentic-runtime/search": "workspace:*",
     "@agentic-runtime/workspace": "workspace:*"
   }

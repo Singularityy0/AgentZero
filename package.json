@@ -2,17 +2,20 @@
   "name": "agentic-runtime",
   "private": true,
   "version": "0.1.0",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "packageManager": "pnpm@9.15.5",
   "scripts": {
-    "build": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/powershell/tsconfig.json packages/search/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/tui/tsconfig.json",
-    "clean": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/powershell/tsconfig.json packages/search/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/tui/tsconfig.json --clean",
+    "build": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/tui/tsconfig.json",
+    "clean": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/tui/tsconfig.json --clean",
     "example:openai": "pnpm build && tsx examples/openai-response.ts",
     "test": "pnpm build && tsc -p tests/tsconfig.json && node --test dist-tests/runtime.test.js",
     "tui": "pnpm build && node packages/tui/dist/index.js",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "typecheck": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/powershell/tsconfig.json packages/search/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/tui/tsconfig.json --pretty"
+    "typecheck": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/tui/tsconfig.json --pretty"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

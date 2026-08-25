@@ -40,10 +40,11 @@ export class ToolRegistry {
 
   list(): ToolDefinition[] {
     return [...this.tools.values()].map(
-      ({ name, description, parameters }) => ({
+      ({ name, description, parameters, approval }) => ({
         name,
         description,
         parameters,
+        approval,
       }),
     );
   }

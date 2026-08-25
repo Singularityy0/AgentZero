@@ -29,6 +29,15 @@ importers:
         specifier: ^8.18.0
         version: 8.68.0(eslint@9.39.5)(typescript@5.9.3)
 
+  packages/command:
+    dependencies:
+      "@agentic-runtime/core":
+        specifier: workspace:*
+        version: link:../core
+      execa:
+        specifier: ^9.6.0
+        version: 9.6.1
+
   packages/core:
     dependencies:
       ajv:
@@ -50,15 +59,6 @@ importers:
         specifier: ^5.0.0
         version: 5.23.2
 
-  packages/powershell:
-    dependencies:
-      "@agentic-runtime/core":
-        specifier: workspace:*
-        version: link:../core
-      execa:
-        specifier: ^9.6.0
-        version: 9.6.1
-
   packages/search:
     dependencies:
       "@vscode/ripgrep":
@@ -68,14 +68,20 @@ importers:
         specifier: ^9.6.0
         version: 9.6.1
 
-  packages/tools:
+  packages/session:
     dependencies:
       "@agentic-runtime/core":
         specifier: workspace:*
         version: link:../core
-      "@agentic-runtime/powershell":
+
+  packages/tools:
+    dependencies:
+      "@agentic-runtime/command":
         specifier: workspace:*
-        version: link:../powershell
+        version: link:../command
+      "@agentic-runtime/core":
+        specifier: workspace:*
+        version: link:../core
       "@agentic-runtime/search":
         specifier: workspace:*
         version: link:../search
@@ -94,6 +100,9 @@ importers:
       "@agentic-runtime/openai":
         specifier: workspace:*
         version: link:../openai
+      "@agentic-runtime/session":
+        specifier: workspace:*
+        version: link:../session
       "@agentic-runtime/tools":
         specifier: workspace:*
         version: link:../tools

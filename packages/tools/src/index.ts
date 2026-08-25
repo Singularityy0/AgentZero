@@ -4,14 +4,14 @@ import type {
   ToolPreviewContext,
 } from "@agentic-runtime/core";
 import {
-  executePowerShellCommand,
-  type PowerShellToolOptions,
-} from "@agentic-runtime/powershell";
+  executeCommand,
+  type CommandToolOptions,
+} from "@agentic-runtime/command";
 import { findFiles, searchText } from "@agentic-runtime/search";
 import { WorkspaceFileService } from "@agentic-runtime/workspace";
 
 export function createIdeTools(
-  powershellOptions: PowerShellToolOptions = {},
+  commandOptions: CommandToolOptions = {},
 ): Tool[] {
   return [
     createListDirectoryTool(),
@@ -23,29 +23,25 @@ export function createIdeTools(
     createFindFilesTool(),
     createSearchTextTool(),
     createCommandTool(
-      "run_powershell_command",
-      "Run an arbitrary PowerShell command. Use specialized tools when possible.",
-      powershellOptions,
+      "run_command",
+      "Run a command using the host operating system's native shell. Use specialized tools when possible.",
+      commandOptions,
     ),
-    createCommandTool(
-      "compile_code",
-      "Compile the project.",
-      powershellOptions,
-    ),
+    createCommandTool("compile_code", "Compile the project.", commandOptions),
     createCommandTool(
       "run_code",
       "Run the requested project command.",
-      powershellOptions,
+      commandOptions,
     ),
     createCommandTool(
       "format_code",
       "Format the project code.",
-      powershellOptions,
+      commandOptions,
     ),
     createCommandTool(
       "syntax_check",
       "Run the project's syntax checks.",
-      powershellOptions,
+      commandOptions,
     ),
   ];
 }
@@ -54,6 +50,7 @@ function createListDirectoryTool(): Tool {
   return {
     name: "list_directory",
     description: "List files and directories inside the workspace.",
+    approval: "auto",
     parameters: objectSchema({
       path: {
         type: "string",
@@ -74,6 +71,7 @@ function createReadFileTool(): Tool {
   return {
     name: "read_file",
     description: "Read a UTF-8 text file inside the workspace.",
+    approval: "auto",
     parameters: objectSchema({
       path: { type: "string", description: "Workspace-relative file path." },
     }),
@@ -113,6 +111,7 @@ function createDeleteFileTool(): Tool {
   return {
     name: "delete_file",
     description: "Delete a file inside the workspace.",
+    approval: "ask",
     parameters: objectSchema({
       path: { type: "string", description: "Workspace-relative file path." },
     }),
@@ -149,6 +148,7 @@ function createApplyPatchTool(): Tool {
   return {
     name: "apply_patch",
     description: "Apply an exact, conflict-checked file change.",
+    approval: "ask",
     parameters,
     preview: async (arguments_, context) =>
       workspace(context).previewChange(change(arguments_)),
@@ -178,6 +178,7 @@ function createMutationTool(
   return {
     name,
     description,
+    approval: "ask",
     parameters: objectSchema(properties),
     preview: async (arguments_, context) =>
       workspace(context).previewChange(getChange(arguments_)),
@@ -197,6 +198,7 @@ function createFindFilesTool(): Tool {
   return {
     name: "find_files",
     description: "Find files in the workspace using a glob pattern.",
+    approval: "auto",
     parameters: objectSchema({
       pattern: {
         type: "string",
@@ -215,6 +217,7 @@ function createSearchTextTool(): Tool {
   return {
     name: "search_text",
     description: "Search workspace text using a regular expression.",
+    approval: "auto",
     parameters: objectSchema({
       pattern: {
         type: "string",
@@ -237,20 +240,17 @@ function createSearchTextTool(): Tool {
 function createCommandTool(
   name: string,
   description: string,
-  options: PowerShellToolOptions,
+  options: CommandToolOptions,
 ): Tool {
   return {
     name,
     description,
+    approval: "ask",
     parameters: objectSchema({
       command: { type: "string", description: "The command to execute." },
     }),
     execute: async (arguments_, context) =>
-      executePowerShellCommand(
-        requireString(arguments_, "command"),
-        context,
-        options,
-      ),
+      executeCommand(requireString(arguments_, "command"), context, options),
   };
 }
 

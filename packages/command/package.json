@@ -1,5 +1,5 @@
 {
-  "name": "@agentic-runtime/powershell",
+  "name": "@agentic-runtime/command",
   "version": "0.1.0",
   "private": true,
   "type": "module",
