@@ -57,6 +57,12 @@ count, cancellation, and time-budget violations are rejected or stopped.
 Agent definitions are stored globally; task and orchestration state remains
 project-isolated.
 
+Tool boundaries are enforced by the orchestrator, not only by prompts. If an
+agent has `allowedTools` and `delegatesTo`, every blocked registered tool is
+exposed as an automatic delegation proxy to the target agent. This prevents a
+small model from bypassing a meta-agent by emitting a blocked tool name as if it
+were available.
+
 ## Explicitly Not Implemented
 
 - Advanced scheduling

@@ -13,6 +13,7 @@ export interface AgentDefinition {
   systemPrompt: string;
   capabilities: string[];
   allowedTools?: string[];
+  delegatesTo?: string;
   maxSteps?: number;
   enabled: boolean;
 }
@@ -158,7 +159,13 @@ export class MultiAgentOrchestrator {
     });
 
     const model = await this.resolveModel(agent);
-    const tools = await this.resolveTools(agent);
+    const tools = this.scopeTools(
+      agent,
+      await this.resolveTools(agent),
+      state,
+      agentId,
+      depth,
+    );
     if (!tools.has("handoff_agent")) {
       tools.register(this.createHandoffTool(state, agentId, depth));
     }
@@ -210,6 +217,74 @@ export class MultiAgentOrchestrator {
     };
   }
 
+  private scopeTools(
+    agent: AgentDefinition,
+    available: ToolRegistry,
+    state: RunState,
+    parentAgentId: string,
+    parentDepth: number,
+  ): ToolRegistry {
+    const scoped = new ToolRegistry();
+    for (const definition of available.list()) {
+      const tool = available.get(definition.name);
+      if (!tool) continue;
+      if (
+        !agent.allowedTools ||
+        agent.allowedTools.includes(definition.name) ||
+        definition.name === "handoff_agent"
+      ) {
+        scoped.register(tool);
+      } else if (agent.delegatesTo) {
+        scoped.register(
+          this.createDelegationProxy(
+            tool,
+            state,
+            parentAgentId,
+            parentDepth,
+            agent.delegatesTo,
+          ),
+        );
+      }
+    }
+    return scoped;
+  }
+
+  private createDelegationProxy(
+    tool: Tool,
+    state: RunState,
+    parentAgentId: string,
+    parentDepth: number,
+    targetAgentId: string,
+  ): Tool {
+    return {
+      name: tool.name,
+      description: `${tool.description} This action is delegated automatically to ${targetAgentId}; do not perform it directly in this agent.`,
+      parameters: tool.parameters,
+      approval: "auto",
+      execute: async (arguments_) => {
+        const result = await this.executeHandoff(
+          state,
+          parentAgentId,
+          parentDepth,
+          {
+            targetAgentId,
+            task: `Perform the delegated ${tool.name} operation with these arguments: ${JSON.stringify(arguments_)}`,
+            context: `The parent agent requested the ${tool.name} operation. Execute it using your available tools and return the concrete result.`,
+            reason: `${parentAgentId} is restricted from ${tool.name}.`,
+          },
+        );
+        return {
+          output: JSON.stringify({
+            agentId: result.agentId,
+            status: result.status,
+            summary: result.text,
+          }),
+          isError: result.status === "failed",
+        };
+      },
+    };
+  }
+
   private createHandoffTool(
     state: RunState,
     parentAgentId: string,
@@ -233,68 +308,83 @@ export class MultiAgentOrchestrator {
       },
       execute: async (arguments_) => {
         const handoff = arguments_ as unknown as AgentHandoff;
-        const signature = `${parentAgentId}:${handoff.targetAgentId}:${handoff.task}`;
-        if (state.handoffs >= this.maxHandoffs) {
-          return this.rejectedHandoff(
-            state,
-            parentAgentId,
-            parentDepth,
-            "The maximum handoff budget has been reached.",
-          );
-        }
-        if (state.activeSignatures.has(signature)) {
-          return this.rejectedHandoff(
-            state,
-            parentAgentId,
-            parentDepth,
-            "The same handoff is already active and would create a loop.",
-          );
-        }
-
-        state.handoffs += 1;
-        state.activeSignatures.add(signature);
-        await this.emit({
-          type: "handoff_requested",
-          runId: state.runId,
-          agentId: parentAgentId,
+        const result = await this.executeHandoff(
+          state,
           parentAgentId,
-          depth: parentDepth,
-          targetAgentId: handoff.targetAgentId,
-          task: handoff.task,
-          reason: handoff.reason,
-        });
-        try {
-          const result = await this.runAgent(
-            state,
-            handoff.targetAgentId,
-            handoff.task,
-            handoff.context ?? "",
-            parentAgentId,
-            parentDepth + 1,
-            [],
-          );
-          await this.emit({
-            type: "handoff_completed",
-            runId: state.runId,
-            agentId: parentAgentId,
-            parentAgentId,
-            depth: parentDepth,
-            targetAgentId: handoff.targetAgentId,
-            output: result.text,
-          });
-          return {
-            output: JSON.stringify({
-              agentId: result.agentId,
-              status: result.status,
-              summary: result.text,
-            }),
-            isError: result.status === "failed",
-          };
-        } finally {
-          state.activeSignatures.delete(signature);
-        }
+          parentDepth,
+          handoff,
+        );
+        return {
+          output: JSON.stringify({
+            agentId: result.agentId,
+            status: result.status,
+            summary: result.text,
+          }),
+          isError: result.status === "failed",
+        };
       },
     };
+  }
+
+  private async executeHandoff(
+    state: RunState,
+    parentAgentId: string,
+    parentDepth: number,
+    handoff: AgentHandoff,
+  ): Promise<MultiAgentResult> {
+    const signature = `${parentAgentId}:${handoff.targetAgentId}:${handoff.task}`;
+    if (state.handoffs >= this.maxHandoffs) {
+      return this.failedResult(
+        state,
+        handoff.targetAgentId,
+        parentDepth + 1,
+        "The maximum handoff budget has been reached.",
+      );
+    }
+    if (state.activeSignatures.has(signature)) {
+      return this.failedResult(
+        state,
+        handoff.targetAgentId,
+        parentDepth + 1,
+        "The same handoff is already active and would create a loop.",
+      );
+    }
+
+    state.handoffs += 1;
+    state.activeSignatures.add(signature);
+    await this.emit({
+      type: "handoff_requested",
+      runId: state.runId,
+      agentId: parentAgentId,
+      parentAgentId,
+      depth: parentDepth,
+      targetAgentId: handoff.targetAgentId,
+      task: handoff.task,
+      reason: handoff.reason,
+    });
+    try {
+      const result = await this.runAgent(
+        state,
+        handoff.targetAgentId,
+        handoff.task,
+        handoff.context ?? "",
+        parentAgentId,
+        parentDepth + 1,
+        [],
+      );
+      await this.emit({
+        type: "handoff_completed",
+        runId: state.runId,
+        agentId: parentAgentId,
+        parentAgentId,
+        depth: parentDepth,
+        targetAgentId: handoff.targetAgentId,
+        output: result.text,
+      });
+      return result;
+    } finally {
+      state.activeSignatures.delete(signature);
+    }
   }
 
   private rejectedHandoff(

@@ -111,3 +111,6 @@
   to inspection and `handoff_agent`, delegates coding/debugging work to
   `coding-agent`, and is refreshed alongside the reserved coding definition so
   older bootstrap records cannot retain unsafe behavior.
+- Enforced restricted-agent delegation with automatic proxies for blocked tools,
+  and added coverage for a blocked `write_file` request being handed to the
+  configured coding agent.

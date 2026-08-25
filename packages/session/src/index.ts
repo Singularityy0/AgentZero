@@ -400,14 +400,15 @@ export class SessionStore {
     this.globalDb
       .prepare(
         `INSERT INTO agents
-         (id, name, description, system_prompt, capabilities_json, allowed_tools_json, max_steps, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (id, name, description, system_prompt, capabilities_json, allowed_tools_json, delegates_to, max_steps, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            description = excluded.description,
            system_prompt = excluded.system_prompt,
            capabilities_json = excluded.capabilities_json,
            allowed_tools_json = excluded.allowed_tools_json,
+           delegates_to = excluded.delegates_to,
            max_steps = excluded.max_steps,
            enabled = excluded.enabled,
            updated_at = excluded.updated_at`,
@@ -419,6 +420,7 @@ export class SessionStore {
         agent.systemPrompt,
         JSON.stringify(agent.capabilities),
         agent.allowedTools ? JSON.stringify(agent.allowedTools) : null,
+        agent.delegatesTo ?? null,
         agent.maxSteps ?? null,
         agent.enabled ? 1 : 0,
         now,
@@ -539,6 +541,7 @@ interface SqliteAgent {
   system_prompt: string;
   capabilities_json: string;
   allowed_tools_json: string | null;
+  delegates_to: string | null;
   max_steps: number | null;
   enabled: number;
   created_at: number;
@@ -595,6 +598,7 @@ function deserializeAgent(row: SqliteAgent): AgentDefinition {
     allowedTools: row.allowed_tools_json
       ? (JSON.parse(row.allowed_tools_json) as string[])
       : undefined,
+    ...(row.delegates_to ? { delegatesTo: row.delegates_to } : {}),
     maxSteps: row.max_steps ?? undefined,
     enabled: row.enabled === 1,
   };
@@ -634,12 +638,18 @@ function initializeGlobalDatabase(db: DatabaseSync): void {
       system_prompt TEXT NOT NULL,
       capabilities_json TEXT NOT NULL,
       allowed_tools_json TEXT,
+      delegates_to TEXT,
       max_steps INTEGER,
       enabled INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
   `);
+  try {
+    db.exec("ALTER TABLE agents ADD COLUMN delegates_to TEXT");
+  } catch {
+    // Existing databases already have the column.
+  }
 }
 
 function initializeProjectDatabase(db: DatabaseSync): void {

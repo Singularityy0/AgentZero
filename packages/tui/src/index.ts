@@ -135,6 +135,7 @@ function createDefaultGeneralAgent(): AgentDefinition {
 `,
     capabilities: ["classification", "workspace-inspection", "delegation"],
     allowedTools: ["list_directory", "read_file", "find_files", "search_text"],
+    delegatesTo: CODING_AGENT_ID,
     maxSteps: 8,
     enabled: true,
   };
@@ -373,12 +374,10 @@ async function main(): Promise<void> {
   const runtime = new MultiAgentOrchestrator(
     sessionStore,
     () => model,
-    (agent) => {
+    () => {
       const registry = new ToolRegistry();
       for (const tool of createIdeTools()) {
-        if (!agent.allowedTools || agent.allowedTools.includes(tool.name)) {
-          registry.register(tool);
-        }
+        registry.register(tool);
       }
       return registry;
     },

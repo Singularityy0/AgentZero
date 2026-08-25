@@ -103,6 +103,8 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
 - The TUI uses `MultiAgentOrchestrator` directly, maintains SQLite-backed
   `general` and `coding-agent` definitions, defaults to the meta-agent, and
   supports `/agents` plus `/agent <id>` for selection.
+- Restricted agents can use `delegatesTo`; blocked tool calls are converted to
+  automatic specialist handoffs instead of being executed or silently lost.
 - The agent runner continues explicit multi-step coding requests when a model
   stops after an intermediate tool result, requiring requested mutation,
   reread, and verification stages.

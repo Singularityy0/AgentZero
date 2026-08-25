@@ -395,6 +395,79 @@ test("MultiAgentOrchestrator hands work to a registered specialist", async () =>
   assert.ok(events.includes("handoff_completed:lead"));
 });
 
+test("MultiAgentOrchestrator proxies blocked tools to the configured delegate", async () => {
+  const agents = [
+    {
+      id: "general",
+      name: "General",
+      description: "Coordinates work.",
+      systemPrompt: "Delegate blocked operations.",
+      capabilities: ["delegation"],
+      allowedTools: [],
+      delegatesTo: "coder",
+      enabled: true,
+    },
+    {
+      id: "coder",
+      name: "Coder",
+      description: "Writes code.",
+      systemPrompt: "Perform the requested operation.",
+      capabilities: ["coding"],
+      enabled: true,
+    },
+  ];
+  const models = new Map([
+    [
+      "general",
+      new FakeModel([
+        assistantResponse("", [
+          {
+            id: "blocked-write",
+            name: "write_file",
+            arguments: { path: "tmp/example.py", content: "print('ok')" },
+          },
+        ]),
+        assistantResponse("The coding agent completed the write."),
+      ]),
+    ],
+    ["coder", new FakeModel([assistantResponse("File written.")])],
+  ]);
+  const tools = new ToolRegistry().register({
+    name: "write_file",
+    description: "Write a file.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+    approval: "auto",
+    execute: async () => ({ output: "File written." }),
+  });
+
+  const result = await new MultiAgentOrchestrator(
+    {
+      getAgent: (id) => agents.find((agent) => agent.id === id),
+      listAgents: () => agents,
+    },
+    (agent) => models.get(agent.id)!,
+    () => tools,
+    {
+      cwd: process.cwd(),
+      requestApproval: async () => {
+        throw new Error("The delegation proxy should not request approval.");
+      },
+    },
+  ).run("general", "Create the file.");
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.handoffs, 1);
+  assert.match(result.text, /coding agent completed/);
+});
+
 test("createIdeTools exposes the separate IDE tool catalog", () => {
   assert.deepEqual(
     createIdeTools().map((tool) => tool.name),

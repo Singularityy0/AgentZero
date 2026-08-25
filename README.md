@@ -51,7 +51,10 @@ SQLite task.
 generic `AgentRunner` tool loop. Each active agent receives a `handoff_agent`
 tool for delegating focused work to another enabled registry agent. Handoffs
 are bounded by depth, count, cancellation, and time limits and are returned to
-the parent as normalized tool results.
+the parent as normalized tool results. Agents with restricted tool lists can
+declare `delegatesTo`; blocked tools then become automatic delegation proxies,
+so a model cannot bypass the meta-agent boundary by hallucinating a direct
+mutation tool call.
 
 The session package stores agent definitions in the global SQLite database.
 Definitions contain the name, description, system prompt, capabilities,
