@@ -13,10 +13,19 @@
   },
   "dependencies": {
     "@agentic-runtime/core": "workspace:*",
-    "@agentic-runtime/openai": "workspace:*",
+    "@agentic-runtime/gateway": "workspace:*",
     "@agentic-runtime/ollama": "workspace:*",
+    "@agentic-runtime/openai": "workspace:*",
     "@agentic-runtime/session": "workspace:*",
     "@agentic-runtime/tools": "workspace:*",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "ink": "^7.1.1",
+    "ink-select-input": "^6.2.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18"
   }
 }

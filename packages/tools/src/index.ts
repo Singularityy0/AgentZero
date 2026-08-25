@@ -9,11 +9,20 @@ import {
 } from "@agentic-runtime/command";
 import { findFiles, searchText } from "@agentic-runtime/search";
 import { WorkspaceFileService } from "@agentic-runtime/workspace";
+import {
+  assertSafeGitPaths,
+  createGitTools,
+  createWebTools,
+} from "./web-git.js";
+
+export { assertSafeGitPaths, createGitTools, createWebTools };
 
 export function createIdeTools(
   commandOptions: CommandToolOptions = {},
 ): Tool[] {
   return [
+    ...createWebTools(),
+    ...createGitTools(),
     createListDirectoryTool(),
     createReadFileTool(),
     createWriteFileTool(),

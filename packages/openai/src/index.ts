@@ -18,6 +18,7 @@ export const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
 export interface OpenAIResponseOptions {
   apiKey: string;
   model?: string;
+  baseURL?: string;
 }
 
 export class OpenAIModel implements LanguageModel {
@@ -29,7 +30,10 @@ export class OpenAIModel implements LanguageModel {
       throw new Error("An OpenAI API key is required.");
     }
 
-    this.client = new OpenAI({ apiKey: options.apiKey });
+    this.client = new OpenAI({
+      apiKey: options.apiKey,
+      baseURL: options.baseURL,
+    });
     this.model = options.model ?? DEFAULT_OPENAI_MODEL;
   }
 
@@ -52,6 +56,59 @@ export class OpenAIModel implements LanguageModel {
     };
 
     return { message, text: response.output_text, toolCalls };
+  }
+}
+
+/** Executes against OpenAI-compatible Chat Completions APIs such as OpenRouter. */
+export class OpenAICompatibleChatModel implements LanguageModel {
+  private readonly client: OpenAI;
+
+  constructor(
+    private readonly options: Required<
+      Pick<OpenAIResponseOptions, "apiKey" | "model">
+    > & { baseURL: string },
+  ) {
+    this.client = new OpenAI({
+      apiKey: options.apiKey,
+      baseURL: options.baseURL,
+    });
+  }
+
+  async respond(request: ModelRequest): Promise<ModelResponse> {
+    const response = await this.client.chat.completions.create({
+      model: this.options.model,
+      messages: request.messages.map(toChatMessage),
+      tools: request.tools.map((tool) => ({
+        type: "function" as const,
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        },
+      })),
+    });
+    const message = response.choices[0]?.message;
+    if (!message) throw new Error("Provider returned no completion choices.");
+    const toolCalls = (message.tool_calls ?? []).flatMap((call) => {
+      if (call.type !== "function") return [];
+      try {
+        const arguments_ = JSON.parse(call.function.arguments) as Record<
+          string,
+          unknown
+        >;
+        return [
+          { id: call.id, name: call.function.name, arguments: arguments_ },
+        ];
+      } catch {
+        throw new Error(`Invalid arguments for tool "${call.function.name}".`);
+      }
+    });
+    const content = message.content ?? "";
+    return {
+      message: { role: "assistant", content, toolCalls },
+      text: content,
+      toolCalls,
+    };
   }
 }
 
@@ -134,4 +191,34 @@ function toToolCall(call: OpenAI.Responses.ResponseFunctionToolCall): ToolCall {
   }
 
   return { id: call.call_id, name: call.name, arguments: arguments_ };
+}
+
+function toChatMessage(
+  message: ConversationMessage,
+): OpenAI.Chat.Completions.ChatCompletionMessageParam {
+  if (message.role === "system" || message.role === "user") {
+    return { role: message.role, content: message.content };
+  }
+  if (message.role === "tool") {
+    return {
+      role: "tool",
+      tool_call_id: message.toolCallId,
+      content: message.content,
+    };
+  }
+  if (message.toolCalls?.length) {
+    return {
+      role: "assistant",
+      content: message.content || null,
+      tool_calls: message.toolCalls.map((call) => ({
+        id: call.id,
+        type: "function" as const,
+        function: {
+          name: call.name,
+          arguments: JSON.stringify(call.arguments),
+        },
+      })),
+    };
+  }
+  return { role: "assistant", content: message.content };
 }

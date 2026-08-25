@@ -15,7 +15,6 @@ Thumbs.db
 
 # Temporary workspace files
 tmp/
-.DS_Store
 
 # Tauri & Rust specific
 gen/

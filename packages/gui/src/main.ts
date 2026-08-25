@@ -1,11 +1,13 @@
-import { invoke } from "@tauri-apps/api/core";
-
 // DOM Elements
 const vaultForm = document.getElementById("vault-form") as HTMLFormElement;
 const groqInput = document.getElementById("groq-key") as HTMLInputElement;
 const geminiInput = document.getElementById("gemini-key") as HTMLInputElement;
-const cerebrasInput = document.getElementById("cerebras-key") as HTMLInputElement;
-const statusMsg = document.getElementById("vault-status") as HTMLParagraphElement;
+const cerebrasInput = document.getElementById(
+  "cerebras-key",
+) as HTMLInputElement;
+const statusMsg = document.getElementById(
+  "vault-status",
+) as HTMLParagraphElement;
 
 // Load existing keys (mocked from localStorage for now, later passed to Rust/WAL)
 window.addEventListener("DOMContentLoaded", () => {
@@ -16,7 +18,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
 vaultForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  
+
   // Persist keys securely (simulated via local storage for UI scaffold)
   localStorage.setItem("rigza_groq_key", groqInput.value);
   localStorage.setItem("rigza_gemini_key", geminiInput.value);
@@ -24,7 +26,7 @@ vaultForm.addEventListener("submit", async (e) => {
 
   statusMsg.textContent = "Keys securely saved to Vault.";
   statusMsg.style.opacity = "1";
-  
+
   setTimeout(() => {
     statusMsg.style.opacity = "0";
   }, 3000);
