@@ -94,6 +94,11 @@ export class OllamaModel implements LanguageModel {
         toolCalls,
       };
       return { message, text: body.message.content, toolCalls };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`Ollama request timed out after ${this.timeoutMs} ms.`);
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }

@@ -1,8 +1,15 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import matter from "gray-matter";
 import type {
   AgentDefinition,
   ConversationMessage,
@@ -429,6 +436,15 @@ export class SessionStore {
     return agent;
   }
 
+  updateAgent(
+    id: string,
+    updates: Partial<Omit<AgentDefinition, "id">>,
+  ): AgentDefinition {
+    const current = this.getAgent(id);
+    if (!current) throw new Error(`Agent not found: ${id}`);
+    return this.registerAgent({ ...current, ...updates, id });
+  }
+
   getAgent(id: string): AgentDefinition | undefined {
     const row = this.globalDb
       .prepare("SELECT * FROM agents WHERE id = ?")
@@ -443,8 +459,11 @@ export class SessionStore {
     return rows.map(deserializeAgent);
   }
 
-  removeAgent(id: string): void {
-    this.globalDb.prepare("DELETE FROM agents WHERE id = ?").run(id);
+  removeAgent(id: string): boolean {
+    const result = this.globalDb
+      .prepare("DELETE FROM agents WHERE id = ?")
+      .run(id);
+    return result.changes > 0;
   }
 
   buildContext(taskId: string | undefined, maxCharacters: number): string {
@@ -493,14 +512,77 @@ export function createTaskCheckpointStore(
 }
 
 export function loadProjectInstructions(rootPath: string): string[] {
-  const paths = [
-    join(rootPath, "AGENTS.md"),
-    join(rootPath, "agent-context", "WORKSPACE.md"),
-    join(rootPath, "agent-context", "ARCHITECTURE.md"),
-  ];
-  return paths
-    .filter(existsSync)
-    .map((path) => `## ${path}\n\n${readFileSync(path, "utf8")}`);
+  const path = join(rootPath, "AGENTS.md");
+  return existsSync(path)
+    ? [`## ${path}\n\n${readFileSync(path, "utf8")}`]
+    : [];
+}
+
+export function loadProjectAgents(rootPath: string): AgentDefinition[] {
+  const agentsPath = join(rootPath, ".agentic", "agents");
+  if (!existsSync(agentsPath)) return [];
+
+  return readdirSync(agentsPath, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((entry) => parseAgentFile(join(agentsPath, entry.name)));
+}
+
+function parseAgentFile(path: string): AgentDefinition {
+  const parsed = matter(readFileSync(path, "utf8"));
+  const data = parsed.data as Record<string, unknown>;
+  const id = requireAgentField(data, "id", path);
+  const name = requireAgentField(data, "name", path);
+  const description = requireAgentField(data, "description", path);
+  const systemPrompt = parsed.content.trim();
+  if (!systemPrompt) throw new Error(`Agent file has an empty prompt: ${path}`);
+
+  const maxSteps = data.maxSteps;
+  if (
+    maxSteps !== undefined &&
+    (typeof maxSteps !== "number" ||
+      !Number.isInteger(maxSteps) ||
+      maxSteps < 1)
+  ) {
+    throw new Error(`Agent file has an invalid maxSteps value: ${path}`);
+  }
+
+  return {
+    id,
+    name,
+    description,
+    systemPrompt,
+    capabilities: stringList(data.capabilities),
+    allowedTools: stringList(data.allowedTools),
+    ...(typeof data.delegatesTo === "string" && data.delegatesTo.trim()
+      ? { delegatesTo: data.delegatesTo.trim() }
+      : {}),
+    ...(typeof maxSteps === "number" ? { maxSteps } : {}),
+    enabled: data.enabled !== false,
+  };
+}
+
+function requireAgentField(
+  data: Record<string, unknown>,
+  field: string,
+  path: string,
+): string {
+  const value = data[field];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Agent file requires a non-empty ${field}: ${path}`);
+  }
+  return value.trim();
+}
+
+function stringList(value: unknown): string[] {
+  if (value === undefined) return [];
+  const values = Array.isArray(value) ? value : [value];
+  if (values.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new Error(
+      "Agent capabilities and allowedTools must contain strings.",
+    );
+  }
+  return [...new Set(values.map((item) => (item as string).trim()))];
 }
 
 interface SqliteSession {

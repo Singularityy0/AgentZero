@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,9 +17,14 @@ import { parseJsonToolCalls } from "../packages/ollama/dist/index.js";
 import { findFiles, searchText } from "../packages/search/dist/index.js";
 import {
   createTaskCheckpointStore,
+  loadProjectAgents,
   SessionStore,
 } from "../packages/session/dist/index.js";
-import { createIdeTools } from "../packages/tools/dist/index.js";
+import {
+  createGitTools,
+  createIdeTools,
+  createWebTools,
+} from "../packages/tools/dist/index.js";
 import { WorkspaceFileService } from "../packages/workspace/dist/index.js";
 
 class FakeModel implements LanguageModel {
@@ -472,6 +477,16 @@ test("createIdeTools exposes the separate IDE tool catalog", () => {
   assert.deepEqual(
     createIdeTools().map((tool) => tool.name),
     [
+      "browse_url",
+      "crawl_site",
+      "git_status",
+      "git_diff",
+      "git_log",
+      "git_branches",
+      "git_add",
+      "git_commit",
+      "git_checkout",
+      "git_push",
       "list_directory",
       "read_file",
       "write_file",
@@ -486,6 +501,30 @@ test("createIdeTools exposes the separate IDE tool catalog", () => {
       "format_code",
       "syntax_check",
     ],
+  );
+});
+
+test("web and Git tools use bounded read-only and approval-gated operations", async () => {
+  assert.deepEqual(
+    createWebTools().map((tool) => tool.approval),
+    ["auto", "auto"],
+  );
+  assert.deepEqual(
+    createGitTools().map((tool) => tool.approval),
+    ["auto", "auto", "auto", "auto", "ask", "ask", "ask", "ask"],
+  );
+
+  const browse = createWebTools()[0];
+  await assert.rejects(
+    browse?.execute(
+      { url: "file:///secret.txt", maxCharacters: 500 },
+      {
+        cwd: process.cwd(),
+        signal: new AbortController().signal,
+        requestApproval: async () => true,
+      },
+    ),
+    /HTTP or HTTPS/,
   );
 });
 
@@ -535,6 +574,44 @@ test("search uses ripgrep for file and text discovery", async () => {
   assert.ok(
     matches.some((match) => match.path === "packages/tools/src/index.ts"),
   );
+});
+
+test("project agent files load separately from AGENTS.md instructions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-agents-"));
+  try {
+    const agentsPath = join(root, ".agentic", "agents");
+    await mkdir(agentsPath, { recursive: true });
+    await writeFile(
+      join(agentsPath, "researcher.md"),
+      `---
+id: researcher
+name: Research Agent
+description: Finds evidence.
+capabilities: [research, web]
+allowedTools: [browse_url, git_log]
+maxSteps: 9
+enabled: true
+---
+
+Use primary sources and return evidence.
+`,
+    );
+
+    assert.deepEqual(loadProjectAgents(root), [
+      {
+        id: "researcher",
+        name: "Research Agent",
+        description: "Finds evidence.",
+        systemPrompt: "Use primary sources and return evidence.",
+        capabilities: ["research", "web"],
+        allowedTools: ["browse_url", "git_log"],
+        maxSteps: 9,
+        enabled: true,
+      },
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Command executor runs a native shell command with bounded results", async () => {
@@ -625,6 +702,7 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
       systemPrompt: "Focus on network diagnostics.",
       capabilities: ["network", "diagnostics"],
       allowedTools: ["read_file", "run_command"],
+      delegatesTo: "general",
       maxSteps: 6,
       enabled: true,
     });
@@ -652,9 +730,16 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
         systemPrompt: "Focus on network diagnostics.",
         capabilities: ["network", "diagnostics"],
         allowedTools: ["read_file", "run_command"],
+        delegatesTo: "general",
         maxSteps: 6,
         enabled: true,
       });
+      assert.equal(
+        second.updateAgent("network-specialist", { maxSteps: 10 }).maxSteps,
+        10,
+      );
+      assert.equal(second.removeAgent("network-specialist"), true);
+      assert.equal(second.getAgent("network-specialist"), undefined);
       assert.equal(
         (await createTaskCheckpointStore(second, task.id).load())?.runId,
         "checkpoint-run",

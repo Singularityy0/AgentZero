@@ -16,6 +16,7 @@
     }
   },
   "dependencies": {
-    "@agentic-runtime/core": "workspace:*"
+    "@agentic-runtime/core": "workspace:*",
+    "gray-matter": "^4.0.3"
   }
 }
