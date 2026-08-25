@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-tests/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# Rust build output
+target/
+
+# Local tooling
+.DS_Store
+Thumbs.db

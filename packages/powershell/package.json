@@ -1,0 +1,22 @@
+{
+  "name": "@agentic-runtime/powershell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agentic-runtime/core": "workspace:*",
+    "execa": "^9.6.0"
+  }
+}

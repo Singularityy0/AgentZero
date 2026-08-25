@@ -1,0 +1,21 @@
+{
+  "name": "@agentic-runtime/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "agentic-tui": "./dist/index.js"
+  },
+  "dependencies": {
+    "@agentic-runtime/core": "workspace:*",
+    "@agentic-runtime/openai": "workspace:*",
+    "@agentic-runtime/ollama": "workspace:*",
+    "@agentic-runtime/tools": "workspace:*",
+    "dotenv": "^16.4.7"
+  }
+}
