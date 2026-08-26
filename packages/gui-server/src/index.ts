@@ -11,10 +11,13 @@ import {
   validateStoredProvider,
   type ProviderFieldSpec,
 } from "@agentic-runtime/gateway";
+import { searchText } from "@agentic-runtime/search";
 import { SessionStore } from "@agentic-runtime/session";
+import { WorkspaceFileService } from "@agentic-runtime/workspace";
 
 const DEFAULT_PORT = 4737;
 const MAX_BODY_BYTES = 64 * 1024;
+const MAX_SEARCH_RESULTS = 200;
 
 export interface SettingsServerOptions {
   projectRoot: string;
@@ -35,6 +38,7 @@ export function startSettingsServer(
   options: SettingsServerOptions,
 ): SettingsServer {
   const store = new SessionStore({ projectRoot: options.projectRoot });
+  const workspace = new WorkspaceFileService(store.project.rootPath);
   const staticDir =
     options.staticDir === false
       ? undefined
@@ -42,11 +46,13 @@ export function startSettingsServer(
         fileURLToPath(new URL("../../gui/dist", import.meta.url)));
 
   const server = createServer((request, response) => {
-    handleRequest(request, response, store, staticDir).catch((error) => {
-      sendJson(response, 500, {
-        error: error instanceof Error ? error.message : "Internal error.",
-      });
-    });
+    handleRequest(request, response, store, workspace, staticDir).catch(
+      (error) => {
+        sendJson(response, 500, {
+          error: error instanceof Error ? error.message : "Internal error.",
+        });
+      },
+    );
   });
 
   const port = options.port ?? DEFAULT_PORT;
@@ -70,10 +76,87 @@ async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse,
   store: SessionStore,
+  workspace: WorkspaceFileService,
   staticDir: string | undefined,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const method = request.method ?? "GET";
+
+  if (url.pathname === "/api/project" && method === "GET") {
+    sendJson(response, 200, {
+      rootPath: store.project.rootPath,
+      name:
+        store.project.rootPath.split(/[/\\]/).pop() ?? store.project.rootPath,
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/files" && method === "GET") {
+    try {
+      const entries = await workspace.listDirectory(
+        url.searchParams.get("path") ?? ".",
+      );
+      sendJson(response, 200, {
+        entries: entries
+          .map((entry) => ({
+            name: entry.name,
+            path: entry.path,
+            type: entry.type,
+            size: entry.size,
+          }))
+          .sort(
+            (a, b) =>
+              Number(b.type === "directory") - Number(a.type === "directory") ||
+              a.name.localeCompare(b.name),
+          ),
+      });
+    } catch (error) {
+      sendJson(response, 400, {
+        error:
+          error instanceof Error ? error.message : "Could not list directory.",
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/files/content" && method === "GET") {
+    const path = url.searchParams.get("path");
+    if (!path) {
+      sendJson(response, 400, { error: "path query parameter is required." });
+      return;
+    }
+    try {
+      const file = await workspace.readText(path);
+      sendJson(response, 200, file);
+    } catch (error) {
+      sendJson(response, 400, {
+        error: error instanceof Error ? error.message : "Could not read file.",
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/search" && method === "GET") {
+    const pattern = url.searchParams.get("q");
+    if (!pattern) {
+      sendJson(response, 200, { matches: [] });
+      return;
+    }
+    try {
+      const matches = await searchText({
+        root: store.project.rootPath,
+        pattern,
+        glob: url.searchParams.get("glob") ?? undefined,
+        maxResults: MAX_SEARCH_RESULTS,
+      });
+      sendJson(response, 200, { matches });
+    } catch (error) {
+      sendJson(response, 400, {
+        error: error instanceof Error ? error.message : "Search failed.",
+      });
+    }
+    return;
+  }
 
   if (url.pathname === "/api/providers" && method === "GET") {
     sendJson(response, 200, { providers: listProviders(store) });

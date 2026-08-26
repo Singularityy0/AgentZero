@@ -1,5 +1,5 @@
 {
-  "name": "packagesgui",
+  "name": "@agentic-runtime/gui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -8,7 +8,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
-  "dependencies": {},
+  "dependencies": {
+    "monaco-editor": "^0.52.2"
+  },
   "devDependencies": {
     "vite": "^6.0.3",
     "typescript": "~5.6.2"

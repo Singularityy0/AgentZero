@@ -57,6 +57,10 @@ importers:
         version: link:../openai
 
   packages/gui:
+    dependencies:
+      monaco-editor:
+        specifier: ^0.52.2
+        version: 0.52.2
     devDependencies:
       typescript:
         specifier: ~5.6.2
@@ -73,9 +77,15 @@ importers:
       "@agentic-runtime/gateway":
         specifier: workspace:*
         version: link:../gateway
+      "@agentic-runtime/search":
+        specifier: workspace:*
+        version: link:../search
       "@agentic-runtime/session":
         specifier: workspace:*
         version: link:../session
+      "@agentic-runtime/workspace":
+        specifier: workspace:*
+        version: link:../workspace
 
   packages/ollama:
     dependencies:
@@ -3320,6 +3330,12 @@ packages:
         integrity: sha512-wFa1v6KP8bKp+fj0nYmRs1Pb5K4zRkXGKsOvLinvILENFIADncm4XlOI+S1M7yuACMGfI6cfk0IifDgd4j5xmw==,
       }
 
+  monaco-editor@0.52.2:
+    resolution:
+      {
+        integrity: sha512-GEQWEZmfkOGLdd3XK8ryrfWz3AIP8YymVXiPHEdewrUq7mh0qrKrfHLNCXcbB6sTnMLnOZ3ztSiKcciFUkIJwQ==,
+      }
+
   ms@2.1.3:
     resolution:
       {
@@ -6450,6 +6466,8 @@ snapshots:
     dependencies:
       is-any-array: 3.0.0
       ml-array-rescale: 2.0.0
+
+  monaco-editor@0.52.2: {}
 
   ms@2.1.3: {}
 

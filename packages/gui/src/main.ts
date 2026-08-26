@@ -1,3 +1,134 @@
+import { Explorer } from "./explorer";
+import { Editor } from "./editor";
+
+// --------------------------------------------------------
+// Layout & State Initialization
+// --------------------------------------------------------
+
+let editor: Editor;
+let explorer: Explorer;
+
+document.addEventListener("DOMContentLoaded", () => {
+  // Initialize Editor
+  editor = new Editor("monaco-container");
+
+  // Hide welcome screen when a file is opened
+  const welcomeScreen = document.querySelector(
+    ".welcome-screen",
+  ) as HTMLElement;
+  const statusLine = document.getElementById(
+    "status-line-col",
+  ) as HTMLSpanElement;
+  const statusLanguage = document.getElementById(
+    "status-language",
+  ) as HTMLSpanElement;
+  editor.onCursorPositionChanged((line, column) => {
+    statusLine.textContent = `Ln ${line}, Col ${column}`;
+  });
+  editor.onActiveLanguageChanged((language) => {
+    statusLanguage.textContent = language;
+  });
+
+  // Initialize Explorer
+  explorer = new Explorer("file-tree", (filePath) => {
+    welcomeScreen.style.display = "none";
+    editor.show();
+    void editor.loadFile(filePath);
+
+    // Update active tab
+    const tab = document.getElementById("active-file-tab");
+    if (tab) {
+      tab.textContent = filePath.split(/[/\\]/).pop() || filePath;
+    }
+  });
+
+  void explorer.load(".");
+
+  // Activity Bar routing
+  const actions = document.querySelectorAll(".activity-action");
+  actions.forEach((action) => {
+    action.addEventListener("click", () => {
+      // Toggle active class on actions
+      actions.forEach((a) => a.classList.remove("active"));
+      action.classList.add("active");
+
+      // Show target view in sidebar
+      const target = action.getAttribute("data-target");
+      document.querySelectorAll(".sidebar-view").forEach((view) => {
+        view.classList.remove("active");
+      });
+      const view = document.getElementById(`view-${target}`);
+      if (view) view.classList.add("active");
+    });
+  });
+
+  void loadProject();
+  void loadProviders();
+  setupChat();
+});
+
+// --------------------------------------------------------
+// Status bar / project info
+// --------------------------------------------------------
+
+async function loadProject(): Promise<void> {
+  const nameEl = document.getElementById(
+    "status-workspace-name",
+  ) as HTMLSpanElement;
+  const connectionEl = document.getElementById(
+    "status-connection",
+  ) as HTMLSpanElement;
+  try {
+    const response = await fetch("/api/project");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = (await response.json()) as { name: string };
+    nameEl.textContent = body.name;
+    connectionEl.textContent = "Connected";
+  } catch {
+    nameEl.textContent = "No workspace";
+    connectionEl.textContent = 'Disconnected - start with "pnpm settings"';
+  }
+}
+
+// --------------------------------------------------------
+// AI Chat (preview only - not yet wired to the agent runtime)
+// --------------------------------------------------------
+
+function setupChat(): void {
+  const input = document.getElementById("chat-input") as HTMLInputElement;
+  const history = document.getElementById("chat-history") as HTMLDivElement;
+  if (!input || !history) return;
+
+  appendChatMessage(
+    history,
+    "system",
+    "Preview UI - this chat is not yet connected to the agent runtime. " +
+      "Messages you send here are only shown locally.",
+  );
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || !input.value.trim()) return;
+    appendChatMessage(history, "user", input.value.trim());
+    input.value = "";
+  });
+}
+
+function appendChatMessage(
+  container: HTMLDivElement,
+  role: "user" | "system",
+  text: string,
+): void {
+  const bubble = document.createElement("div");
+  bubble.className = `chat-message chat-message-${role}`;
+  bubble.textContent = text;
+  container.appendChild(bubble);
+  container.scrollTop = container.scrollHeight;
+}
+
+// --------------------------------------------------------
+// Provider Settings Logic (Retained from original main.ts)
+// --------------------------------------------------------
+
 interface ProviderView {
   id: string;
   label: string;
@@ -11,23 +142,15 @@ interface ProviderView {
   lastValidation?: { ok: boolean; message?: string; at: number };
 }
 
-const providersList = document.getElementById(
-  "providers-list",
-) as HTMLDivElement;
-const statusMsg = document.getElementById(
-  "vault-status",
-) as HTMLParagraphElement;
-
-window.addEventListener("DOMContentLoaded", () => {
-  void loadProviders();
-});
-
 async function loadProviders(): Promise<void> {
+  const providersList = document.getElementById(
+    "providers-list",
+  ) as HTMLDivElement;
   try {
     const response = await fetch("/api/providers");
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = (await response.json()) as { providers: ProviderView[] };
-    render(body.providers);
+    renderProviders(body.providers, providersList);
   } catch (error) {
     providersList.innerHTML = "";
     showStatus(
@@ -39,10 +162,13 @@ async function loadProviders(): Promise<void> {
   }
 }
 
-function render(providers: ProviderView[]): void {
-  providersList.innerHTML = "";
+function renderProviders(
+  providers: ProviderView[],
+  container: HTMLDivElement,
+): void {
+  container.innerHTML = "";
   for (const provider of providers) {
-    providersList.appendChild(renderProviderCard(provider));
+    container.appendChild(renderProviderCard(provider));
   }
 }
 
@@ -65,7 +191,7 @@ function renderProviderCard(provider: ProviderView): HTMLDivElement {
     help.href = provider.helpUrl;
     help.target = "_blank";
     help.rel = "noreferrer";
-    help.style.fontSize = "0.65rem";
+    help.style.fontSize = "10px";
     help.style.color = "var(--text-muted)";
     help.textContent = "Get an API key ->";
     card.appendChild(help);
@@ -239,19 +365,10 @@ async function validateProvider(providerId: string): Promise<void> {
 }
 
 function showStatus(message: string, isError: boolean): void {
+  const statusMsg = document.getElementById(
+    "vault-status",
+  ) as HTMLParagraphElement;
+  if (!statusMsg) return;
   statusMsg.textContent = message;
-  statusMsg.style.color = isError
-    ? "var(--diff-remove-text)"
-    : "var(--diff-add-text)";
+  statusMsg.style.color = isError ? "#f85149" : "#3fb950";
 }
-
-// Clickable code tokens in the chat/diff panels - wired to the real
-// TypeScript workspace/review service in a later phase (manual context
-// control). For now this only logs the intent.
-document.querySelectorAll(".file-tag").forEach((tag) => {
-  tag.addEventListener("click", () => {
-    const file = tag.getAttribute("data-file");
-    const lines = tag.getAttribute("data-line");
-    console.log(`Opening ${file} at lines ${lines}`);
-  });
-});
