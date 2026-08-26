@@ -3,8 +3,8 @@
 ## Identity
 
 - Project: `agentic-runtime`
-- Purpose: build an agentic AI runtime in TypeScript first, with future Rust
-  components using Rig (`rig.rs`)
+- Purpose: build an agentic AI runtime and coding IDE architecture fully in
+  TypeScript
 - Current phase: workspace setup only
 - Repository root: `D:\MediaServer\MEDIA\porno`
 
@@ -28,7 +28,6 @@ packages/workspace/src/  Safe file operations and patch/diff service
 packages/search/src/     Ripgrep-backed text and file search
 packages/session/src/    SQLite global/project/session persistence
 examples/                Placeholder for runnable examples
-rust/                    Placeholder for future Rust packages/components
 agent-context/           Persistent context for coding agents
 ```
 
