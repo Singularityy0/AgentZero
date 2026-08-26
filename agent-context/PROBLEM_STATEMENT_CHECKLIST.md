@@ -21,10 +21,19 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 - [x] OpenAI and Ollama provider boundaries exist.
 - [x] Local Ollama support exists.
-- [~] Provider/model configuration exists through environment variables.
-- [ ] Formal enforcement that every selected model is `<=80B` parameters.
+- [~] Provider/model configuration exists through environment variables and
+  the settings screen.
+- [x] Formal enforcement that every selected model is `<=80B` parameters:
+      `ModelRegistry.replace()` drops any model with a _known_ count over
+      80B. Partial — the parameter catalog backing this only has 2 real
+      entries so far, and models with an _unknown_ count are flagged
+      `unverified` rather than blocked (that flag isn't surfaced in any UI
+      yet). See `IMPLEMENTATION_PLAN.md` Phase 1.
 - [ ] Verification that local models run within `16GB RAM / 8GB VRAM`.
-- [ ] Cost and provider eligibility enforcement.
+- [x] Provider eligibility enforcement: `ProviderRegistry.register()` rejects
+      any provider ID not on the explicit free-tier/pay-as-you-go/local
+      allowlist. Cost enforcement (tracking $ spent against the PS's $0.5
+      per-task ceiling) is not implemented.
 
 ## 3. Smart Routing
 
@@ -139,10 +148,18 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 ## Highest-Priority Remaining Work
 
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the ordered,
-file-level plan. Summary (Phase 0 - settings screen - is done):
+file-level plan. Summary (Phase 0 - settings screen - is done; Phase 1 -
+model/hosting constraints - is mostly done):
 
-1. ~~Mandatory settings screen.~~ Done (Phase 0).
-2. 80B/free-tier/local-hardware enforcement on model selection (Phase 1).
+1. ~~Mandatory settings screen.~~ Done (Phase 0). The GUI was also rebuilt
+   from a static 4-pane mockup into a real editor shell (file explorer,
+   Monaco viewer, live status bar) in the same pass - not itself a scored
+   requirement, but it's what the settings screen and future manual-context/
+   dashboard work (7, 9 below) will build on top of.
+2. ~~80B/free-tier enforcement (the hard-block half).~~ Done (Phase 1).
+   Remaining: populate `MODEL_PARAMETER_CATALOG` with real entries, surface
+   the `unverified` flag in a UI, and add the 16GB/8GB local-hardware
+   soft-check.
 3. Smart routing signals, visible reasoning, and provider fallback (Phase 2).
 4. Context compaction (Phase 3).
 5. Code indexing and high-quality retrieval (Phase 4).

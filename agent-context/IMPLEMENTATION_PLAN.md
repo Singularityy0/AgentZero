@@ -29,21 +29,27 @@ were removed; their unique content was merged into
 6. Run `pnpm build && pnpm test && pnpm lint && pnpm format:check` before
    considering any phase's steps done.
 
-## Snapshot at time of writing (2026-08-26)
+## Snapshot at time of writing (2026-08-26, updated same day after Phase 0/1 + GUI shell work)
 
 Verified by direct code inspection, not just docs:
 
 - Gateway (`packages/gateway/src/index.ts`) has real provider adapters (Groq,
-  OpenRouter, Ollama, OpenAI-compatible) but `select()` is manual — no
+  OpenRouter, Ollama, OpenAI-compatible), credential-store-backed routing via
+  `StoredCredentialResolver`, and now enforces the 80B/free-tier constraints
+  (Phase 1, done — see below). `select()` is still manual — no
   complexity/cost-aware routing, no failover, no `reason`/`estimatedCost` on
-  `GatewayEvent`.
-- 80B parameter cap and 16GB/8GB local-hardware constraint exist only in
-  comments/docs, enforced nowhere in code
-  (`packages/gateway/src/index.ts:497-499`).
-- GUI settings screen (`packages/gui/src/main.ts`) is a localStorage scaffold
-  for 3 hardcoded providers, **not wired to the gateway's
-  `CredentialResolver`**. This is the disqualifying requirement — treat Phase
-  0 as blocking.
+  `GatewayEvent`. That's still Phase 2, not started.
+- GUI settings screen is done (Phase 0) and the GUI itself is no longer a
+  static 4-pane mockup: it's a real editor workbench (activity bar, file
+  explorer backed by `packages/gui-server`'s `/api/files*`, Monaco as the
+  actual code viewer, live status bar, working settings, preview-labeled
+  chat panel) — see `packages/gui/src/{main,explorer,editor}.ts`. Still
+  missing: any write/save path from the GUI (editor is read-only by design
+  until HITL approval-gating is wired to it — Phase 6), clickable file/line
+  tags and `/bytheway` (Phase 7), and the observability dashboard (Phase 8).
+- The `packages/gui/src-tauri` Rust/Tauri backend and the unrelated orphaned
+  `rust/` crate at the repo root are both gone. The project is TypeScript
+  end to end now, matching what the docs already claimed.
 - No context compaction exists anywhere in `packages/core/src`.
 - Retrieval is ripgrep/keyword only (`packages/search`, `find_files`,
   `search_text`) — no index, no ranking, no structural understanding.
@@ -147,32 +153,43 @@ code review, not a driven browser session).
 
 ## Phase 1 — Enforce model/hosting constraints
 
-**PS requirement:** 2. **Current state:** unenforced.
+**PS requirement:** 2. **Status: mostly done** (2026-08-26).
 
-- [ ] Add a `totalParameters?: number` field to `ModelInfo`
-      (`packages/gateway/src/index.ts:9`).
-- [ ] Build a static catalog override table (JSON or TS const) mapping known
-      model IDs (Groq/OpenRouter/Ollama model names) to their published total
-      parameter count, since provider APIs don't expose this reliably (see
-      the existing comment at `packages/gateway/src/index.ts:497`).
-- [ ] In `ModelRegistry.replace()` / the `normalize*Model()` functions, drop
-      or flag models with unknown or >80B total parameters. Unknown-parameter
-      models should be visibly flagged "unverified" in the UI rather than
-      silently allowed.
-- [ ] Reject paid-subscription-only providers at the `ProviderAdapter`
-      registration level — document per-provider why each one qualifies as
-      free-tier/pay-as-you-go in `packages/gateway/README.md` (create if
-      missing).
+- [x] Added `totalParameters?: number` to `ModelInfo`
+      (`packages/gateway/src/index.ts`).
+- [x] Added `MODEL_PARAMETER_CATALOG` (provider+modelId -> published total
+      parameter count) and `lookupTotalParameters()`. Only 2 real entries so
+      far (Mixtral-8x7B-32768, llama2:7b) — deliberately sparse rather than
+      guessed; **extending this catalog with more real, cited figures for
+      every model your team actually plans to use is still open work**, do
+      not treat "mostly done" as "fully populated."
+- [x] `ModelRegistry.replace()` drops any model with a _known_ total
+      parameter count over 80B, and flags any model with _no_ known count as
+      `metadata.unverified = true` instead of silently allowing it.
+- [x] `ProviderRegistry.register()` throws for any provider ID not in the
+      explicit `FREE_PROVIDERS` allowlist (groq, openrouter, ollama,
+      openai-compatible) — a non-free provider literally cannot be
+      registered, not just hidden.
+- [ ] Document per-provider why each one qualifies as free-tier/pay-as-you-go
+      in `packages/gateway/README.md` (doesn't exist yet).
+- [ ] The `unverified` flag isn't surfaced anywhere in the GUI/TUI yet — a
+      user picking a model has no visible signal that its parameter count is
+      unconfirmed. Needs a model-picker UI first (doesn't exist yet either;
+      current clients pick a model via env var / `manualModelId`), so this
+      is blocked on that, not just an oversight.
 - [ ] For local models (Ollama), add a soft-check: read `ollama show <model>`
       output or the catalog override table to warn if a model is unlikely to
       fit 16GB RAM / 8GB VRAM (quantization + parameter count heuristic).
       Document the heuristic's limits — this can't be perfectly verified
       from software alone.
-- [ ] Add a unit test asserting an >80B or unknown model is excluded from
-      `discover()` results by default.
+- [ ] Add a unit test asserting an >80B model is excluded from
+      `ModelRegistry.replace()`'s result and an unknown-parameter model gets
+      `unverified: true`.
 
 **Acceptance:** `ModelRegistry.list()` never returns a disqualified model
-without an explicit override flag the user had to set knowingly.
+without an explicit override flag the user had to set knowingly. Met for the
+hard-block case (known >80B); not yet met for "visibly flagged" since nothing
+renders `unverified` to a user.
 
 ---
 

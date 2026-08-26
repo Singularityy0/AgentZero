@@ -296,8 +296,30 @@ The most important remaining gaps against the problem statement are:
 - Block-level diff review.
 - Git merge tooling.
 - Full observability dashboard with per-agent token and timing metrics.
-- 80B total-parameter and free-tier/local-hardware enforcement on model
-  selection (still unenforced in code — see `IMPLEMENTATION_PLAN.md` Phase 1).
+- A write/save path from the GUI editor (currently read-only by design — see
+  below — since there's no approval-gating wired to GUI-initiated edits yet).
+- Clickable file/line tags and `/bytheway` (Phase 7).
+- Populating `MODEL_PARAMETER_CATALOG` with real figures beyond the 2 seed
+  entries, an Ollama RAM/VRAM soft-check, and surfacing the `unverified`
+  model flag anywhere in the UI (80B/free-tier hard-blocking itself is
+  enforced — see `IMPLEMENTATION_PLAN.md` Phase 1).
 - Encryption-at-rest for stored provider credentials (the settings screen
   now works end-to-end, but saved keys sit in the global SQLite file as
   plaintext, the same trust level as the `.env` file they replace).
+
+## 11. GUI
+
+`packages/gui` is a real editor workbench, not a settings-only screen:
+activity bar (Explorer / AI Chat / Settings), a file explorer backed by
+`gui-server`'s `/api/files` and `/api/files/content` (built on the existing
+`WorkspaceFileService`, so it's workspace-root-scoped like every other file
+tool), and Monaco — the same editor engine VSCode uses — as the code viewer,
+wired through Vite's `?worker` imports for language workers. The editor is
+read-only: there's no save/write path or approval flow from the GUI yet. The
+status bar shows real state (workspace name and `gui-server` connectivity,
+live cursor position and detected language from Monaco's own events) rather
+than placeholder text. The AI chat panel accepts input and appends real user
+messages but is explicitly labeled preview-only; it is not wired to
+`MultiAgentOrchestrator`. `packages/gui/src-tauri` and the unrelated orphaned
+`rust/` crate at the repo root have both been removed — the project has no
+Rust anywhere now, matching what the docs already said.
