@@ -320,6 +320,4 @@ status bar shows real state (workspace name and `gui-server` connectivity,
 live cursor position and detected language from Monaco's own events) rather
 than placeholder text. The AI chat panel accepts input and appends real user
 messages but is explicitly labeled preview-only; it is not wired to
-`MultiAgentOrchestrator`. `packages/gui/src-tauri` and the unrelated orphaned
-`rust/` crate at the repo root have both been removed — the project has no
-Rust anywhere now, matching what the docs already said.
+`MultiAgentOrchestrator`. `packages/gui/src-tauri` has been removed in favor of `gui-server`, but the high-performance Rust engine in `rust/` has been retained and acts as a specialized backend for AST slicing and structural diff generation. The project uses a Hybrid Architecture, blending TypeScript for orchestration and UI, and Rust for heavy IDE lifting.

@@ -47,9 +47,7 @@ Verified by direct code inspection, not just docs:
   missing: any write/save path from the GUI (editor is read-only by design
   until HITL approval-gating is wired to it — Phase 6), clickable file/line
   tags and `/bytheway` (Phase 7), and the observability dashboard (Phase 8).
-- The `packages/gui/src-tauri` Rust/Tauri backend and the unrelated orphaned
-  `rust/` crate at the repo root are both gone. The project is TypeScript
-  end to end now, matching what the docs already claimed.
+- The `packages/gui/src-tauri` Tauri backend has been removed, but the `rust/` crate at the repo root is strictly retained for our Hybrid Architecture, providing high-performance AST slicing and block-level diffing to the TS orchestrator.
 - No context compaction exists anywhere in `packages/core/src`.
 - Retrieval is ripgrep/keyword only (`packages/search`, `find_files`,
   `search_text`) — no index, no ranking, no structural understanding.
