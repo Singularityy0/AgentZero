@@ -9,7 +9,7 @@ and use orchestration and verification to compensate for weaker single-model
 planning.
 
 The current implementation is a terminal client and runtime foundation. It is
-not yet a complete desktop IDE, provider gateway, semantic code index, or
+not yet a complete desktop IDE, smart provider gateway, semantic code index, or
 parallel multi-agent scheduler.
 
 ## 2. Package Boundaries
@@ -31,6 +31,8 @@ The repository uses independent packages under `packages/`:
   events, and project context.
 - `tui`: terminal interface, provider selection, agent selection, approvals,
   and runtime event display.
+- `gateway`: early provider registry, model catalog, OpenRouter,
+  OpenAI-compatible endpoint, and Ollama route support.
 
 Dependencies point toward the core contracts. The core package does not depend
 on a specific model provider or user interface.

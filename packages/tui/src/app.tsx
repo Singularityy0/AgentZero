@@ -488,7 +488,9 @@ function createRuntimeContext(
   const modelName =
     provider === "ollama"
       ? (process.env.OLLAMA_MODEL ?? "")
-      : (process.env.OPENROUTER_MODEL ?? process.env.OPENAI_MODEL ?? "");
+      : provider === "groq"
+        ? (process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile")
+        : (process.env.OPENROUTER_MODEL ?? process.env.OPENAI_MODEL ?? "");
   const store = new SessionStore({ projectRoot: workspaceRoot });
   const systemMessage = {
     role: "system" as const,
@@ -600,6 +602,11 @@ function createModel(provider: string, modelName: string): LanguageModel {
       providerId: "openrouter",
       credentialRef: "OPENROUTER_API_KEY",
     });
+  } else if (provider === "groq") {
+    gateway.configure({
+      providerId: "groq",
+      credentialRef: "GROQ_API_KEY",
+    });
   } else if (provider === "openai-compatible") {
     gateway.configure({
       providerId: "openai-compatible",
@@ -611,7 +618,7 @@ function createModel(provider: string, modelName: string): LanguageModel {
     });
   } else {
     throw new Error(
-      `Unsupported MODEL_PROVIDER: ${provider}. Use ollama, openrouter, or openai-compatible.`,
+      `Unsupported MODEL_PROVIDER: ${provider}. Use ollama, groq, openrouter, or openai-compatible.`,
     );
   }
   if (!modelName)

@@ -296,6 +296,59 @@ export class OpenRouterProvider extends HttpProvider {
   }
 }
 
+export class GroqProvider extends HttpProvider {
+  constructor(credentials: CredentialResolver, fetcher?: typeof fetch) {
+    super("groq", credentials, fetcher);
+  }
+  async validateCredentials(): Promise<void> {
+    const response = await this.fetcher(
+      "https://api.groq.com/openai/v1/models",
+      { headers: { Authorization: this.authorization() ?? "" } },
+    );
+    if (response.status === 401 || response.status === 403)
+      throw new Error("Groq credentials were rejected.");
+    if (!response.ok) throw new Error(`Groq unavailable (${response.status}).`);
+  }
+  async discoverModels(
+    options: { refresh?: boolean } = {},
+  ): Promise<ModelInfo[]> {
+    if (!options.refresh && this.cache) return this.cache.models;
+    const response = await this.fetcher(
+      "https://api.groq.com/openai/v1/models",
+      { headers: { Authorization: this.authorization() ?? "" } },
+    );
+    if (!response.ok)
+      throw new Error(`Groq model discovery failed (${response.status}).`);
+    const body = (await response.json()) as { data?: unknown };
+    if (!Array.isArray(body.data))
+      throw new Error("Groq returned a malformed model catalog.");
+    const models = body.data
+      .map((raw) => normalizeGroqModel(raw))
+      .filter((model): model is ModelInfo => Boolean(model));
+    this.cache = { fetchedAt: Date.now(), models };
+    return models;
+  }
+  async createRoute(model: ModelInfo): Promise<ModelRoute> {
+    const config = this.getConfig();
+    const key = this.credentials.get(config.credentialRef ?? "");
+    if (!key) throw new Error("Credential unavailable for provider groq.");
+    const baseUrl = "https://api.groq.com/openai/v1";
+    const client = new OpenAICompatibleChatModel({
+      apiKey: key,
+      model: model.id,
+      baseURL: baseUrl,
+    });
+    return {
+      providerId: this.id,
+      modelId: model.id,
+      baseUrl,
+      protocol: "openai-chat",
+      credentialRef: config.credentialRef,
+      execute: (request) => client.respond(request),
+    };
+  }
+}
+
 export class OllamaProvider extends HttpProvider {
   constructor(credentials: CredentialResolver, fetcher?: typeof fetch) {
     super("ollama", credentials, fetcher);
@@ -434,12 +487,36 @@ export function createDefaultProviderGateway(
   const credentials =
     options.credentials ?? new EnvironmentCredentialResolver();
   const registry = new ProviderRegistry()
+    .register(new GroqProvider(credentials, options.fetcher))
     .register(new OpenRouterProvider(credentials, options.fetcher))
     .register(new OpenAICompatibleProvider(credentials, options.fetcher))
     .register(new OllamaProvider(credentials, options.fetcher));
   return new ProviderGateway(registry, options.onEvent);
 }
 
+/** Groq's model list has no per-token pricing and no active/expert count, so
+ * the 80B total-parameter cap cannot be enforced from this metadata alone. */
+function normalizeGroqModel(raw: unknown): ModelInfo | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const model = raw as Record<string, unknown>;
+  if (typeof model.id !== "string") return undefined;
+  if (model.active === false) return undefined;
+  return {
+    id: model.id,
+    name: model.id,
+    providerId: "groq",
+    contextWindow: numberValue(model.context_window),
+    pricing: { inputPerMillion: 0, outputPerMillion: 0 },
+    capabilities: {
+      tools: !model.id.includes("whisper") && !model.id.includes("tts"),
+      vision: model.id.includes("vision") || model.id.includes("scout"),
+      reasoning: false,
+      streaming: true,
+      structuredOutput: true,
+    },
+    metadata: { ownedBy: model.owned_by },
+  };
+}
 function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const model = raw as Record<string, unknown>;
