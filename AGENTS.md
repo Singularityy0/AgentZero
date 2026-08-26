@@ -18,6 +18,6 @@ and important decisions.
 
 The workspace now includes modular OpenAI and Ollama response providers,
 interactive TUI, framework-neutral core tool contracts, an agent loop, separate
-IDE tools, and SQLite-backed session persistence. Language-specific
-intelligence, image analysis, additional providers, and Rust components have
-not been implemented yet.
+IDE tools, and SQLite-backed session persistence. The architecture is
+TypeScript-first and should stay dependency-light while still being achievable
+within the problem statement scope.

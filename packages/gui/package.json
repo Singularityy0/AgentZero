@@ -1,20 +1,17 @@
 {
-  "name": "packagesgui",
+  "name": "@agentic-runtime/gui",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview",
-    "tauri": "tauri"
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "monaco-editor": "^0.52.2"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
     "vite": "^6.0.3",
     "typescript": "~5.6.2"
   }
