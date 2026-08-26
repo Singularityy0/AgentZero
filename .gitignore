@@ -6,18 +6,9 @@ dist-tests/
 .env.*
 !.env.example
 
-# Rust build output
-target/
-
 # Local tooling
 .DS_Store
 Thumbs.db
 
 # Temporary workspace files
 tmp/
-
-# Tauri & Rust specific
-gen/
-*.rs.bk
-*.pdb
-Cargo.lock
