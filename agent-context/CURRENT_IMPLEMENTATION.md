@@ -9,7 +9,7 @@ and use orchestration and verification to compensate for weaker single-model
 planning.
 
 The current implementation is a terminal client and runtime foundation. It is
-not yet a complete desktop IDE, smart provider gateway, semantic code index, or
+not yet a complete desktop IDE, provider gateway, semantic code index, or
 parallel multi-agent scheduler.
 
 ## 2. Package Boundaries
@@ -31,13 +31,6 @@ The repository uses independent packages under `packages/`:
   events, and project context.
 - `tui`: terminal interface, provider selection, agent selection, approvals,
   and runtime event display.
-- `gateway`: provider registry, model catalog, Groq/OpenRouter/Ollama/
-  OpenAI-compatible route support, and `StoredCredentialResolver` for
-  settings-backed credentials.
-- `gui`: browser-based settings/chat/diff/dashboard UI (plain TypeScript +
-  Vite, no Tauri/Electron).
-- `gui-server`: local `node:http` bridge exposing the provider-settings API
-  and serving the built GUI; loopback-only.
 
 Dependencies point toward the core contracts. The core package does not depend
 on a specific model provider or user interface.
@@ -245,36 +238,18 @@ providers are:
 
 - OpenAI Responses API through `@agentic-runtime/openai`.
 - Ollama `/api/chat` through `@agentic-runtime/ollama`.
-- Groq, OpenRouter, and OpenAI-compatible/local endpoints through
-  `@agentic-runtime/gateway`.
 
 The Ollama adapter supports native structured tool calls and a constrained JSON
 fallback for models that emit tool calls as text. Requests default to a
 45-second timeout in the TUI, configurable with `OLLAMA_TIMEOUT_MS`. The TUI
-still selects a single active provider/model through `MODEL_PROVIDER` and does
-not yet perform complexity-aware routing or automatic failover between
-providers.
-
-Provider credentials, base URLs, and manual model IDs are stored in the global
-SQLite database via `SessionStore.setCredential`/`setProviderSetting` and
-resolved at call time by `StoredCredentialResolver`, which checks the store
-first and falls back to a per-provider environment variable
-(`DEFAULT_CREDENTIAL_ENV_FALLBACK`) only if nothing has been saved. Both the
-TUI (`/settings`) and the GUI (`pnpm settings`, served by
-`@agentic-runtime/gui-server`) read and write the same records, so a key saved
-in either client works in both without editing `.env`. `PROVIDER_FIELD_SPECS`
-in `@agentic-runtime/gateway` is the single source of truth for which fields
-(API key, base URL, manual model ID) each provider needs; the settings UI and
-`/settings` command both derive their forms from it instead of hardcoding
-provider names.
+currently selects one provider and model through environment variables; it does
+not yet perform complexity-aware routing or provider failover.
 
 ## 10. Verification and Known Gaps
 
 The current automated suite covers tool registry behavior, agent execution,
 handoffs, delegation proxies, workspace conflicts, search, command execution,
-project agent file loading, Ollama parsing, SQLite persistence (including
-credential/provider-setting storage), and `StoredCredentialResolver`
-fallback behavior.
+project agent file loading, Ollama parsing, and SQLite persistence.
 
 Current checks:
 
@@ -295,31 +270,5 @@ The most important remaining gaps against the problem statement are:
 - Full resumable multi-agent execution after crashes.
 - Block-level diff review.
 - Git merge tooling.
+- Mandatory provider settings screen.
 - Full observability dashboard with per-agent token and timing metrics.
-- A write/save path from the GUI editor (currently read-only by design — see
-  below — since there's no approval-gating wired to GUI-initiated edits yet).
-- Clickable file/line tags and `/bytheway` (Phase 7).
-- Populating `MODEL_PARAMETER_CATALOG` with real figures beyond the 2 seed
-  entries, an Ollama RAM/VRAM soft-check, and surfacing the `unverified`
-  model flag anywhere in the UI (80B/free-tier hard-blocking itself is
-  enforced — see `IMPLEMENTATION_PLAN.md` Phase 1).
-- Encryption-at-rest for stored provider credentials (the settings screen
-  now works end-to-end, but saved keys sit in the global SQLite file as
-  plaintext, the same trust level as the `.env` file they replace).
-
-## 11. GUI
-
-`packages/gui` is a real editor workbench, not a settings-only screen:
-activity bar (Explorer / AI Chat / Settings), a file explorer backed by
-`gui-server`'s `/api/files` and `/api/files/content` (built on the existing
-`WorkspaceFileService`, so it's workspace-root-scoped like every other file
-tool), and Monaco — the same editor engine VSCode uses — as the code viewer,
-wired through Vite's `?worker` imports for language workers. The editor is
-read-only: there's no save/write path or approval flow from the GUI yet. The
-status bar shows real state (workspace name and `gui-server` connectivity,
-live cursor position and detected language from Monaco's own events) rather
-than placeholder text. The AI chat panel accepts input and appends real user
-messages but is explicitly labeled preview-only; it is not wired to
-`MultiAgentOrchestrator`. `packages/gui/src-tauri` and the unrelated orphaned
-`rust/` crate at the repo root have both been removed — the project has no
-Rust anywhere now, matching what the docs already said.

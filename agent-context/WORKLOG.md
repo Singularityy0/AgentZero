@@ -129,3 +129,16 @@
 - Separated project rules from agent definitions by adding `.agentic/agents/*.md`
   discovery with YAML frontmatter, startup import, and a shared researcher
   definition example.
+- Implemented real AST slicing in `rust/src/flatcpg.rs` using `tree-sitter-typescript` to extract exact function declarations.
+- Implemented real structural diff logic in `rust/src/diff.rs` returning line-based `DiffChunk` patches.
+- Wired Rust logic in `main.rs` and completely removed all comments from Rust files to adhere to strict constraints.
+- Extended the `test-bridge.ts` to test against actual TypeScript source code and successfully validated AST/diff results.
+- End-to-End TUI testing revealed prompt/JSON-parsing limits of 7B models for large diff tool arguments.
+- Re-routed General Agent via `OPENAI_COMPATIBLE_MODEL` to `qwen/qwen3.6-27b` on Groq to respect the <=80B and "Free API" constraint, successfully completing the autonomous demo loop.
+
+## Next Steps
+
+- Refine the IDE Observability Dashboard to show full call hierarchy traces per the PS requirements.
+- Finalize the codebase semantic index (beyond ripgrep) for complex code retrieval.
+- Document the entire system architecture, routing decisions, and API setup process in `README.md` for the final submission.
+- Package cross-platform builds and ensure zero-friction setup.

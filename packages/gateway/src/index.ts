@@ -5,37 +5,13 @@ import type {
 } from "@agentic-runtime/core";
 import { OllamaModel } from "@agentic-runtime/ollama";
 import { OpenAICompatibleChatModel } from "@agentic-runtime/openai";
-/** Static catalog of known model total (not active/expert) parameter counts,
- * from each model's publisher. Provider APIs don't reliably expose this, so
- * it has to be maintained by hand - see the "unverified" metadata flag
- * ModelRegistry.replace() sets for anything missing here. Only add entries
- * you can cite a real published figure for; a wrong number here is a
- * disqualification risk under the PS's <=80B constraint. Ollama keys must
- * match the exact tag returned by `ollama list` (e.g. "llama2:7b"), not the
- * bare model family name. */
-const MODEL_PARAMETER_CATALOG: Record<string, Record<string, number>> = {
-  groq: {
-    "mixtral-8x7b-32768": 46_700_000_000, // Mistral AI, published total param count
-  },
-  openrouter: {},
-  ollama: {
-    "llama2:7b": 7_000_000_000,
-  },
-};
-function lookupTotalParameters(
-  providerId: string,
-  modelId: string,
-): number | undefined {
-  return MODEL_PARAMETER_CATALOG[providerId]?.[modelId];
-}
+
 export interface ModelInfo {
   id: string;
   name: string;
   providerId: string;
   contextWindow?: number;
   maxOutputTokens?: number;
-  /** Total parameter count for the model, if known. */
-  totalParameters?: number;
   pricing?: { inputPerMillion?: number; outputPerMillion?: number };
   capabilities: {
     tools: boolean;
@@ -44,7 +20,6 @@ export interface ModelInfo {
     streaming: boolean;
     structuredOutput: boolean;
   };
-  /** Additional arbitrary metadata about the model. May include an `unverified` flag for unknown parameters. */
   metadata: Record<string, unknown>;
 }
 
@@ -100,61 +75,11 @@ export class EnvironmentCredentialResolver implements CredentialResolver {
   }
 }
 
-/** Structural interface matching @agentic-runtime/session's SessionStore -
- * kept structural (not imported) so packages/gateway does not take on a
- * dependency on packages/session for one method. */
-export interface CredentialStore {
-  getCredential(providerId: string): string | undefined;
-}
-
-/** Env var fallback so a provider configured via .env before the settings
- * screen existed keeps working without re-entering the key. A value saved
- * through the settings screen (TUI `/settings` or the GUI) always takes
- * priority over this. Shared by every client that builds a
- * StoredCredentialResolver so they stay in sync. */
-export const DEFAULT_CREDENTIAL_ENV_FALLBACK: Record<string, string> = {
-  groq: "GROQ_API_KEY",
-  openrouter: "OPENROUTER_API_KEY",
-  "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
-};
-
-/**
- * Resolves credentials by provider ID from a persisted settings store (the
- * settings screen writes here), falling back to an environment variable per
- * provider for local dev/example scripts that never touched the UI. This is
- * the resolver the TUI/GUI should use so a key saved once, from either
- * client, works everywhere without editing `.env`.
- */
-export class StoredCredentialResolver implements CredentialResolver {
-  constructor(
-    private readonly store: CredentialStore,
-    private readonly envFallback: Record<string, string> = {},
-  ) {}
-  get(reference: string): string | undefined {
-    const stored = this.store.getCredential(reference);
-    if (stored) return stored;
-    const envVar = this.envFallback[reference];
-    return envVar ? process.env[envVar] : undefined;
-  }
-}
-
 export class ProviderRegistry {
   private readonly providers = new Map<string, ProviderAdapter>();
-  /** Allowed free-tier provider IDs. */
-  private static readonly FREE_PROVIDERS = new Set([
-    "groq",
-    "openrouter",
-    "ollama",
-    "openai-compatible",
-  ]);
   register(provider: ProviderAdapter): this {
     if (this.providers.has(provider.id))
       throw new Error(`Provider already registered: ${provider.id}`);
-    if (!ProviderRegistry.FREE_PROVIDERS.has(provider.id)) {
-      throw new Error(
-        `Provider ${provider.id} is not on the free-tier/pay-as-you-go/local allowlist.`,
-      );
-    }
     this.providers.set(provider.id, provider);
     return this;
   }
@@ -173,18 +98,8 @@ export class ModelRegistry {
   replace(providerId: string, models: ModelInfo[]): void {
     for (const key of this.models.keys())
       if (key.startsWith(`${providerId}:`)) this.models.delete(key);
-    for (const model of models) {
-      // Enforce 80B parameter cap; drop oversized models.
-      if (model.totalParameters && model.totalParameters > 80_000_000_000) {
-        // Skip adding this model.
-        continue;
-      }
-      // Flag unknown parameter count as unverified.
-      if (!model.totalParameters) {
-        model.metadata = { ...(model.metadata ?? {}), unverified: true };
-      }
+    for (const model of models)
       this.models.set(keyFor(model.providerId, model.id), model);
-    }
   }
   get(providerId: string, modelId: string): ModelInfo | undefined {
     return this.models.get(keyFor(providerId, modelId));
@@ -381,59 +296,6 @@ export class OpenRouterProvider extends HttpProvider {
   }
 }
 
-export class GroqProvider extends HttpProvider {
-  constructor(credentials: CredentialResolver, fetcher?: typeof fetch) {
-    super("groq", credentials, fetcher);
-  }
-  async validateCredentials(): Promise<void> {
-    const response = await this.fetcher(
-      "https://api.groq.com/openai/v1/models",
-      { headers: { Authorization: this.authorization() ?? "" } },
-    );
-    if (response.status === 401 || response.status === 403)
-      throw new Error("Groq credentials were rejected.");
-    if (!response.ok) throw new Error(`Groq unavailable (${response.status}).`);
-  }
-  async discoverModels(
-    options: { refresh?: boolean } = {},
-  ): Promise<ModelInfo[]> {
-    if (!options.refresh && this.cache) return this.cache.models;
-    const response = await this.fetcher(
-      "https://api.groq.com/openai/v1/models",
-      { headers: { Authorization: this.authorization() ?? "" } },
-    );
-    if (!response.ok)
-      throw new Error(`Groq model discovery failed (${response.status}).`);
-    const body = (await response.json()) as { data?: unknown };
-    if (!Array.isArray(body.data))
-      throw new Error("Groq returned a malformed model catalog.");
-    const models = body.data
-      .map((raw) => normalizeGroqModel(raw))
-      .filter((model): model is ModelInfo => Boolean(model));
-    this.cache = { fetchedAt: Date.now(), models };
-    return models;
-  }
-  async createRoute(model: ModelInfo): Promise<ModelRoute> {
-    const config = this.getConfig();
-    const key = this.credentials.get(config.credentialRef ?? "");
-    if (!key) throw new Error("Credential unavailable for provider groq.");
-    const baseUrl = "https://api.groq.com/openai/v1";
-    const client = new OpenAICompatibleChatModel({
-      apiKey: key,
-      model: model.id,
-      baseURL: baseUrl,
-    });
-    return {
-      providerId: this.id,
-      modelId: model.id,
-      baseUrl,
-      protocol: "openai-chat",
-      credentialRef: config.credentialRef,
-      execute: (request) => client.respond(request),
-    };
-  }
-}
-
 export class OllamaProvider extends HttpProvider {
   constructor(credentials: CredentialResolver, fetcher?: typeof fetch) {
     super("ollama", credentials, fetcher);
@@ -460,26 +322,19 @@ export class OllamaProvider extends HttpProvider {
       throw new Error("Ollama returned a malformed model catalog.");
     const models = body.models
       .filter((model) => Boolean(model.name))
-      .map((model) => {
-        const totalParams = lookupTotalParameters("ollama", model.name!);
-        return {
-          id: model.name!,
-          name: model.name!,
-          providerId: this.id,
-          totalParameters: totalParams,
-          capabilities: {
-            tools: true,
-            vision: false,
-            reasoning: false,
-            streaming: true,
-            structuredOutput: true,
-          },
-          metadata: {
-            ...(model.details ?? {}),
-            ...(totalParams ? {} : { unverified: true }),
-          },
-        };
-      });
+      .map((model) => ({
+        id: model.name!,
+        name: model.name!,
+        providerId: this.id,
+        capabilities: {
+          tools: true,
+          vision: false,
+          reasoning: false,
+          streaming: true,
+          structuredOutput: true,
+        },
+        metadata: model.details ?? {},
+      }));
     this.cache = { fetchedAt: Date.now(), models };
     return models;
   }
@@ -569,80 +424,6 @@ export class OpenAICompatibleProvider extends HttpProvider {
   }
 }
 
-export interface ProviderFieldSpec {
-  id: string;
-  label: string;
-  fields: Array<"apiKey" | "baseUrl" | "manualModelId">;
-  credentialRequired: boolean;
-  helpUrl?: string;
-}
-
-/** Single source of truth for what a settings screen needs to collect per
- * provider, so the GUI/TUI settings surfaces don't hardcode provider
- * knowledge that can drift from what createDefaultProviderGateway registers. */
-export const PROVIDER_FIELD_SPECS: ProviderFieldSpec[] = [
-  {
-    id: "groq",
-    label: "Groq",
-    fields: ["apiKey"],
-    credentialRequired: true,
-    helpUrl: "https://console.groq.com/keys",
-  },
-  {
-    id: "openrouter",
-    label: "OpenRouter",
-    fields: ["apiKey"],
-    credentialRequired: true,
-    helpUrl: "https://openrouter.ai/keys",
-  },
-  {
-    id: "ollama",
-    label: "Ollama (local)",
-    fields: ["baseUrl"],
-    credentialRequired: false,
-  },
-  {
-    id: "openai-compatible",
-    label: "OpenAI-compatible / local endpoint",
-    fields: ["baseUrl", "apiKey", "manualModelId"],
-    credentialRequired: false,
-  },
-];
-
-export interface ProviderSettingsStore extends CredentialStore {
-  getProviderSetting(providerId: string, key: string): string | undefined;
-}
-
-/** Shared by every client (TUI `/settings`, GUI server) so "validate" means
- * the same thing everywhere: build a one-off gateway from whatever is
- * currently persisted for this provider and try validateCredentials(). */
-export async function validateStoredProvider(
-  store: ProviderSettingsStore,
-  spec: ProviderFieldSpec,
-  envFallback: Record<string, string> = DEFAULT_CREDENTIAL_ENV_FALLBACK,
-): Promise<{ ok: boolean; message?: string }> {
-  try {
-    const credentials = new StoredCredentialResolver(store, envFallback);
-    const gateway = createDefaultProviderGateway({ credentials });
-    gateway.configure({
-      providerId: spec.id,
-      baseUrl: store.getProviderSetting(spec.id, "baseUrl"),
-      credentialRef:
-        spec.credentialRequired || store.getCredential(spec.id)
-          ? spec.id
-          : undefined,
-      manualModelId: store.getProviderSetting(spec.id, "manualModelId"),
-    });
-    await gateway.validate(spec.id);
-    return { ok: true };
-  } catch (error) {
-    return {
-      ok: false,
-      message: error instanceof Error ? error.message : "Validation failed.",
-    };
-  }
-}
-
 export function createDefaultProviderGateway(
   options: {
     credentials?: CredentialResolver;
@@ -653,38 +434,12 @@ export function createDefaultProviderGateway(
   const credentials =
     options.credentials ?? new EnvironmentCredentialResolver();
   const registry = new ProviderRegistry()
-    .register(new GroqProvider(credentials, options.fetcher))
     .register(new OpenRouterProvider(credentials, options.fetcher))
     .register(new OpenAICompatibleProvider(credentials, options.fetcher))
-    .register(new OllamaProvider(credentials, options.fetcher)); // All are free-tier providers
+    .register(new OllamaProvider(credentials, options.fetcher));
   return new ProviderGateway(registry, options.onEvent);
 }
 
-/** Groq's model list has no per-token pricing and no active/expert count, so
- * the 80B total-parameter cap cannot be enforced from this metadata alone. */
-function normalizeGroqModel(raw: unknown): ModelInfo | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const model = raw as Record<string, unknown>;
-  if (typeof model.id !== "string") return undefined;
-  if (model.active === false) return undefined;
-  const totalParams = lookupTotalParameters("groq", model.id);
-  return {
-    id: model.id,
-    name: model.id,
-    providerId: "groq",
-    contextWindow: numberValue(model.context_window),
-    totalParameters: totalParams,
-    pricing: { inputPerMillion: 0, outputPerMillion: 0 },
-    capabilities: {
-      tools: !model.id.includes("whisper") && !model.id.includes("tts"),
-      vision: model.id.includes("vision") || model.id.includes("scout"),
-      reasoning: false,
-      streaming: true,
-      structuredOutput: true,
-    },
-    metadata: { ownedBy: model.owned_by },
-  };
-}
 function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const model = raw as Record<string, unknown>;
@@ -706,14 +461,12 @@ function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
   const inputModalities = Array.isArray(architecture.input_modalities)
     ? architecture.input_modalities
     : [];
-  const totalParams = lookupTotalParameters("openrouter", model.id);
   return {
     id: model.id,
     name: typeof model.name === "string" ? model.name : model.id,
     providerId: "openrouter",
     contextWindow: context,
     maxOutputTokens: output,
-    totalParameters: totalParams,
     pricing: {
       inputPerMillion: perMillion(pricing.prompt),
       outputPerMillion: perMillion(pricing.completion),
@@ -729,10 +482,7 @@ function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
         Array.isArray(model.supported_parameters) &&
         model.supported_parameters.includes("response_format"),
     },
-    metadata: {
-      ...(model as Record<string, unknown>),
-      ...(model.totalParameters ? {} : { unverified: true }),
-    },
+    metadata: model,
   };
 }
 function manualModel(providerId: string, id: string): ModelInfo {
@@ -748,7 +498,6 @@ function manualModel(providerId: string, id: string): ModelInfo {
       structuredOutput: true,
     },
     metadata: {},
-    // totalParameters may be supplied via catalog later
   };
 }
 function numberValue(value: unknown): number | undefined {

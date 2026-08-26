@@ -45,3 +45,5 @@ export {
   type MultiAgentOptions,
   type MultiAgentResult,
 } from "./agents.js";
+export { RustClient } from "./rust-bridge.js";
+export { analyzeCodeStructureTool, computeAstDiffTool } from "./rust-tools.js";

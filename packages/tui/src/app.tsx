@@ -5,19 +5,15 @@ import TextInput from "ink-text-input";
 import {
   MultiAgentOrchestrator,
   ToolRegistry,
+  analyzeCodeStructureTool,
+  computeAstDiffTool,
   type AgentDefinition,
   type ConversationMessage,
   type LanguageModel,
   type MultiAgentEvent,
   type ToolCall,
 } from "@agentic-runtime/core";
-import {
-  createDefaultProviderGateway,
-  DEFAULT_CREDENTIAL_ENV_FALLBACK,
-  PROVIDER_FIELD_SPECS,
-  StoredCredentialResolver,
-  validateStoredProvider,
-} from "@agentic-runtime/gateway";
+import { createDefaultProviderGateway } from "@agentic-runtime/gateway";
 import {
   loadProjectAgents,
   loadProjectInstructions,
@@ -210,17 +206,6 @@ export function App({
             runtimeContext.session.id,
           ),
         },
-      ]);
-      return;
-    }
-    if (prompt === "/settings" || prompt.startsWith("/settings ")) {
-      const reply = await handleSettingsCommand(
-        runtimeContext.store,
-        prompt.slice("/settings".length).trim(),
-      );
-      setMessages((current) => [
-        ...current,
-        { role: "assistant", content: reply },
       ]);
       return;
     }
@@ -505,9 +490,7 @@ function createRuntimeContext(
   const modelName =
     provider === "ollama"
       ? (process.env.OLLAMA_MODEL ?? "")
-      : provider === "groq"
-        ? (process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile")
-        : (process.env.OPENROUTER_MODEL ?? process.env.OPENAI_MODEL ?? "");
+      : (process.env.OPENAI_COMPATIBLE_MODEL ?? process.env.OPENROUTER_MODEL ?? process.env.OPENAI_MODEL ?? "");
   const store = new SessionStore({ projectRoot: workspaceRoot });
   const systemMessage = {
     role: "system" as const,
@@ -566,6 +549,8 @@ Project instructions may be supplied separately. Follow them whenever they apply
       "git_diff",
       "git_log",
       "git_branches",
+      "analyze_code_structure",
+      "compute_ast_diff",
     ],
     delegatesTo: CODING_AGENT_ID,
     maxSteps: 24,
@@ -582,13 +567,15 @@ Project instructions may be supplied separately. Follow them whenever they apply
   });
   for (const agent of loadProjectAgents(store.project.rootPath))
     if (!RESERVED_AGENT_IDS.has(agent.id)) store.registerAgent(agent);
-  const model = createModel(provider, modelName, store);
+  const model = createModel(provider, modelName);
   const runtime = new MultiAgentOrchestrator(
     store,
     () => model,
     () => {
       const registry = new ToolRegistry();
       for (const tool of createIdeTools()) registry.register(tool);
+      registry.register(analyzeCodeStructureTool);
+      registry.register(computeAstDiffTool);
       return registry;
     },
     {
@@ -607,50 +594,30 @@ Project instructions may be supplied separately. Follow them whenever they apply
   };
 }
 
-function createModel(
-  provider: string,
-  modelName: string,
-  store: SessionStore,
-): LanguageModel {
-  // Settings saved through /settings or the GUI always win; a matching
-  // OLLAMA_ENDPOINT/OPENROUTER_API_KEY/etc. in .env is only used the first
-  // time, before anything has been saved to the settings store.
-  const credentials = new StoredCredentialResolver(
-    store,
-    DEFAULT_CREDENTIAL_ENV_FALLBACK,
-  );
-  const gateway = createDefaultProviderGateway({ credentials });
-  const storedBaseUrl = (fallback: string): string | undefined =>
-    store.getProviderSetting(provider, "baseUrl") ?? fallback;
+function createModel(provider: string, modelName: string): LanguageModel {
+  const gateway = createDefaultProviderGateway();
   if (provider === "ollama") {
     gateway.configure({
       providerId: "ollama",
-      baseUrl: storedBaseUrl(
-        process.env.OLLAMA_ENDPOINT ?? "http://localhost:11434",
-      ),
+      baseUrl: process.env.OLLAMA_ENDPOINT ?? "http://localhost:11434",
     });
   } else if (provider === "openrouter") {
     gateway.configure({
       providerId: "openrouter",
-      credentialRef: "openrouter",
-    });
-  } else if (provider === "groq") {
-    gateway.configure({
-      providerId: "groq",
-      credentialRef: "groq",
+      credentialRef: "OPENROUTER_API_KEY",
     });
   } else if (provider === "openai-compatible") {
     gateway.configure({
       providerId: "openai-compatible",
-      baseUrl: storedBaseUrl(process.env.OPENAI_COMPATIBLE_BASE_URL ?? ""),
-      credentialRef: "openai-compatible",
-      manualModelId:
-        store.getProviderSetting("openai-compatible", "manualModelId") ??
-        modelName,
+      baseUrl: process.env.OPENAI_COMPATIBLE_BASE_URL,
+      credentialRef: process.env.OPENAI_COMPATIBLE_API_KEY
+        ? "OPENAI_COMPATIBLE_API_KEY"
+        : undefined,
+      manualModelId: modelName,
     });
   } else {
     throw new Error(
-      `Unsupported MODEL_PROVIDER: ${provider}. Use ollama, groq, openrouter, or openai-compatible.`,
+      `Unsupported MODEL_PROVIDER: ${provider}. Use ollama, openrouter, or openai-compatible.`,
     );
   }
   if (!modelName)
@@ -700,104 +667,7 @@ function formatSessions(sessions: SessionRecord[], active: string): string {
 }
 
 function helpText(): string {
-  return "/help  /new  /clear  /sessions  /agents  /agent [id]  /settings  /details  /thinking  /exit\nTab switches agents. Ctrl+C cancels the active task or exits.";
-}
-
-async function handleSettingsCommand(
-  store: SessionStore,
-  rest: string,
-): Promise<string> {
-  if (!rest) return formatProviderSettings(store);
-  const [providerId, ...tokens] = rest.split(/\s+/).filter(Boolean);
-  const spec = PROVIDER_FIELD_SPECS.find((entry) => entry.id === providerId);
-  if (!spec) {
-    return `Unknown provider: ${providerId}\n\n${formatProviderSettings(store)}`;
-  }
-  if (tokens.length === 0) return formatProviderDetail(store, spec.id);
-  if (tokens[0] === "clear") {
-    store.clearCredential(spec.id);
-    store.clearProviderSetting(spec.id, "baseUrl");
-    store.clearProviderSetting(spec.id, "manualModelId");
-    store.clearProviderSetting(spec.id, "lastValidation");
-    return `Cleared settings for ${spec.id}.`;
-  }
-  if (tokens[0] === "validate") {
-    const result = await validateStoredProvider(store, spec);
-    store.setProviderSetting(
-      spec.id,
-      "lastValidation",
-      JSON.stringify({ ...result, at: Date.now() }),
-    );
-    return result.ok
-      ? `${spec.id} credentials are valid.`
-      : `${spec.id} validation failed: ${result.message ?? "unknown error"}`;
-  }
-  let applied = 0;
-  for (const token of tokens) {
-    const eq = token.indexOf("=");
-    if (eq === -1) continue;
-    const key = token.slice(0, eq);
-    const value = token.slice(eq + 1);
-    if (key === "key" && spec.fields.includes("apiKey")) {
-      store.setCredential(spec.id, value);
-      applied += 1;
-    } else if (key === "baseUrl" && spec.fields.includes("baseUrl")) {
-      store.setProviderSetting(spec.id, "baseUrl", value);
-      applied += 1;
-    } else if (key === "model" && spec.fields.includes("manualModelId")) {
-      store.setProviderSetting(spec.id, "manualModelId", value);
-      applied += 1;
-    }
-  }
-  return applied > 0
-    ? `Updated ${applied} field(s) for ${spec.id}.\n\n${formatProviderDetail(store, spec.id)}`
-    : `No recognized field=value pairs for ${spec.id}. Fields: ${spec.fields.join(", ")}. ` +
-        `Use key=/baseUrl=/model=, "validate", or "clear".`;
-}
-
-function formatProviderSettings(store: SessionStore): string {
-  const lines = PROVIDER_FIELD_SPECS.map((spec) => {
-    const hasCredential = Boolean(store.getCredential(spec.id));
-    const configured = spec.credentialRequired
-      ? hasCredential
-      : hasCredential || Boolean(store.getProviderSetting(spec.id, "baseUrl"));
-    return `${spec.id}${" ".repeat(Math.max(1, 18 - spec.id.length))}${configured ? "configured" : "not configured"}`;
-  });
-  return [
-    "Providers (use /settings <id> to see details, /settings <id> key=<value> to set):",
-    ...lines,
-  ].join("\n");
-}
-
-function formatProviderDetail(store: SessionStore, providerId: string): string {
-  const spec = PROVIDER_FIELD_SPECS.find((entry) => entry.id === providerId);
-  if (!spec) return `Unknown provider: ${providerId}`;
-  const credential = store.getCredential(spec.id);
-  const lastValidationRaw = store.getProviderSetting(spec.id, "lastValidation");
-  const lastValidation = lastValidationRaw
-    ? (JSON.parse(lastValidationRaw) as { ok: boolean; message?: string })
-    : undefined;
-  const lines = [
-    `${spec.label} (${spec.id})`,
-    spec.fields.includes("apiKey")
-      ? `  key: ${credential ? maskSecret(credential) : "not set"}`
-      : undefined,
-    spec.fields.includes("baseUrl")
-      ? `  baseUrl: ${store.getProviderSetting(spec.id, "baseUrl") ?? "not set"}`
-      : undefined,
-    spec.fields.includes("manualModelId")
-      ? `  model: ${store.getProviderSetting(spec.id, "manualModelId") ?? "not set"}`
-      : undefined,
-    lastValidation
-      ? `  last validation: ${lastValidation.ok ? "ok" : `failed - ${lastValidation.message ?? ""}`}`
-      : "  last validation: never",
-  ].filter((line): line is string => Boolean(line));
-  return lines.join("\n");
-}
-
-function maskSecret(value: string): string {
-  if (value.length <= 4) return "*".repeat(value.length);
-  return `${"*".repeat(Math.max(0, value.length - 4))}${value.slice(-4)}`;
+  return "/help  /new  /clear  /sessions  /agents  /agent [id]  /details  /thinking  /exit\nTab switches agents. Ctrl+C cancels the active task or exits.";
 }
 
 function summarize(value: string): string {

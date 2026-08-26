@@ -3,9 +3,12 @@
 ## Design Direction
 
 The runtime should be developed as independent TypeScript packages under
-`packages/`. Runtime orchestration, provider routing, retrieval, compaction,
-persistence, review, and UI-facing services should all live behind TypeScript
-package boundaries.
+`packages/`. `@agentic-runtime/core` is the initial package and should contain
+the framework-neutral runtime primitives once implementation begins.
+
+Rust packages/components belong under `rust/` and should be introduced only
+when there is a concrete boundary and integration plan. Rig is a future
+integration target, not a current dependency.
 
 ## Planned Boundaries
 
@@ -20,10 +23,7 @@ These are future boundaries, not implemented modules:
 - `workspace`: workspace-bound file service with hashes, diffs, and atomic writes
 - `search`: packaged ripgrep search service
 - `session`: SQLite persistence for global settings and project state
-- `gateway`: provider discovery, model metadata, routing, failover, and cost
-  governance
-- `gui`: future TypeScript interface for settings, context control, review, and
-  observability
+- future Rust components: performance-sensitive or native integrations
 
 Keep the core package independent of specific LLM vendors and agent
 frameworks.
@@ -71,7 +71,7 @@ were available.
 - Tool execution
 - Terminal or filesystem agent access
 - Memory, planning, or retrieval systems
-- Native bindings or non-TypeScript runtime components
+- Rust bindings or Rig integration
 
 The core `LanguageModel` interface is provider-neutral. `OpenAIModel` and
 `OllamaModel` implement it independently. The TUI selects one from
@@ -130,110 +130,8 @@ follow-through stages such as mutation, reread, and build/verification. If the
 model returns text before those stages, it receives an internal continuation
 request instead of ending the run early.
 
-Language-specific services, LSP-backed indexing, structural retrieval, and image
-analysis are intentionally deferred.
-
-## Target Design Reference
-
-This section preserves the still-relevant target design that previously lived
-in a standalone `coreplan.md` at the repo root (deleted — it duplicated this
-file's package boundaries and was outside the `AGENTS.md` read chain). Treat
-it as the design to build toward, not a description of what exists today;
-current state lives in [CURRENT_IMPLEMENTATION.md](CURRENT_IMPLEMENTATION.md)
-and the phase-by-phase steps to get there live in
-[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
-
-### System topology
-
-```text
-+--------------------------------------------------------------------------------+
-|                         TypeScript GUI / IDE Shell                              |
-|  Chat | Context Manager | Diff Review | Provider Settings | Observability        |
-+----------------------------------------+---------------------------------------+
-                                         |
-                                         v
-+--------------------------------------------------------------------------------+
-|                         TypeScript Agent Runtime                                |
-|  MultiAgentOrchestrator | Task Checkpoints | Tool Approval | Event Trace         |
-+----------------------------------------+---------------------------------------+
-                                         |
-                                         v
-+--------------------------------------------------------------------------------+
-|                         TypeScript Services                                     |
-|  Provider Gateway | Context Compactor | Code Index | Workspace | Search | Git    |
-+--------------------------------------------------------------------------------+
-```
-
-### Target multi-agent pipeline
-
-A practical default pipeline for hard, multi-step tasks:
-
-1. `planner`: converts the user request into small, testable steps.
-2. `retriever`: selects relevant files, symbols, line ranges, diagnostics, and
-   test clues.
-3. `coder`: proposes minimal patches using only scoped context.
-4. `verifier`: runs static checks, tests, and targeted commands.
-5. `reviewer`: inspects diffs, failures, and rejected chunks before finalizing.
-
-Execution is sequential when edits are involved so agents do not fight over
-the same working tree. Read-only retrieval and analysis can run in parallel
-later, but mutation stays serialized — this is an intentional trade-off (see
-below), not a temporary limitation.
-
-### Target routing behavior
-
-Every model route should be selected using visible criteria: task type and
-complexity, required context window, tool-calling capability, provider health
-and recent rate limits, estimated input/output tokens, expected dollar cost,
-local availability through Ollama, and total parameter count capped at 80B.
-The router should emit an event for each decision, for example:
-
-```json
-{
-  "agentId": "coder",
-  "providerId": "ollama",
-  "modelId": "qwen2.5-coder:7b",
-  "reason": "local zero-cost route for scoped patch generation",
-  "estimatedCost": 0,
-  "contextTokens": 4200
-}
-```
-
-If a provider fails with a timeout, rate limit, or transient server error, the
-gateway should retry through a lower-risk fallback route while keeping the
-same task checkpoint and compacted context.
-
-### Target retrieval design
-
-- Build a per-project SQLite index keyed by canonical project root.
-- Track file hash, language, symbols, imports, exports, definitions,
-  references, line spans, and diagnostics.
-- Use the TypeScript compiler API for `.ts`/`.tsx` structure, ripgrep as a
-  universal fallback for unsupported languages.
-- Rank results by symbol match, import graph distance, prompt terms, recent
-  edits, failing tests, and diagnostics.
-- Return compact slices with file/line metadata instead of whole files.
-
-### Target compaction design
-
-The compactor watches each model's context budget. At 75% usage, or after a
-context-limit error, it replaces old conversation turns with a compact task
-state containing: original user objective, current plan and completed steps,
-accepted and rejected approaches, important tool outputs, active file slices
-and line references, project rules from `AGENTS.md`, and verification status
-plus open questions. Compacted state is stored in project SQLite so long
-tasks can resume after the IDE closes, a provider fails, or the process
-crashes.
-
-### Trade-offs
-
-| Area          | Selected approach                          | Rejected alternative              | Reason                                                                  |
-| ------------- | ------------------------------------------ | --------------------------------- | ----------------------------------------------------------------------- |
-| Runtime       | TypeScript packages                        | Mixed native runtime              | Faster to build, easier to explain, enough performance for the deadline |
-| Retrieval     | TypeScript compiler API plus ripgrep       | Heavy custom graph engine first   | Achievable and testable while still supporting structural slices        |
-| Orchestration | Sequential edits, parallel read-only later | Fully parallel agents immediately | Prevents conflicting edits and simplifies recovery                      |
-| Persistence   | SQLite                                     | In-memory task state              | Required for long-horizon resume and historical dashboard               |
-| Review        | Unified diffs evolving to block approval   | All-or-nothing patch approval     | Matches HITL requirements without overbuilding first                    |
+Language-specific services, LSP, tree-sitter grammars, and image analysis are
+intentionally deferred.
 
 ## Extension Guidance
 

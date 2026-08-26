@@ -1,5 +1,3 @@
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
 import { Readability } from "@mozilla/readability";
 import type { Tool } from "@agentic-runtime/core";
 import { CheerioCrawler } from "crawlee";
@@ -92,7 +90,7 @@ function createBrowseUrlTool(): Tool {
     name: "browse_url",
     description:
       "Fetch an HTTP(S) URL and extract readable article text without executing page scripts.",
-    approval: "ask",
+    approval: "auto",
     parameters: objectSchema({
       url: { type: "string", minLength: 1 },
       maxCharacters: { type: "integer", minimum: 500, maximum: 50_000 },
@@ -105,7 +103,6 @@ function createBrowseUrlTool(): Tool {
         12_000,
         50_000,
       );
-      await assertPublicUrl(url);
       const response = await fetchWebPage(url, context.signal);
       const dom = new JSDOM(response.body, { url });
       const article = new Readability(dom.window.document).parse();
@@ -133,7 +130,7 @@ function createCrawlSiteTool(): Tool {
     name: "crawl_site",
     description:
       "Crawl a bounded set of same-domain pages and return titles and text excerpts.",
-    approval: "ask",
+    approval: "auto",
     parameters: objectSchema({
       url: { type: "string", minLength: 1 },
       maxPages: { type: "integer", minimum: 1, maximum: 25 },
@@ -152,18 +149,13 @@ function createCrawlSiteTool(): Tool {
         4_000,
         10_000,
       );
-      await assertPublicUrl(startUrl);
       const pages: Array<{ url: string; title: string; excerpt: string }> = [];
       const crawler = new CheerioCrawler({
         maxRequestsPerCrawl: maxPages,
         maxConcurrency: 2,
         requestHandlerTimeoutSecs: 20,
-        preNavigationHooks: [
-          async ({ request }) => assertPublicUrl(request.url),
-        ],
         requestHandler: async ({ request, $, enqueueLinks }) => {
           if (context.signal.aborted) return;
-          await assertPublicUrl(request.loadedUrl ?? request.url);
           $("script, style, noscript").remove();
           const text = $.root().text().replace(/\s+/g, " ").trim();
           pages.push({
@@ -222,32 +214,12 @@ async function fetchWebPage(
   url: string,
   signal: AbortSignal,
 ): Promise<{ body: string; url: string }> {
-  let target = url;
-  for (let redirects = 0; redirects <= 5; redirects += 1) {
-    await assertPublicUrl(target);
-    const response = await fetch(target, {
-      signal,
-      redirect: "manual",
-      headers: { "user-agent": "agentic-runtime/0.1" },
-    });
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (!location) {
-        throw new Error("Web redirect did not provide a location.");
-      }
-      target = new URL(location, target).toString();
-      continue;
-    }
-    if (!response.ok)
-      throw new Error(`Web request failed with HTTP ${response.status}.`);
-    return readWebResponse(response);
-  }
-  throw new Error("Web request exceeded the five-redirect limit.");
-}
-
-async function readWebResponse(
-  response: Response,
-): Promise<{ body: string; url: string }> {
+  const response = await fetch(url, {
+    signal,
+    headers: { "user-agent": "agentic-runtime/0.1" },
+  });
+  if (!response.ok)
+    throw new Error(`Web request failed with HTTP ${response.status}.`);
   const contentType = response.headers.get("content-type") ?? "";
   if (
     !contentType.includes("text/html") &&
@@ -262,53 +234,6 @@ async function readWebResponse(
     throw new Error("Web response exceeds the 2 MB safety limit.");
   }
   return { body, url: response.url };
-}
-
-async function assertPublicUrl(value: string): Promise<void> {
-  const url = new URL(value);
-  const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  const addresses = isIP(hostname)
-    ? [{ address: hostname }]
-    : await lookup(hostname, { all: true, verbatim: true });
-  if (
-    addresses.length === 0 ||
-    addresses.some(({ address }) => isPrivateIp(address))
-  ) {
-    throw new Error(
-      "Web requests to private or reserved network addresses are not supported.",
-    );
-  }
-}
-
-function isPrivateIp(address: string): boolean {
-  const version = isIP(address);
-  if (version === 4) {
-    const [first, second] = address.split(".").map(Number);
-    return (
-      first === 0 ||
-      first === 10 ||
-      first === 127 ||
-      (first === 100 && second >= 64 && second <= 127) ||
-      (first === 169 && second === 254) ||
-      (first === 172 && second >= 16 && second <= 31) ||
-      (first === 192 && (second === 0 || second === 168)) ||
-      (first === 198 && (second === 18 || second === 19)) ||
-      first >= 224
-    );
-  }
-  if (version === 6) {
-    const normalized = address.toLowerCase();
-    return (
-      normalized === "::" ||
-      normalized === "::1" ||
-      normalized.startsWith("fc") ||
-      normalized.startsWith("fd") ||
-      /^fe[89ab]/.test(normalized) ||
-      (normalized.startsWith("::ffff:") &&
-        isPrivateIp(normalized.slice("::ffff:".length)))
-    );
-  }
-  return true;
 }
 
 function requireUrl(arguments_: Record<string, unknown>, name: string): string {

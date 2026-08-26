@@ -10,148 +10,184 @@
     />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Agentic IDE</title>
+    <title>Rigza - AgentZero</title>
   </head>
   <body>
-    <div class="ide-container">
-      <!-- Activity Bar (Leftmost icons) -->
-      <nav class="activity-bar">
-        <div class="activity-bar-actions">
-          <button
-            class="activity-action active"
-            data-target="explorer"
-            title="Explorer"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path
-                d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"
-              ></path>
-              <polyline points="13 2 13 9 20 9"></polyline>
-            </svg>
-          </button>
-          <button class="activity-action" data-target="chat" title="AI Chat">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path
-                d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
-              ></path>
-            </svg>
-          </button>
-          <button
-            class="activity-action"
-            data-target="settings"
-            title="Settings"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <circle cx="12" cy="12" r="3"></circle>
-              <path
-                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
-              ></path>
-            </svg>
-          </button>
-        </div>
-      </nav>
-
-      <!-- Sidebar (Collapsible content) -->
-      <aside class="sidebar">
-        <!-- Explorer View -->
-        <div id="view-explorer" class="sidebar-view active">
-          <div class="sidebar-header">EXPLORER</div>
-          <div id="file-tree" class="file-tree-container">
-            <!-- Populated by explorer.ts -->
+    <main class="container">
+      <div id="layout">
+        <!-- Pane 1: Chat & Thoughts -->
+        <div id="chat-panel" class="pane">
+          <div class="pane-header">
+            <span class="status-dot pulse"></span>
+            AI Chat
           </div>
-        </div>
-
-        <!-- Chat View -->
-        <div id="view-chat" class="sidebar-view">
-          <div class="sidebar-header">AI CHAT</div>
-          <div class="chat-container">
-            <div id="chat-history" class="chat-history"></div>
+          <div class="pane-content chat-history" id="chat-history">
+            <div class="message user">
+              <span class="sender">You</span>
+              <div class="bubble">
+                Optimize the sorting algorithm in
+                <span class="file-tag" data-file="singu.rs" data-line="4-13"
+                  >singu.rs:4-13</span
+                >
+              </div>
+            </div>
+            <div class="message agent">
+              <span class="sender">Rigza</span>
+              <div class="bubble">
+                <div class="thought-stream">
+                  <span
+                    class="status-dot pulse"
+                    style="background: #60a5fa"
+                  ></span>
+                  Writing <span class="file-tag">singu.rs</span>
+                </div>
+                I have drafted a patch replacing bubble sort with
+                `sort_unstable()`. Please review the diff.
+              </div>
+            </div>
+          </div>
+          <div class="chat-input-container">
             <div class="chat-input-wrapper">
-              <input type="text" id="chat-input" placeholder="Ask Agent..." />
+              <input
+                type="text"
+                id="chat-input"
+                placeholder="Ask Rigza anything..."
+              />
+              <kbd class="enter-key">⏎</kbd>
             </div>
           </div>
         </div>
 
-        <!-- Settings View -->
-        <div id="view-settings" class="sidebar-view">
-          <div class="sidebar-header">PROVIDER SETTINGS</div>
-          <div class="settings-container">
-            <div id="providers-list"></div>
-            <p id="vault-status" class="vault-status"></p>
+        <!-- Pane 2: Diff Reviewer -->
+        <div id="diff-panel" class="pane">
+          <div class="pane-header">
+            <span class="status-dot" style="background: #f59e0b"></span>
+            Visual Diff Reviewer
+          </div>
+          <div class="pane-content diff-viewer" id="diff-viewer">
+            <div class="diff-hunk">
+              <div class="hunk-header">
+                <span>singu.rs</span>
+                <div class="hunk-actions">
+                  <button class="btn-approve" title="Approve [a]">
+                    Approve
+                  </button>
+                  <button class="btn-reject" title="Reject [r]">Reject</button>
+                </div>
+              </div>
+              <pre class="diff-content">
+<div class="diff-line diff-remove">- fn bubble_sort(arr: &mut [i32]) {</div>
+<div class="diff-line diff-remove">-     // ... bubble sort implementation</div>
+<div class="diff-line diff-remove">- }</div>
+<div class="diff-line diff-add">+ fn quick_sort(arr: &mut [i32]) {</div>
+<div class="diff-line diff-add">+     arr.sort_unstable();</div>
+<div class="diff-line diff-add">+ }</div>
+              </pre>
+            </div>
           </div>
         </div>
-      </aside>
 
-      <!-- Main Editor Area -->
-      <main class="editor-area">
-        <div class="editor-tabs">
-          <div class="editor-tab active" id="active-file-tab">Welcome</div>
-        </div>
-        <div id="monaco-container" class="monaco-container">
-          <div class="welcome-screen">
-            <h2>Agentic IDE</h2>
-            <p>Select a file from the Explorer to start editing.</p>
+        <!-- Pane 4: Settings Vault -->
+        <div id="vault-panel" class="pane">
+          <div class="pane-header">
+            <span class="status-dot" style="background: #10b981"></span>
+            API Vault
+          </div>
+          <div class="pane-content">
+            <form id="vault-form">
+              <div class="input-group">
+                <label for="groq-key">Groq API Key</label>
+                <input
+                  id="groq-key"
+                  class="vault-input"
+                  type="password"
+                  placeholder="gsk_..."
+                />
+              </div>
+
+              <div class="input-group">
+                <label for="gemini-key">Gemini API Key</label>
+                <input
+                  id="gemini-key"
+                  class="vault-input"
+                  type="password"
+                  placeholder="AIzaSy..."
+                />
+              </div>
+
+              <div class="input-group">
+                <label for="cerebras-key">Cerebras API Key</label>
+                <input
+                  id="cerebras-key"
+                  class="vault-input"
+                  type="password"
+                  placeholder="csk_..."
+                />
+              </div>
+
+              <button
+                type="submit"
+                class="btn-primary"
+                style="width: 100%; margin-top: 0.5rem"
+              >
+                Save to Vault
+              </button>
+            </form>
+            <p
+              id="vault-status"
+              style="
+                font-size: 0.7rem;
+                color: #10b981;
+                margin-top: 0.5rem;
+                text-align: center;
+              "
+            ></p>
           </div>
         </div>
-      </main>
-    </div>
 
-    <!-- Status Bar (Bottom) -->
-    <footer class="status-bar">
-      <div class="status-left">
-        <span class="status-item"
-          ><svg
-            viewBox="0 0 24 24"
-            width="14"
-            height="14"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-          </svg>
-          <span id="status-workspace-name">Loading workspace...</span></span
-        >
-        <span class="status-item hoverable" id="status-connection"
-          >Connected</span
-        >
+        <!-- Pane 3: Observability DAG -->
+        <div id="dag-panel" class="pane">
+          <div class="pane-header">
+            <span class="status-dot" style="background: #8b5cf6"></span>
+            Observability DAG
+          </div>
+          <div class="pane-content" style="align-items: center">
+            <div
+              class="metrics"
+              style="
+                width: 100%;
+                display: flex;
+                gap: 1rem;
+                margin-bottom: 1.5rem;
+              "
+            >
+              <div class="metric-card">
+                <span>S_task Cost</span>
+                <strong>$0.002</strong>
+              </div>
+              <div class="metric-card">
+                <span>Latency</span>
+                <strong>1.2s</strong>
+              </div>
+            </div>
+            <div
+              class="dag-visualizer"
+              style="
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 0.5rem;
+                width: 100%;
+              "
+            >
+              <div class="dag-node">Architect (Groq)</div>
+              <div style="color: var(--text-muted); font-size: 0.8rem">↓</div>
+              <div class="dag-node active">Coder (Ollama)</div>
+            </div>
+          </div>
+        </div>
       </div>
-      <div class="status-right">
-        <span
-          class="status-item"
-          id="status-readonly"
-          title="Editing and saving from the GUI is not wired up yet"
-          >Read-only</span
-        >
-        <span class="status-item" id="status-line-col">Ln -, Col -</span>
-        <span class="status-item">UTF-8</span>
-        <span class="status-item" id="status-language">plaintext</span>
-      </div>
-    </footer>
-
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

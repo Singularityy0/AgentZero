@@ -3,8 +3,8 @@
 ## Identity
 
 - Project: `agentic-runtime`
-- Purpose: build an agentic AI runtime and coding IDE architecture fully in
-  TypeScript
+- Purpose: build an agentic AI runtime in TypeScript first, with future Rust
+  components using Rig (`rig.rs`)
 - Current phase: workspace setup only
 - Repository root: `D:\MediaServer\MEDIA\porno`
 
@@ -27,23 +27,10 @@ packages/tools/src/      Separate IDE-facing tools
 packages/workspace/src/  Safe file operations and patch/diff service
 packages/search/src/     Ripgrep-backed text and file search
 packages/session/src/    SQLite global/project/session persistence
-packages/gateway/src/    Provider registry, routing, credential resolution
-packages/gui/src/        Browser-based settings/chat/diff/dashboard UI (Vite)
-packages/gui-server/src/ Local node:http bridge: settings API + static GUI host
 examples/                Placeholder for runnable examples
+rust/                    Placeholder for future Rust packages/components
 agent-context/           Persistent context for coding agents
 ```
-
-## Decision: no Tauri, no Rust, anywhere
-
-`packages/gui` originally scaffolded a Tauri desktop shell
-(`packages/gui/src-tauri`, a full Rust crate with compiled build artifacts).
-That directory has been removed. The GUI is a plain TypeScript/Vite
-browser app; when it needs to read/write local state (provider credentials,
-settings) it talks over HTTP to `packages/gui-server`, a small Node process
-using only `node:http` - no Electron, no Tauri, no native bindings anywhere
-in this repo. If you find Rust code, a `src-tauri` directory, or a `rust/`
-package reappear, that's drift from this decision, not an update to it.
 
 ## Commands
 
@@ -54,7 +41,6 @@ pnpm typecheck
 pnpm test
 pnpm example:openai "your prompt"
 pnpm tui
-pnpm settings
 pnpm lint
 pnpm format
 pnpm format:check
@@ -70,14 +56,6 @@ Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
   `@agentic-runtime/search`, `@agentic-runtime/tools`,
   `@agentic-runtime/tui`, and `@agentic-runtime/workspace` compile successfully.
 - ESLint and Prettier checks pass.
-- `pnpm settings` builds the workspace and the GUI, then serves both the
-  provider-settings API and the built GUI from one process
-  (`@agentic-runtime/gui-server`, `node:http` only, bound to `127.0.0.1`).
-  Saved credentials/base URLs/model IDs are read by the TUI and GUI from the
-  same global SQLite database via `SessionStore` and
-  `@agentic-runtime/gateway`'s `StoredCredentialResolver` - a key saved once
-  works in either client. The TUI also has an equivalent `/settings` command
-  for the same records.
 - `@agentic-runtime/core` exports framework-neutral conversation, tool, and
   tool-registry contracts.
 - `@agentic-runtime/openai` exposes `generateOpenAIResponse` using the OpenAI

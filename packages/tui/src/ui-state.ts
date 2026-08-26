@@ -69,6 +69,8 @@ export function reduceTuiState(state: TuiState, action: TuiAction): TuiState {
   if (action.type === "task_started") {
     return {
       ...initialTuiState,
+      model: state.model,
+      provider: state.provider,
       activeAgentId: action.agentId,
       taskId: action.taskId,
       sessionId: action.sessionId,

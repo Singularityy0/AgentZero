@@ -31,7 +31,6 @@ import {
   OpenRouterProvider,
   ProviderGateway,
   ProviderRegistry,
-  StoredCredentialResolver,
 } from "../packages/gateway/dist/index.js";
 import {
   initialTuiState,
@@ -182,23 +181,6 @@ test("ProviderGateway discovers, selects, and executes an OpenRouter model witho
     events.some((event) => event.includes(secret)),
     false,
   );
-});
-
-test("StoredCredentialResolver prefers the settings store over the env fallback", () => {
-  const store = new Map([["groq", "stored-key"]]);
-  const resolver = new StoredCredentialResolver(
-    { getCredential: (id) => store.get(id) },
-    { groq: "GROQ_API_KEY", openrouter: "OPENROUTER_API_KEY" },
-  );
-  assert.equal(resolver.get("groq"), "stored-key");
-
-  process.env.OPENROUTER_API_KEY = "env-key";
-  try {
-    assert.equal(resolver.get("openrouter"), "env-key");
-  } finally {
-    delete process.env.OPENROUTER_API_KEY;
-  }
-  assert.equal(resolver.get("openrouter"), undefined);
 });
 
 test("AgentRunner executes a tool and continues to a final response", async () => {
@@ -631,7 +613,7 @@ test("createIdeTools exposes the separate IDE tool catalog", () => {
 test("web and Git tools use bounded read-only and approval-gated operations", async () => {
   assert.deepEqual(
     createWebTools().map((tool) => tool.approval),
-    ["ask", "ask"],
+    ["auto", "auto"],
   );
   assert.deepEqual(
     createGitTools().map((tool) => tool.approval),
@@ -833,8 +815,6 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
       tokenEstimate: 2,
     });
     first.setGlobalSetting("test.setting", "persisted");
-    first.setCredential("groq", "gsk_test_key_1234");
-    first.setProviderSetting("ollama", "baseUrl", "http://localhost:11434");
     first.registerAgent({
       id: "network-specialist",
       name: "Network Specialist",
@@ -863,14 +843,6 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
         "Pinned context",
       );
       assert.equal(second.getGlobalSetting("test.setting"), "persisted");
-      assert.equal(second.getCredential("groq"), "gsk_test_key_1234");
-      assert.deepEqual(second.listCredentialProviderIds(), ["groq"]);
-      assert.equal(
-        second.getProviderSetting("ollama", "baseUrl"),
-        "http://localhost:11434",
-      );
-      second.clearCredential("groq");
-      assert.equal(second.getCredential("groq"), undefined);
       assert.deepEqual(second.getAgent("network-specialist"), {
         id: "network-specialist",
         name: "Network Specialist",

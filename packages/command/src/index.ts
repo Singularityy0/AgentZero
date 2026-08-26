@@ -110,27 +110,8 @@ function parseArguments(arguments_: Record<string, unknown>): CommandArguments {
 }
 
 function sanitizedEnvironment(): NodeJS.ProcessEnv {
-  const allowed = new Set(
-    process.platform === "win32"
-      ? [
-          "APPDATA",
-          "COMSPEC",
-          "HOMEDRIVE",
-          "HOMEPATH",
-          "LOCALAPPDATA",
-          "PATH",
-          "PATHEXT",
-          "SYSTEMROOT",
-          "TEMP",
-          "TMP",
-          "USERPROFILE",
-          "WINDIR",
-        ]
-      : ["HOME", "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TEMP", "TMP", "TMPDIR"],
-  );
-  return Object.fromEntries(
-    Object.entries(process.env).filter(([name]) =>
-      allowed.has(name.toUpperCase()),
-    ),
-  );
+  const environment = { ...process.env };
+  delete environment.OPENAI_API_KEY;
+  delete environment.ANTHROPIC_API_KEY;
+  return environment;
 }

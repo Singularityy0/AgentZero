@@ -47,7 +47,7 @@ export class OllamaModel implements LanguageModel {
       throw new Error("An Ollama model name is required.");
     }
     this.endpoint = options.endpoint ?? DEFAULT_OLLAMA_ENDPOINT;
-    this.timeoutMs = options.timeoutMs ?? 120_000;
+    this.timeoutMs = options.timeoutMs ?? 300_000;
   }
 
   async respond(request: ModelRequest): Promise<ModelResponse> {
