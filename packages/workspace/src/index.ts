@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
@@ -9,7 +10,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { createTwoFilesPatch } from "diff";
 
 const DEFAULT_MAX_FILE_BYTES = 1_000_000;
@@ -63,6 +64,7 @@ export class WorkspaceFileService {
 
   async readText(inputPath: string): Promise<WorkspaceFile> {
     const path = this.resolvePath(inputPath);
+    await this.assertNoSymlinkPath(path, inputPath);
     const data = await readFile(path);
     this.assertText(data, inputPath);
     if (data.byteLength > this.maxFileBytes) {
@@ -76,6 +78,7 @@ export class WorkspaceFileService {
 
   async listDirectory(inputPath = "."): Promise<WorkspaceEntry[]> {
     const path = this.resolvePath(inputPath);
+    await this.assertNoSymlinkPath(path, inputPath);
     const entries = await readdir(path, { withFileTypes: true });
     return Promise.all(
       entries.map(async (entry) => {
@@ -107,6 +110,7 @@ export class WorkspaceFileService {
     const oldContent = current?.content ?? "";
     const diff = this.diff(change.path, oldContent, change.newContent);
     const path = this.resolvePath(change.path);
+    await this.assertNoSymlinkPath(path, change.path);
     await mkdir(dirname(path), { recursive: true });
     const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
     try {
@@ -142,7 +146,9 @@ export class WorkspaceFileService {
       throw new Error(`File changed since it was read: ${inputPath}`);
     }
     const diff = this.diff(inputPath, current.content, "");
-    await unlink(this.resolvePath(inputPath));
+    const path = this.resolvePath(inputPath);
+    await this.assertNoSymlinkPath(path, inputPath);
+    await unlink(path);
     return {
       path: current.path,
       hash: hash(""),
@@ -206,6 +212,25 @@ export class WorkspaceFileService {
   private relativePath(path: string): string {
     const value = relative(this.root, path);
     return (value || ".").replaceAll("\\", "/");
+  }
+
+  private async assertNoSymlinkPath(
+    path: string,
+    inputPath: string,
+  ): Promise<void> {
+    const relativePath = relative(this.root, path);
+    let current = this.root;
+    for (const segment of relativePath.split(sep).filter(Boolean)) {
+      current = join(current, segment);
+      try {
+        if ((await lstat(current)).isSymbolicLink()) {
+          throw new Error(`Symlink paths are not supported: ${inputPath}`);
+        }
+      } catch (error) {
+        if (isMissing(error)) return;
+        throw error;
+      }
+    }
   }
 
   private assertText(data: Buffer, inputPath: string): void {
