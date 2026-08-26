@@ -227,13 +227,13 @@ crashes.
 
 ### Trade-offs
 
-| Area | Selected approach | Rejected alternative | Reason |
-| --- | --- | --- | --- |
-| Runtime | TypeScript packages | Mixed native runtime | Faster to build, easier to explain, enough performance for the deadline |
-| Retrieval | TypeScript compiler API plus ripgrep | Heavy custom graph engine first | Achievable and testable while still supporting structural slices |
-| Orchestration | Sequential edits, parallel read-only later | Fully parallel agents immediately | Prevents conflicting edits and simplifies recovery |
-| Persistence | SQLite | In-memory task state | Required for long-horizon resume and historical dashboard |
-| Review | Unified diffs evolving to block approval | All-or-nothing patch approval | Matches HITL requirements without overbuilding first |
+| Area          | Selected approach                          | Rejected alternative              | Reason                                                                  |
+| ------------- | ------------------------------------------ | --------------------------------- | ----------------------------------------------------------------------- |
+| Runtime       | TypeScript packages                        | Mixed native runtime              | Faster to build, easier to explain, enough performance for the deadline |
+| Retrieval     | TypeScript compiler API plus ripgrep       | Heavy custom graph engine first   | Achievable and testable while still supporting structural slices        |
+| Orchestration | Sequential edits, parallel read-only later | Fully parallel agents immediately | Prevents conflicting edits and simplifies recovery                      |
+| Persistence   | SQLite                                     | In-memory task state              | Required for long-horizon resume and historical dashboard               |
+| Review        | Unified diffs evolving to block approval   | All-or-nothing patch approval     | Matches HITL requirements without overbuilding first                    |
 
 ## Extension Guidance
 

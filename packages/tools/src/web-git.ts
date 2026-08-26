@@ -158,7 +158,9 @@ function createCrawlSiteTool(): Tool {
         maxRequestsPerCrawl: maxPages,
         maxConcurrency: 2,
         requestHandlerTimeoutSecs: 20,
-        preNavigationHooks: [async ({ request }) => assertPublicUrl(request.url)],
+        preNavigationHooks: [
+          async ({ request }) => assertPublicUrl(request.url),
+        ],
         requestHandler: async ({ request, $, enqueueLinks }) => {
           if (context.signal.aborted) return;
           await assertPublicUrl(request.loadedUrl ?? request.url);
@@ -268,8 +270,13 @@ async function assertPublicUrl(value: string): Promise<void> {
   const addresses = isIP(hostname)
     ? [{ address: hostname }]
     : await lookup(hostname, { all: true, verbatim: true });
-  if (addresses.length === 0 || addresses.some(({ address }) => isPrivateIp(address))) {
-    throw new Error("Web requests to private or reserved network addresses are not supported.");
+  if (
+    addresses.length === 0 ||
+    addresses.some(({ address }) => isPrivateIp(address))
+  ) {
+    throw new Error(
+      "Web requests to private or reserved network addresses are not supported.",
+    );
   }
 }
 

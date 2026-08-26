@@ -129,6 +129,8 @@ function sanitizedEnvironment(): NodeJS.ProcessEnv {
       : ["HOME", "LANG", "LC_ALL", "LC_CTYPE", "PATH", "TEMP", "TMP", "TMPDIR"],
   );
   return Object.fromEntries(
-    Object.entries(process.env).filter(([name]) => allowed.has(name.toUpperCase())),
+    Object.entries(process.env).filter(([name]) =>
+      allowed.has(name.toUpperCase()),
+    ),
   );
 }
