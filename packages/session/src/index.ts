@@ -402,6 +402,59 @@ export class SessionStore {
     return row?.value;
   }
 
+  clearGlobalSetting(key: string): void {
+    this.globalDb.prepare("DELETE FROM settings WHERE key = ?").run(key);
+  }
+
+  /**
+   * Provider credentials (API keys) are stored in the global, machine-local
+   * SQLite database at the same trust level as the .env file they replace -
+   * this is plaintext-at-rest, not OS-keychain-backed encryption. Treat the
+   * global database file itself as the secret boundary.
+   */
+  setCredential(providerId: string, value: string): void {
+    this.globalDb
+      .prepare(
+        `INSERT INTO credential_references (provider_id, secret_reference) VALUES (?, ?)
+         ON CONFLICT(provider_id) DO UPDATE SET secret_reference = excluded.secret_reference`,
+      )
+      .run(providerId, value);
+  }
+
+  getCredential(providerId: string): string | undefined {
+    const row = this.globalDb
+      .prepare(
+        "SELECT secret_reference FROM credential_references WHERE provider_id = ?",
+      )
+      .get(providerId) as { secret_reference?: string } | undefined;
+    return row?.secret_reference;
+  }
+
+  clearCredential(providerId: string): void {
+    this.globalDb
+      .prepare("DELETE FROM credential_references WHERE provider_id = ?")
+      .run(providerId);
+  }
+
+  listCredentialProviderIds(): string[] {
+    const rows = this.globalDb
+      .prepare("SELECT provider_id FROM credential_references")
+      .all() as unknown as Array<{ provider_id: string }>;
+    return rows.map((row) => row.provider_id);
+  }
+
+  setProviderSetting(providerId: string, key: string, value: string): void {
+    this.setGlobalSetting(`provider.${providerId}.${key}`, value);
+  }
+
+  getProviderSetting(providerId: string, key: string): string | undefined {
+    return this.getGlobalSetting(`provider.${providerId}.${key}`);
+  }
+
+  clearProviderSetting(providerId: string, key: string): void {
+    this.clearGlobalSetting(`provider.${providerId}.${key}`);
+  }
+
   registerAgent(agent: AgentDefinition): AgentDefinition {
     const now = Date.now();
     this.globalDb

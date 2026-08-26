@@ -75,6 +75,44 @@ export class EnvironmentCredentialResolver implements CredentialResolver {
   }
 }
 
+/** Structural interface matching @agentic-runtime/session's SessionStore -
+ * kept structural (not imported) so packages/gateway does not take on a
+ * dependency on packages/session for one method. */
+export interface CredentialStore {
+  getCredential(providerId: string): string | undefined;
+}
+
+/** Env var fallback so a provider configured via .env before the settings
+ * screen existed keeps working without re-entering the key. A value saved
+ * through the settings screen (TUI `/settings` or the GUI) always takes
+ * priority over this. Shared by every client that builds a
+ * StoredCredentialResolver so they stay in sync. */
+export const DEFAULT_CREDENTIAL_ENV_FALLBACK: Record<string, string> = {
+  groq: "GROQ_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
+};
+
+/**
+ * Resolves credentials by provider ID from a persisted settings store (the
+ * settings screen writes here), falling back to an environment variable per
+ * provider for local dev/example scripts that never touched the UI. This is
+ * the resolver the TUI/GUI should use so a key saved once, from either
+ * client, works everywhere without editing `.env`.
+ */
+export class StoredCredentialResolver implements CredentialResolver {
+  constructor(
+    private readonly store: CredentialStore,
+    private readonly envFallback: Record<string, string> = {},
+  ) {}
+  get(reference: string): string | undefined {
+    const stored = this.store.getCredential(reference);
+    if (stored) return stored;
+    const envVar = this.envFallback[reference];
+    return envVar ? process.env[envVar] : undefined;
+  }
+}
+
 export class ProviderRegistry {
   private readonly providers = new Map<string, ProviderAdapter>();
   register(provider: ProviderAdapter): this {
@@ -474,6 +512,80 @@ export class OpenAICompatibleProvider extends HttpProvider {
   private headers(): Record<string, string> {
     const auth = this.authorization();
     return auth ? { Authorization: auth } : {};
+  }
+}
+
+export interface ProviderFieldSpec {
+  id: string;
+  label: string;
+  fields: Array<"apiKey" | "baseUrl" | "manualModelId">;
+  credentialRequired: boolean;
+  helpUrl?: string;
+}
+
+/** Single source of truth for what a settings screen needs to collect per
+ * provider, so the GUI/TUI settings surfaces don't hardcode provider
+ * knowledge that can drift from what createDefaultProviderGateway registers. */
+export const PROVIDER_FIELD_SPECS: ProviderFieldSpec[] = [
+  {
+    id: "groq",
+    label: "Groq",
+    fields: ["apiKey"],
+    credentialRequired: true,
+    helpUrl: "https://console.groq.com/keys",
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    fields: ["apiKey"],
+    credentialRequired: true,
+    helpUrl: "https://openrouter.ai/keys",
+  },
+  {
+    id: "ollama",
+    label: "Ollama (local)",
+    fields: ["baseUrl"],
+    credentialRequired: false,
+  },
+  {
+    id: "openai-compatible",
+    label: "OpenAI-compatible / local endpoint",
+    fields: ["baseUrl", "apiKey", "manualModelId"],
+    credentialRequired: false,
+  },
+];
+
+export interface ProviderSettingsStore extends CredentialStore {
+  getProviderSetting(providerId: string, key: string): string | undefined;
+}
+
+/** Shared by every client (TUI `/settings`, GUI server) so "validate" means
+ * the same thing everywhere: build a one-off gateway from whatever is
+ * currently persisted for this provider and try validateCredentials(). */
+export async function validateStoredProvider(
+  store: ProviderSettingsStore,
+  spec: ProviderFieldSpec,
+  envFallback: Record<string, string> = DEFAULT_CREDENTIAL_ENV_FALLBACK,
+): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const credentials = new StoredCredentialResolver(store, envFallback);
+    const gateway = createDefaultProviderGateway({ credentials });
+    gateway.configure({
+      providerId: spec.id,
+      baseUrl: store.getProviderSetting(spec.id, "baseUrl"),
+      credentialRef:
+        spec.credentialRequired || store.getCredential(spec.id)
+          ? spec.id
+          : undefined,
+      manualModelId: store.getProviderSetting(spec.id, "manualModelId"),
+    });
+    await gateway.validate(spec.id);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Validation failed.",
+    };
   }
 }
 

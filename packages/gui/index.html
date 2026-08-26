@@ -91,57 +91,14 @@
         <div id="vault-panel" class="pane">
           <div class="pane-header">
             <span class="status-dot" style="background: #10b981"></span>
-            API Vault
+            Provider Settings
           </div>
           <div class="pane-content">
-            <form id="vault-form">
-              <div class="input-group">
-                <label for="groq-key">Groq API Key</label>
-                <input
-                  id="groq-key"
-                  class="vault-input"
-                  type="password"
-                  placeholder="gsk_..."
-                />
-              </div>
-
-              <div class="input-group">
-                <label for="gemini-key">Gemini API Key</label>
-                <input
-                  id="gemini-key"
-                  class="vault-input"
-                  type="password"
-                  placeholder="AIzaSy..."
-                />
-              </div>
-
-              <div class="input-group">
-                <label for="cerebras-key">Cerebras API Key</label>
-                <input
-                  id="cerebras-key"
-                  class="vault-input"
-                  type="password"
-                  placeholder="csk_..."
-                />
-              </div>
-
-              <button
-                type="submit"
-                class="btn-primary"
-                style="width: 100%; margin-top: 0.5rem"
-              >
-                Save to Vault
-              </button>
-            </form>
-            <p
-              id="vault-status"
-              style="
-                font-size: 0.7rem;
-                color: #10b981;
-                margin-top: 0.5rem;
-                text-align: center;
-              "
-            ></p>
+            <!-- Populated from GET /api/providers by main.ts. One card per
+                 provider the gateway registers - never hardcode provider
+                 names here, the gateway package is the source of truth. -->
+            <div id="providers-list"></div>
+            <p id="vault-status" class="vault-status"></p>
           </div>
         </div>
 

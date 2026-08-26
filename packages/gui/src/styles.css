@@ -345,6 +345,73 @@ label {
   box-shadow: 0 0 20px rgba(59, 130, 246, 0.5);
 }
 
+.btn-secondary {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border-med);
+  border-radius: 6px;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-secondary:hover {
+  border-color: var(--accent-blue-border);
+  background: var(--accent-blue-bg);
+}
+
+/* Provider settings cards */
+.provider-card {
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 0.85rem;
+  margin-bottom: 0.85rem;
+  background: var(--bg-inner);
+}
+.provider-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.provider-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.provider-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.status-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.status-badge.ok {
+  color: var(--diff-add-text);
+  background: var(--diff-add-bg);
+}
+.status-badge.fail {
+  color: var(--diff-remove-text);
+  background: var(--diff-remove-bg);
+}
+.status-badge.unset {
+  color: var(--text-muted);
+  background: var(--bg-input);
+}
+.vault-status {
+  font-size: 0.7rem;
+  color: var(--diff-add-text);
+  margin-top: 0.5rem;
+  text-align: center;
+  min-height: 1em;
+}
+
 /* Metrics DAG */
 .metric-card {
   background: var(--bg-input);
