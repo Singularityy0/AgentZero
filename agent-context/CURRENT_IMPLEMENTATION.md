@@ -31,8 +31,13 @@ The repository uses independent packages under `packages/`:
   events, and project context.
 - `tui`: terminal interface, provider selection, agent selection, approvals,
   and runtime event display.
-- `gateway`: early provider registry, model catalog, OpenRouter,
-  OpenAI-compatible endpoint, and Ollama route support.
+- `gateway`: provider registry, model catalog, Groq/OpenRouter/Ollama/
+  OpenAI-compatible route support, and `StoredCredentialResolver` for
+  settings-backed credentials.
+- `gui`: browser-based settings/chat/diff/dashboard UI (plain TypeScript +
+  Vite, no Tauri/Electron).
+- `gui-server`: local `node:http` bridge exposing the provider-settings API
+  and serving the built GUI; loopback-only.
 
 Dependencies point toward the core contracts. The core package does not depend
 on a specific model provider or user interface.
@@ -240,18 +245,36 @@ providers are:
 
 - OpenAI Responses API through `@agentic-runtime/openai`.
 - Ollama `/api/chat` through `@agentic-runtime/ollama`.
+- Groq, OpenRouter, and OpenAI-compatible/local endpoints through
+  `@agentic-runtime/gateway`.
 
 The Ollama adapter supports native structured tool calls and a constrained JSON
 fallback for models that emit tool calls as text. Requests default to a
 45-second timeout in the TUI, configurable with `OLLAMA_TIMEOUT_MS`. The TUI
-currently selects one provider and model through environment variables; it does
-not yet perform complexity-aware routing or provider failover.
+still selects a single active provider/model through `MODEL_PROVIDER` and does
+not yet perform complexity-aware routing or automatic failover between
+providers.
+
+Provider credentials, base URLs, and manual model IDs are stored in the global
+SQLite database via `SessionStore.setCredential`/`setProviderSetting` and
+resolved at call time by `StoredCredentialResolver`, which checks the store
+first and falls back to a per-provider environment variable
+(`DEFAULT_CREDENTIAL_ENV_FALLBACK`) only if nothing has been saved. Both the
+TUI (`/settings`) and the GUI (`pnpm settings`, served by
+`@agentic-runtime/gui-server`) read and write the same records, so a key saved
+in either client works in both without editing `.env`. `PROVIDER_FIELD_SPECS`
+in `@agentic-runtime/gateway` is the single source of truth for which fields
+(API key, base URL, manual model ID) each provider needs; the settings UI and
+`/settings` command both derive their forms from it instead of hardcoding
+provider names.
 
 ## 10. Verification and Known Gaps
 
 The current automated suite covers tool registry behavior, agent execution,
 handoffs, delegation proxies, workspace conflicts, search, command execution,
-project agent file loading, Ollama parsing, and SQLite persistence.
+project agent file loading, Ollama parsing, SQLite persistence (including
+credential/provider-setting storage), and `StoredCredentialResolver`
+fallback behavior.
 
 Current checks:
 
@@ -272,5 +295,9 @@ The most important remaining gaps against the problem statement are:
 - Full resumable multi-agent execution after crashes.
 - Block-level diff review.
 - Git merge tooling.
-- Mandatory provider settings screen.
 - Full observability dashboard with per-agent token and timing metrics.
+- 80B total-parameter and free-tier/local-hardware enforcement on model
+  selection (still unenforced in code — see `IMPLEMENTATION_PLAN.md` Phase 1).
+- Encryption-at-rest for stored provider credentials (the settings screen
+  now works end-to-end, but saved keys sit in the global SQLite file as
+  plaintext, the same trust level as the `.env` file they replace).

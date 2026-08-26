@@ -28,13 +28,17 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## 3. Smart Routing
 
-- [~] Provider abstraction exists.
+- [~] Provider abstraction exists (Groq, OpenRouter, Ollama, OpenAI-compatible).
 - [~] Provider selection exists, but only as configuration.
 - [ ] Complexity-aware model routing.
 - [ ] Context-size, token-budget, rate-limit, and cost-aware routing.
 - [ ] Transparent routing explanations.
 - [ ] Automatic fallback while preserving progress.
-- [ ] Mandatory settings screen for provider API keys.
+- [x] Mandatory settings screen for provider API keys. Both TUI (`/settings`)
+      and GUI (`pnpm settings`) read/write the same global-SQLite-backed
+      credentials via `StoredCredentialResolver`; validated end-to-end with a
+      live smoke test against the real Groq API. Known gap: keys are stored
+      plaintext-at-rest (no OS keychain integration).
 
 ## 4. Automatic Context Compaction
 
@@ -134,10 +138,17 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## Highest-Priority Remaining Work
 
-1. Smart routing, provider fallback, and the mandatory settings screen.
-2. Multi-agent orchestration with planning, delegation, and recovery.
-3. Code indexing and high-quality retrieval.
-4. Context compaction and resumable checkpoints.
-5. Block-level HITL review.
-6. Observability dashboard.
-7. Web search, Git merge support, and complete documentation.
+See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the ordered,
+file-level plan. Summary (Phase 0 - settings screen - is done):
+
+1. ~~Mandatory settings screen.~~ Done (Phase 0).
+2. 80B/free-tier/local-hardware enforcement on model selection (Phase 1).
+3. Smart routing signals, visible reasoning, and provider fallback (Phase 2).
+4. Context compaction (Phase 3).
+5. Code indexing and high-quality retrieval (Phase 4).
+6. Multi-agent orchestration with planning, verification, and backtracking
+   (Phase 5).
+7. Block-level HITL review (Phase 6).
+8. Manual context control and `/bytheway` (Phase 7).
+9. Observability dashboard (Phase 8).
+10. Documentation, cross-platform builds, and presentation prep (Phase 9).

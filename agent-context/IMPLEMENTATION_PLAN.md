@@ -68,38 +68,80 @@ events; dashboard needs the event stream those phases produce).
 
 ## Phase 0 — Settings screen must actually work (blocking, disqualifying if skipped)
 
-**PS requirement:** 3d. **Current state:** cosmetic scaffold, not connected to
-runtime.
+**PS requirement:** 3d. **Status: done** (2026-08-26). Verified end-to-end
+with a live curl smoke test (save -> masked read-back -> real Groq validation
+-> clear) and `pnpm build/lint/format:check/test` (26/26 passing).
 
-- [ ] Define a `SettingsService` in `packages/session` (or a new
-      `packages/settings` if it doesn't belong in session's scope) that reads
-      and writes provider credentials to the **global SQLite** database
-      (`packages/session` already separates global vs. project scope — reuse
-      that split).
-- [ ] Add a `SqliteCredentialResolver implements CredentialResolver` in
-      `packages/gateway` (alongside `EnvironmentCredentialResolver` in
-      `packages/gateway/src/index.ts:72`) that reads from the settings
-      service instead of `process.env`.
-- [ ] Wire `createDefaultProviderGateway()` (`packages/gateway/src/index.ts:480`)
-      to accept the SQLite resolver when running under the GUI/TUI, falling
-      back to env vars only for local dev/examples.
-- [ ] Rebuild `packages/gui/src/main.ts` to call the real settings service
-      (via IPC if Tauri, via a local HTTP/service bridge otherwise — confirm
-      which shell `packages/gui` targets before choosing; `tauri.svg` asset
-      suggests Tauri) instead of `localStorage`.
-- [ ] Support all providers the gateway registers (Groq, OpenRouter, Ollama,
-      OpenAI-compatible/local) in the settings form, not just 3 hardcoded
-      ones.
-- [ ] Add credential validation in the UI: call `ProviderGateway.validate()`
-      on save and surface pass/fail per provider.
-- [ ] Add a TUI equivalent (`/settings` command or a startup prompt) so the
-      terminal client can also configure keys without editing `.env` — the
-      evaluators need to be able to test via whichever client is running.
-- [ ] Remove/replace the "simulated via local storage" and "Uncomment when
-      ready" comments in `main.ts` once this is real.
+Implementation note: `packages/gui/src-tauri` (a full, still-tracked Tauri/Rust
+backend) was found and removed as part of this phase — see the
+"drop Rust" decision in [WORKSPACE.md](WORKSPACE.md). With no Tauri shell,
+"IPC to Rust" wasn't an option, so the GUI settings screen talks to a new
+plain-Node HTTP bridge instead (see below). This is the actual architecture
+now; treat the "via IPC if Tauri" phrasing that used to be here as superseded.
 
-**Acceptance:** entering a key in the settings UI, restarting the app, and
-running a task actually uses that key end-to-end with no `.env` involvement.
+- [x] Add credential/provider-setting storage to `SessionStore`
+      (`packages/session/src/index.ts`): `setCredential`/`getCredential`/
+      `clearCredential`/`listCredentialProviderIds` on the existing
+      (previously unused) `credential_references` table, and
+      `setProviderSetting`/`getProviderSetting`/`clearProviderSetting` for
+      non-secret fields (`baseUrl`, `manualModelId`) on the existing generic
+      `settings` table. No new tables, no migration.
+- [x] Add `StoredCredentialResolver implements CredentialResolver` in
+      `packages/gateway/src/index.ts`, structurally typed against a minimal
+      `CredentialStore` interface (not importing `@agentic-runtime/session`,
+      to avoid a new cross-package dependency). Looks up by provider ID,
+      falls back to a shared `DEFAULT_CREDENTIAL_ENV_FALLBACK` env-var map so
+      an existing `.env`-configured provider keeps working until something is
+      explicitly saved in the settings store, which then takes priority.
+      Also added `PROVIDER_FIELD_SPECS` (single source of truth for which
+      fields - apiKey/baseUrl/manualModelId - each provider needs) and
+      `validateStoredProvider()` (shared validate-from-storage helper used by
+      both clients below, so "validate" means the same thing everywhere).
+- [x] `createDefaultProviderGateway({ credentials })` already accepted a
+      resolver via its existing options - no signature change needed, both
+      new callers just pass `new StoredCredentialResolver(store, ...)`.
+- [x] New `packages/gui-server` package: a dependency-light `node:http`
+      server (`startSettingsServer`, bin `agentic-gui-server`) exposing
+      `GET/PUT/DELETE /api/providers/:id` and `POST /api/providers/:id/validate`,
+      binds to `127.0.0.1` only (never reachable off-box - this endpoint
+      holds API keys), and serves the built `packages/gui/dist` as a static
+      SPA fallback so `pnpm settings` is a single command that builds and
+      serves both the API and the UI for evaluators. `packages/gui/vite.config.ts`
+      proxies `/api` to port 4737 for `vite dev` iteration.
+- [x] Rebuilt `packages/gui/index.html` + `packages/gui/src/main.ts`: the
+      vault panel is now a dynamic `#providers-list` populated from
+      `GET /api/providers` (driven by `PROVIDER_FIELD_SPECS`, so it can never
+      drift from what the gateway actually registers), replacing the 3
+      hardcoded fields for providers (Gemini, Cerebras) that don't even exist
+      in this gateway. Real secrets never round-trip back to the browser -
+      only a masked last-4 string. `localStorage` is gone entirely.
+- [x] Support all 4 registered providers (Groq, OpenRouter, Ollama,
+      OpenAI-compatible) - done via `PROVIDER_FIELD_SPECS`, not hardcoded per
+      provider.
+- [x] Validate button per provider card calls
+      `POST /api/providers/:id/validate` -> `validateStoredProvider()` ->
+      `ProviderGateway.validate()`, shows an ok/fail status badge with the
+      real provider error message, and persists `lastValidation`.
+- [x] TUI `/settings` command (`packages/tui/src/app.tsx`):
+      `/settings` lists provider status, `/settings <id>` shows detail,
+      `/settings <id> key=<v> baseUrl=<v> model=<v>` sets fields,
+      `/settings <id> validate`, `/settings <id> clear`. Uses the same
+      `SessionStore` the TUI already has open, so TUI- and GUI-saved
+      credentials are the same records (one global SQLite DB).
+- [x] `main.ts` scaffold comments about localStorage/Rust-IPC removed;
+      replaced with accurate comments about the real flow.
+- [x] Tests added: `SessionStore` credential/provider-setting round-trip
+      (`tests/runtime.test.ts`, in the existing persistence test) and a
+      standalone `StoredCredentialResolver` stored-vs-env-fallback test.
+
+**Acceptance (met):** entering a key via either client persists to the same
+global SQLite database; `Validate` calls the real provider API through the
+same resolver a task run would use; no `.env` edit is required once a key is
+saved. Not yet done, deferred as a known gap: encryption-at-rest for stored
+keys (currently plaintext in the global SQLite file, the same trust level as
+the `.env` file it replaces - see the comment on `SessionStore.setCredential`)
+and a GUI end-to-end browser click-through (verified via API smoke test and
+code review, not a driven browser session).
 
 ---
 
