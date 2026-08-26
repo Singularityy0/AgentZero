@@ -110,25 +110,34 @@ impl FlatCPG {
     }
 }
 
-pub fn slice_ast(code: &str, symbols: &[String]) -> Vec<String> {
-    let mut parser = Parser::new();
-    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let tree = parser.parse(code, None).unwrap();
-    let mut results = Vec::new();
-    let root = tree.root_node();
-    walk_tree(root, code, symbols, &mut results);
-    results
+pub fn slice_ast(code: &str, ext: &str, symbols: &[String]) -> Vec<String> {
+    let language = match ext {
+        "ts" | "tsx" | "js" | "jsx" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "py" => Some(tree_sitter_python::LANGUAGE.into()),
+        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
+        _ => None,
+    };
+
+    if let Some(lang) = language {
+        let mut parser = Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(code, None).unwrap();
+        let mut results = Vec::new();
+        let root = tree.root_node();
+        walk_tree(root, code, symbols, &mut results);
+        results
+    } else {
+        fallback_slice(code, symbols)
+    }
 }
 
 fn walk_tree(node: Node, code: &str, symbols: &[String], results: &mut Vec<String>) {
-    let kind = node.kind();
-    if kind == "function_declaration" || kind == "method_definition" || kind == "class_declaration" {
-        if let Some(name_node) = node.child_by_field_name("name") {
-            if let Ok(name) = name_node.utf8_text(code.as_bytes()) {
-                if symbols.iter().any(|s| s == name) {
-                    if let Ok(text) = node.utf8_text(code.as_bytes()) {
-                        results.push(text.to_string());
-                    }
+    // Universal symbol extraction: if a node has a "name" field, check if it matches.
+    if let Some(name_node) = node.child_by_field_name("name") {
+        if let Ok(name) = name_node.utf8_text(code.as_bytes()) {
+            if symbols.iter().any(|s| s == name) {
+                if let Ok(text) = node.utf8_text(code.as_bytes()) {
+                    results.push(text.to_string());
                 }
             }
         }
@@ -137,5 +146,111 @@ fn walk_tree(node: Node, code: &str, symbols: &[String], results: &mut Vec<Strin
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_tree(child, code, symbols, results);
+    }
+}
+
+fn fallback_slice(code: &str, symbols: &[String]) -> Vec<String> {
+    let mut results = Vec::new();
+    let lines: Vec<&str> = code.lines().collect();
+    
+    for symbol in symbols {
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            
+            // Check if this line looks like a declaration for the symbol.
+            let is_decl = line.contains(symbol) && 
+                (line.contains("def ") || line.contains("class ") || line.contains("function ") || 
+                 line.contains("struct ") || line.contains("interface ") || line.contains("pub fn ") ||
+                 line.contains("fn "));
+                 
+            if is_decl {
+                let base_indent = line.chars().take_while(|c| c.is_whitespace()).count();
+                let mut block = String::new();
+                block.push_str(line);
+                block.push('\n');
+                
+                i += 1;
+                while i < lines.len() {
+                    let next_line = lines[i];
+                    if next_line.trim().is_empty() {
+                        block.push_str(next_line);
+                        block.push('\n');
+                        i += 1;
+                        continue;
+                    }
+                    
+                    let next_indent = next_line.chars().take_while(|c| c.is_whitespace()).count();
+                    
+                    // Stop if we hit a line with lesser or equal indentation, 
+                    // unless it's a closing brace which we include.
+                    if next_indent <= base_indent {
+                        let trimmed = next_line.trim();
+                        if trimmed == "}" || trimmed == "end" || trimmed == "};" {
+                            block.push_str(next_line);
+                            block.push('\n');
+                        }
+                        break;
+                    }
+                    
+                    block.push_str(next_line);
+                    block.push('\n');
+                    i += 1;
+                }
+                results.push(block);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    
+    results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_universal_python_ast_slice() {
+        let code = r#"
+def not_me():
+    pass
+
+class MyTarget:
+    def __init__(self):
+        self.val = 1
+"#;
+        let symbols = vec!["MyTarget".to_string()];
+        let slices = slice_ast(code, "py", &symbols);
+        assert_eq!(slices.len(), 1);
+        assert!(slices[0].contains("class MyTarget:"));
+        assert!(slices[0].contains("self.val = 1"));
+    }
+
+    #[test]
+    fn test_fallback_ruby_slice() {
+        let code = r#"
+def ignored
+  puts "ignored"
+end
+
+def my_target(args)
+  puts "found it"
+  if args
+    puts "nested"
+  end
+end
+
+def another
+end
+"#;
+        let symbols = vec!["my_target".to_string()];
+        // "rb" will fall back to fallback_slice since we don't have tree-sitter-ruby linked
+        let slices = slice_ast(code, "rb", &symbols);
+        assert_eq!(slices.len(), 1);
+        assert!(slices[0].contains("def my_target"));
+        assert!(slices[0].contains("puts \"nested\""));
+        assert!(!slices[0].contains("def another"));
     }
 }

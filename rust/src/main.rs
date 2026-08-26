@@ -26,11 +26,12 @@ fn handle_request(req: RpcRequest, state_tree: &mut StateTree) -> RpcResponse {
     match req.method.as_str() {
         "slice_ast" => {
             let code = req.params.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            let ext = req.params.get("ext").and_then(|v| v.as_str()).unwrap_or("");
             let symbols = req.params.get("symbols").and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<_>>())
                 .unwrap_or_default();
             
-            let result_slices = slice_ast(code, &symbols);
+            let result_slices = slice_ast(code, ext, &symbols);
             let result = serde_json::json!(result_slices);
             RpcResponse { id: req.id, result: Some(result), error: None }
         }
