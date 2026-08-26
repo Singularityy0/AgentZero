@@ -5,13 +5,37 @@ import type {
 } from "@agentic-runtime/core";
 import { OllamaModel } from "@agentic-runtime/ollama";
 import { OpenAICompatibleChatModel } from "@agentic-runtime/openai";
-
+/** Static catalog of known model total (not active/expert) parameter counts,
+ * from each model's publisher. Provider APIs don't reliably expose this, so
+ * it has to be maintained by hand - see the "unverified" metadata flag
+ * ModelRegistry.replace() sets for anything missing here. Only add entries
+ * you can cite a real published figure for; a wrong number here is a
+ * disqualification risk under the PS's <=80B constraint. Ollama keys must
+ * match the exact tag returned by `ollama list` (e.g. "llama2:7b"), not the
+ * bare model family name. */
+const MODEL_PARAMETER_CATALOG: Record<string, Record<string, number>> = {
+  groq: {
+    "mixtral-8x7b-32768": 46_700_000_000, // Mistral AI, published total param count
+  },
+  openrouter: {},
+  ollama: {
+    "llama2:7b": 7_000_000_000,
+  },
+};
+function lookupTotalParameters(
+  providerId: string,
+  modelId: string,
+): number | undefined {
+  return MODEL_PARAMETER_CATALOG[providerId]?.[modelId];
+}
 export interface ModelInfo {
   id: string;
   name: string;
   providerId: string;
   contextWindow?: number;
   maxOutputTokens?: number;
+  /** Total parameter count for the model, if known. */
+  totalParameters?: number;
   pricing?: { inputPerMillion?: number; outputPerMillion?: number };
   capabilities: {
     tools: boolean;
@@ -20,6 +44,7 @@ export interface ModelInfo {
     streaming: boolean;
     structuredOutput: boolean;
   };
+  /** Additional arbitrary metadata about the model. May include an `unverified` flag for unknown parameters. */
   metadata: Record<string, unknown>;
 }
 
@@ -115,9 +140,21 @@ export class StoredCredentialResolver implements CredentialResolver {
 
 export class ProviderRegistry {
   private readonly providers = new Map<string, ProviderAdapter>();
+  /** Allowed free-tier provider IDs. */
+  private static readonly FREE_PROVIDERS = new Set([
+    "groq",
+    "openrouter",
+    "ollama",
+    "openai-compatible",
+  ]);
   register(provider: ProviderAdapter): this {
     if (this.providers.has(provider.id))
       throw new Error(`Provider already registered: ${provider.id}`);
+    if (!ProviderRegistry.FREE_PROVIDERS.has(provider.id)) {
+      throw new Error(
+        `Provider ${provider.id} is not on the free-tier/pay-as-you-go/local allowlist.`,
+      );
+    }
     this.providers.set(provider.id, provider);
     return this;
   }
@@ -136,8 +173,18 @@ export class ModelRegistry {
   replace(providerId: string, models: ModelInfo[]): void {
     for (const key of this.models.keys())
       if (key.startsWith(`${providerId}:`)) this.models.delete(key);
-    for (const model of models)
+    for (const model of models) {
+      // Enforce 80B parameter cap; drop oversized models.
+      if (model.totalParameters && model.totalParameters > 80_000_000_000) {
+        // Skip adding this model.
+        continue;
+      }
+      // Flag unknown parameter count as unverified.
+      if (!model.totalParameters) {
+        model.metadata = { ...(model.metadata ?? {}), unverified: true };
+      }
       this.models.set(keyFor(model.providerId, model.id), model);
+    }
   }
   get(providerId: string, modelId: string): ModelInfo | undefined {
     return this.models.get(keyFor(providerId, modelId));
@@ -413,19 +460,26 @@ export class OllamaProvider extends HttpProvider {
       throw new Error("Ollama returned a malformed model catalog.");
     const models = body.models
       .filter((model) => Boolean(model.name))
-      .map((model) => ({
-        id: model.name!,
-        name: model.name!,
-        providerId: this.id,
-        capabilities: {
-          tools: true,
-          vision: false,
-          reasoning: false,
-          streaming: true,
-          structuredOutput: true,
-        },
-        metadata: model.details ?? {},
-      }));
+      .map((model) => {
+        const totalParams = lookupTotalParameters("ollama", model.name!);
+        return {
+          id: model.name!,
+          name: model.name!,
+          providerId: this.id,
+          totalParameters: totalParams,
+          capabilities: {
+            tools: true,
+            vision: false,
+            reasoning: false,
+            streaming: true,
+            structuredOutput: true,
+          },
+          metadata: {
+            ...(model.details ?? {}),
+            ...(totalParams ? {} : { unverified: true }),
+          },
+        };
+      });
     this.cache = { fetchedAt: Date.now(), models };
     return models;
   }
@@ -602,7 +656,7 @@ export function createDefaultProviderGateway(
     .register(new GroqProvider(credentials, options.fetcher))
     .register(new OpenRouterProvider(credentials, options.fetcher))
     .register(new OpenAICompatibleProvider(credentials, options.fetcher))
-    .register(new OllamaProvider(credentials, options.fetcher));
+    .register(new OllamaProvider(credentials, options.fetcher)); // All are free-tier providers
   return new ProviderGateway(registry, options.onEvent);
 }
 
@@ -613,11 +667,13 @@ function normalizeGroqModel(raw: unknown): ModelInfo | undefined {
   const model = raw as Record<string, unknown>;
   if (typeof model.id !== "string") return undefined;
   if (model.active === false) return undefined;
+  const totalParams = lookupTotalParameters("groq", model.id);
   return {
     id: model.id,
     name: model.id,
     providerId: "groq",
     contextWindow: numberValue(model.context_window),
+    totalParameters: totalParams,
     pricing: { inputPerMillion: 0, outputPerMillion: 0 },
     capabilities: {
       tools: !model.id.includes("whisper") && !model.id.includes("tts"),
@@ -650,12 +706,14 @@ function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
   const inputModalities = Array.isArray(architecture.input_modalities)
     ? architecture.input_modalities
     : [];
+  const totalParams = lookupTotalParameters("openrouter", model.id);
   return {
     id: model.id,
     name: typeof model.name === "string" ? model.name : model.id,
     providerId: "openrouter",
     contextWindow: context,
     maxOutputTokens: output,
+    totalParameters: totalParams,
     pricing: {
       inputPerMillion: perMillion(pricing.prompt),
       outputPerMillion: perMillion(pricing.completion),
@@ -671,7 +729,10 @@ function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
         Array.isArray(model.supported_parameters) &&
         model.supported_parameters.includes("response_format"),
     },
-    metadata: model,
+    metadata: {
+      ...(model as Record<string, unknown>),
+      ...(model.totalParameters ? {} : { unverified: true }),
+    },
   };
 }
 function manualModel(providerId: string, id: string): ModelInfo {
@@ -687,6 +748,7 @@ function manualModel(providerId: string, id: string): ModelInfo {
       structuredOutput: true,
     },
     metadata: {},
+    // totalParameters may be supplied via catalog later
   };
 }
 function numberValue(value: unknown): number | undefined {
