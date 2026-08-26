@@ -9,7 +9,8 @@ const statusMsg = document.getElementById(
   "vault-status",
 ) as HTMLParagraphElement;
 
-// Load existing keys (mocked from localStorage for now, later passed to Rust/WAL)
+// Load existing keys. This scaffold uses localStorage until the TypeScript
+// settings service is wired in.
 window.addEventListener("DOMContentLoaded", () => {
   groqInput.value = localStorage.getItem("rigza_groq_key") || "";
   geminiInput.value = localStorage.getItem("rigza_gemini_key") || "";
@@ -38,11 +39,12 @@ document.querySelectorAll(".file-tag").forEach((tag) => {
     const file = tag.getAttribute("data-file");
     const lines = tag.getAttribute("data-line");
     console.log(`Opening ${file} at lines ${lines}`);
-    // In full implementation, this will send an IPC message to Rust/Tauri to focus the file
+    // In the full implementation, this will ask the TypeScript workspace
+    // service to focus the file.
   });
 });
 
-// Example IPC call to the Rust backend
+// Example future call to the TypeScript workspace/review service.
 // Uncomment when ready to test IPC
 /*
 async function triggerDiff() {
