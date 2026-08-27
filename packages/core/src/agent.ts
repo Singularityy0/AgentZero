@@ -7,6 +7,7 @@ import type {
   ToolPreviewContext,
   ToolResult,
 } from "./tools.js";
+import { rustClient } from "./rust-tools.js";
 
 export interface AgentRunnerOptions {
   cwd: string;
@@ -41,6 +42,8 @@ export class AgentRunner {
     const workflow = createWorkflowState(messages);
 
     for (let step = 0; step < this.maxSteps; step += 1) {
+      await this.compactContextIfNecessary(messages);
+      
       await this.emit({
         type: "model_request",
         messageCount: messages.length,
@@ -101,6 +104,67 @@ export class AgentRunner {
       : `[Agent stopped after reaching the ${this.maxSteps}-step safety limit. Tools executed: ${executedToolNames.join(", ") || "none"}]`;
     await this.emit({ type: "agent_safety_limit", text });
     return { text, messages };
+  }
+
+  private async compactContextIfNecessary(messages: ConversationMessage[]): Promise<void> {
+    const THRESHOLD = 20000;
+    const totalLength = () => messages.reduce((sum, msg) => sum + (msg.content?.length ?? 0), 0);
+    
+    if (totalLength() <= THRESHOLD) return;
+
+    // 1. Semantic Pruning of read_file
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.role === 'tool' && msg.toolName === 'read_file' && typeof msg.content === 'string') {
+        if (!msg.content.includes('[Content compacted for token efficiency.')) {
+           const extMatch = msg.content.match(/\.([a-zA-Z0-9]+)/);
+           const ext = extMatch ? extMatch[1] : "ts";
+           
+           try {
+             rustClient.start();
+             const pruned = await rustClient.pruneAst(msg.content, ext);
+             messages[i] = {
+               ...msg,
+               content: `[Content compacted for token efficiency. Showing signatures only.]\n${pruned}`
+             };
+           } catch (e) {
+             // ignore
+           }
+        }
+      }
+    }
+
+    if (totalLength() <= THRESHOLD) return;
+
+    // 2. Session Summarization
+    const systemPrompts = messages.filter(m => m.role === 'system');
+    const conversation = messages.filter(m => m.role !== 'system');
+    
+    if (conversation.length > 4) {
+      const splitIndex = Math.floor(conversation.length / 2);
+      const toSummarize = conversation.slice(0, splitIndex);
+      const toKeep = conversation.slice(splitIndex);
+
+      const summaryRequest: ConversationMessage[] = [
+        { role: 'system', content: 'You are an AI context summarizer. Summarize the following technical analysis, decisions made, and what was done in these messages so that a future session can continue seamlessly. Be concise but do not lose important architectural or codebase insights.' },
+        ...toSummarize
+      ];
+
+      try {
+        const response = await this.model.respond({ messages: summaryRequest, tools: [] });
+        const summaryMsg: ConversationMessage = {
+          role: 'system',
+          content: `[Session Summary of earlier context]:\n${response.text}`
+        };
+        
+        await this.emit({ type: 'context_compacted', summary: response.text });
+
+        messages.length = 0;
+        messages.push(...systemPrompts, summaryMsg, ...toKeep);
+      } catch (e) {
+        // Fallback: proceed without summary
+      }
+    }
   }
 
   private async emit(event: AgentEvent): Promise<void> {

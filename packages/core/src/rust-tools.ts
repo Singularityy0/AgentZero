@@ -2,7 +2,7 @@ import { Tool } from './tools.js';
 import { RustClient } from './rust-bridge.js';
 
 // We share a single persistent instance of the Rust RPC client
-const rustClient = new RustClient();
+export const rustClient = new RustClient();
 
 export const analyzeCodeStructureTool: Tool = {
   name: "analyze_code_structure",

@@ -207,6 +207,77 @@ fn fallback_slice(code: &str, symbols: &[String]) -> Vec<String> {
     results
 }
 
+pub fn prune_to_signatures(code: &str, ext: &str) -> String {
+    let language = match ext {
+        "ts" | "tsx" | "js" | "jsx" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "py" => Some(tree_sitter_python::LANGUAGE.into()),
+        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
+        _ => None,
+    };
+
+    if let Some(lang) = language {
+        let mut parser = Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(code, None).unwrap();
+        let root = tree.root_node();
+        
+        let mut prune_spans = Vec::new();
+        collect_prune_spans(root, &mut prune_spans);
+        
+        // Sort spans by start_byte just in case
+        prune_spans.sort_by_key(|&(start, _)| start);
+        
+        let placeholder = if ext == "py" { "\n        pass\n    " } else { " { ... } " };
+        
+        let mut result = String::new();
+        let mut last_end = 0;
+        
+        let bytes = code.as_bytes();
+        for (start, end) in prune_spans {
+            if start > last_end {
+                if let Ok(s) = std::str::from_utf8(&bytes[last_end..start]) {
+                    result.push_str(s);
+                }
+            }
+            result.push_str(placeholder);
+            last_end = end;
+        }
+        
+        if last_end < bytes.len() {
+            if let Ok(s) = std::str::from_utf8(&bytes[last_end..]) {
+                result.push_str(s);
+            }
+        }
+        
+        result
+    } else {
+        // Fallback: Just return the original code (or a simple truncation)
+        code.to_string()
+    }
+}
+
+fn collect_prune_spans(node: Node, spans: &mut Vec<(usize, usize)>) {
+    let kind = node.kind();
+    let is_func = kind == "function_declaration" || 
+                  kind == "method_definition" || 
+                  kind == "arrow_function" ||
+                  kind == "function_item" ||
+                  kind == "function_definition";
+                  
+    if is_func {
+        if let Some(body) = node.child_by_field_name("body") {
+            spans.push((body.start_byte(), body.end_byte()));
+            // Do not traverse into the body
+            return;
+        }
+    }
+    
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_prune_spans(child, spans);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +323,26 @@ end
         assert!(slices[0].contains("def my_target"));
         assert!(slices[0].contains("puts \"nested\""));
         assert!(!slices[0].contains("def another"));
+    }
+
+    #[test]
+    fn test_prune_to_signatures() {
+        let code = r#"
+class MyTarget {
+    constructor() {
+        this.val = 1;
+    }
+    
+    do_something() {
+        console.log("hello");
+    }
+}
+"#;
+        let pruned = prune_to_signatures(code, "ts");
+        let pruned = prune_to_signatures(code, "ts");
+        assert!(pruned.contains("class MyTarget"));
+        assert!(pruned.contains("constructor()  { ... }"));
+        assert!(pruned.contains("do_something()  { ... }"));
+        assert!(!pruned.contains("console.log"));
     }
 }

@@ -106,6 +106,15 @@ export function App({
     });
   eventHandler.current = (event) => {
     if (event.type === "agent_event" && event.agentEvent) {
+      if (event.agentEvent.type === "context_compacted") {
+         runtimeContext.store.addContextItem({
+           source: "summary",
+           content: event.agentEvent.summary,
+           priority: "critical",
+           pinned: false,
+           tokenEstimate: Math.ceil(event.agentEvent.summary.length / 4),
+         });
+      }
       dispatch({
         type: "agent_event",
         agentId: event.agentId,
@@ -253,10 +262,11 @@ export function App({
     });
     const history = messages.filter((message) => message.role !== "system");
     try {
+      const contextString = runtimeContext.store.buildContext(task.id, 20000);
       const result = await runtimeContext.runtime.run(
         activeAgentId,
         prompt,
-        "",
+        contextString,
         history,
       );
       setMessages(

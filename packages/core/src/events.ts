@@ -8,4 +8,5 @@ export type AgentEvent =
   | { type: "tool_auto_approved"; call: ToolCall }
   | { type: "tool_completed"; call: ToolCall; result: ToolResult }
   | { type: "agent_completed"; text: string }
-  | { type: "agent_safety_limit"; text: string };
+  | { type: "agent_safety_limit"; text: string }
+  | { type: "context_compacted"; summary: string };

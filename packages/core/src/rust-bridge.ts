@@ -91,6 +91,10 @@ export class RustClient {
     return this.request<string[]>('slice_ast', { code, symbols });
   }
 
+  async pruneAst(code: string, ext: string): Promise<string> {
+    return this.request<string>('prune_ast', { code, ext });
+  }
+
   async computeDiff(original: string, proposal: string): Promise<DiffChunk[]> {
     return this.request<DiffChunk[]>('compute_diff', { original, proposal });
   }

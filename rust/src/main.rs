@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use rust::diff::DiffEngine;
 use rust::merkle::{StateSnapshot, StateTree};
-use rust::flatcpg::slice_ast;
+use rust::flatcpg::{slice_ast, prune_to_signatures};
 
 #[derive(Deserialize)]
 struct RpcRequest {
@@ -33,6 +33,14 @@ fn handle_request(req: RpcRequest, state_tree: &mut StateTree) -> RpcResponse {
             
             let result_slices = slice_ast(code, ext, &symbols);
             let result = serde_json::json!(result_slices);
+            RpcResponse { id: req.id, result: Some(result), error: None }
+        }
+        "prune_ast" => {
+            let code = req.params.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            let ext = req.params.get("ext").and_then(|v| v.as_str()).unwrap_or("");
+            
+            let result_str = prune_to_signatures(code, ext);
+            let result = serde_json::json!(result_str);
             RpcResponse { id: req.id, result: Some(result), error: None }
         }
         "compute_diff" => {
