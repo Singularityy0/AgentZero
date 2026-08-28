@@ -1,4 +1,5 @@
 import type {
+  FileDiffPreview,
   Tool,
   ToolExecutionContext,
   ToolPreviewContext,
@@ -8,7 +9,11 @@ import {
   type CommandToolOptions,
 } from "@agentic-runtime/command";
 import { findFiles, searchText } from "@agentic-runtime/search";
-import { WorkspaceFileService } from "@agentic-runtime/workspace";
+import {
+  WorkspaceFileService,
+  type FileChange,
+  type PreparedFileChange,
+} from "@agentic-runtime/workspace";
 import {
   assertSafeGitPaths,
   createGitTools,
@@ -88,7 +93,18 @@ function createReadFileTool(): Tool {
       const file = await workspace(context).readText(
         requireString(arguments_, "path"),
       );
-      return { output: JSON.stringify(file) };
+      return {
+        output: JSON.stringify(file),
+        contextArtifacts: [
+          {
+            source: "file",
+            path: file.path,
+            hash: file.hash,
+            content: file.content,
+            tokenEstimate: Math.max(1, Math.ceil(file.content.length / 4)),
+          },
+        ],
+      };
     },
   };
 }
@@ -127,13 +143,21 @@ function createDeleteFileTool(): Tool {
     preview: async (arguments_, context) => {
       const service = workspace(context);
       const file = await service.readText(requireString(arguments_, "path"));
-      return service.previewChange({ path: file.path, newContent: "" });
+      return toFileDiffPreview(
+        await service.prepareChange({
+          path: file.path,
+          newContent: "",
+          expectedHash: file.hash,
+        }),
+      );
     },
-    execute: async (arguments_, context) => {
-      const path = requireString(arguments_, "path");
-      const result = await workspace(context).deleteFile(path);
-      return { output: result.diff, truncated: false, changed: result.changed };
-    },
+    execute: async (arguments_, context) =>
+      applyReviewedChange(
+        workspace(context),
+        { path: requireString(arguments_, "path"), newContent: "" },
+        context,
+        true,
+      ),
   };
 }
 
@@ -160,14 +184,11 @@ function createApplyPatchTool(): Tool {
     approval: "ask",
     parameters,
     preview: async (arguments_, context) =>
-      workspace(context).previewChange(change(arguments_)),
-    execute: async (arguments_, context) => {
-      const result = await workspace(context).applyChange(change(arguments_));
-      return {
-        output: result.diff || "No changes were necessary.",
-        changed: result.changed,
-      };
-    },
+      toFileDiffPreview(
+        await workspace(context).prepareChange(change(arguments_)),
+      ),
+    execute: async (arguments_, context) =>
+      applyReviewedChange(workspace(context), change(arguments_), context),
   };
 }
 
@@ -190,16 +211,11 @@ function createMutationTool(
     approval: "ask",
     parameters: objectSchema(properties),
     preview: async (arguments_, context) =>
-      workspace(context).previewChange(getChange(arguments_)),
-    execute: async (arguments_, context) => {
-      const result = await workspace(context).applyChange(
-        getChange(arguments_),
-      );
-      return {
-        output: result.diff || "No changes were necessary.",
-        changed: result.changed,
-      };
-    },
+      toFileDiffPreview(
+        await workspace(context).prepareChange(getChange(arguments_)),
+      ),
+    execute: async (arguments_, context) =>
+      applyReviewedChange(workspace(context), getChange(arguments_), context),
   };
 }
 
@@ -263,6 +279,72 @@ function createCommandTool(
     }),
     execute: async (arguments_, context) =>
       executeCommand(requireString(arguments_, "command"), context, options),
+  };
+}
+
+function toFileDiffPreview(prepared: PreparedFileChange): FileDiffPreview {
+  return {
+    kind: "file_diff",
+    path: prepared.path,
+    baseHash: prepared.baseHash,
+    proposedHash: prepared.proposedHash,
+    text: prepared.diff,
+    hunks: prepared.hunks,
+  };
+}
+
+async function applyReviewedChange(
+  service: WorkspaceFileService,
+  change: FileChange,
+  context: ToolExecutionContext,
+  deleteWhenFullyAccepted = false,
+): Promise<Awaited<ReturnType<Tool["execute"]>>> {
+  const approvedPreview = context.approval?.preview;
+  const prepared =
+    typeof approvedPreview === "object" && approvedPreview.kind === "file_diff"
+      ? {
+          kind: approvedPreview.kind,
+          path: approvedPreview.path,
+          baseHash: approvedPreview.baseHash,
+          proposedHash: approvedPreview.proposedHash,
+          diff: approvedPreview.text,
+          hunks: approvedPreview.hunks,
+        }
+      : await service.prepareChange(change);
+  const acceptedHunkIds = context.approval
+    ? context.approval.decision.acceptedHunkIds
+    : prepared.hunks.map((hunk) => hunk.id);
+  const rejectedHunks = prepared.hunks.filter(
+    (hunk) => !acceptedHunkIds.includes(hunk.id),
+  );
+  if (
+    deleteWhenFullyAccepted &&
+    prepared.baseHash !== null &&
+    rejectedHunks.length === 0
+  ) {
+    const result = await service.deleteFile(prepared.path, prepared.baseHash);
+    return {
+      output: result.diff || "No changes were necessary.",
+      changed: result.changed,
+      review: { acceptedHunkIds, rejectedHunks },
+      changedFiles: [{ path: result.path, hash: result.hash }],
+      workspaceMutation: result.mutation,
+    };
+  }
+  const result = await service.applyPreparedChange(
+    change,
+    prepared,
+    acceptedHunkIds,
+  );
+  return {
+    output: result.diff || "No changes were necessary.",
+    changed: result.changed,
+    review: {
+      acceptedHunkIds: result.appliedHunkIds,
+      rejectedHunks: result.rejectedHunks,
+    },
+    changedFiles: [{ path: result.path, hash: result.hash }],
+    workspaceMutation: result.mutation,
   };
 }
 

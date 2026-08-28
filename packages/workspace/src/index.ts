@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { createTwoFilesPatch } from "diff";
+import { createTwoFilesPatch, diffLines } from "diff";
 
 const DEFAULT_MAX_FILE_BYTES = 1_000_000;
 
@@ -35,6 +35,24 @@ export interface FileChange {
   expectedContent?: string;
 }
 
+export interface FileChangeHunk {
+  id: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  original: string;
+  replacement: string;
+}
+
+export interface PreparedFileChange {
+  kind: "file_diff";
+  path: string;
+  baseHash: string | null;
+  proposedHash: string;
+  diff: string;
+  hunks: FileChangeHunk[];
+}
+
 export interface FileChangeResult {
   path: string;
   hash: string;
@@ -43,6 +61,49 @@ export interface FileChangeResult {
   additions: number;
   deletions: number;
 }
+
+export interface FileMutationPreimage {
+  content: string;
+  hash: string;
+}
+
+export interface FileMutationRecord {
+  id: string;
+  path: string;
+  operation: "write" | "delete";
+  before: FileMutationPreimage | null;
+  afterHash: string | null;
+  acceptedHunkIds: string[];
+}
+
+export interface FileMutationResult extends FileChangeResult {
+  mutation: FileMutationRecord;
+}
+
+export interface ReviewedFileChangeResult extends FileMutationResult {
+  appliedHunkIds: string[];
+  rejectedHunks: FileChangeHunk[];
+}
+
+export interface FileMutationRollbackSuccess {
+  status: "rolled_back";
+  mutationId: string;
+  path: string;
+  operation: "write" | "delete";
+  hash: string | null;
+}
+
+export interface FileMutationRollbackConflict {
+  status: "conflict";
+  mutationId: string;
+  path: string;
+  operation: "write" | "delete";
+  expectedHash: string | null;
+  actualHash: string | null;
+}
+
+export type FileMutationRollbackResult =
+  FileMutationRollbackSuccess | FileMutationRollbackConflict;
 
 export class WorkspaceFileService {
   constructor(
@@ -99,48 +160,90 @@ export class WorkspaceFileService {
   }
 
   async previewChange(change: FileChange): Promise<string> {
-    const current = await this.readOptional(change.path);
-    this.assertExpected(change, current);
-    return this.diff(change.path, current?.content ?? "", change.newContent);
+    return (await this.prepareChange(change)).diff;
   }
 
-  async applyChange(change: FileChange): Promise<FileChangeResult> {
+  async prepareChange(change: FileChange): Promise<PreparedFileChange> {
     const current = await this.readOptional(change.path);
     this.assertExpected(change, current);
-    const oldContent = current?.content ?? "";
-    const diff = this.diff(change.path, oldContent, change.newContent);
-    const path = this.resolvePath(change.path);
-    await this.assertNoSymlinkPath(path, change.path);
-    await mkdir(dirname(path), { recursive: true });
-    const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
-    try {
-      await writeFile(temporaryPath, change.newContent, "utf8");
-      try {
-        await rename(temporaryPath, path);
-      } catch (error) {
-        if (!current) {
-          throw error;
-        }
-        await rm(path, { force: true });
-        await rename(temporaryPath, path);
-      }
-    } finally {
-      await rm(temporaryPath, { force: true });
-    }
+    const path = this.relativePath(this.resolvePath(change.path));
+    const original = current?.content ?? "";
     return {
-      path: this.relativePath(path),
-      hash: hash(change.newContent),
+      kind: "file_diff",
+      path,
+      baseHash: current?.hash ?? null,
+      proposedHash: hash(change.newContent),
+      diff: this.diff(path, original, change.newContent),
+      hunks: createFileChangeHunks(path, original, change.newContent),
+    };
+  }
+
+  async applyChange(change: FileChange): Promise<ReviewedFileChangeResult> {
+    return this.applyPreparedChange(change, await this.prepareChange(change));
+  }
+
+  async applyPreparedChange(
+    change: FileChange,
+    prepared: PreparedFileChange,
+    acceptedHunkIds = prepared.hunks.map((hunk) => hunk.id),
+  ): Promise<ReviewedFileChangeResult> {
+    const current = await this.readOptional(change.path);
+    const currentHash = current?.hash ?? null;
+    if (currentHash !== prepared.baseHash) {
+      throw new Error(`File changed after approval preview: ${change.path}`);
+    }
+    this.assertExpected(change, current);
+    const recreated = await this.prepareChange(change);
+    if (!samePreparedChange(prepared, recreated)) {
+      throw new Error(
+        `Approved preview no longer matches proposal: ${change.path}`,
+      );
+    }
+    const accepted = new Set(acceptedHunkIds);
+    if (accepted.size !== acceptedHunkIds.length) {
+      throw new Error("Accepted hunk IDs must not be duplicated.");
+    }
+    for (const id of accepted) {
+      if (!prepared.hunks.some((hunk) => hunk.id === id)) {
+        throw new Error(`Unknown approved hunk: ${id}`);
+      }
+    }
+    const oldContent = current?.content ?? "";
+    const mergedContent = applyFileChangeHunks(
+      oldContent,
+      prepared.hunks.filter((hunk) => accepted.has(hunk.id)),
+    );
+    const path = this.resolvePath(prepared.path);
+    await this.assertNoSymlinkPath(path, prepared.path);
+    const afterHash = hash(mergedContent);
+    const mutation: FileMutationRecord = {
+      id: randomUUID(),
+      path: prepared.path,
+      operation: "write",
+      before: current ? { content: current.content, hash: current.hash } : null,
+      afterHash,
+      acceptedHunkIds: [...accepted],
+    };
+    await mkdir(dirname(path), { recursive: true });
+    await this.atomicWrite(path, mergedContent, Boolean(current));
+    const diff = this.diff(prepared.path, oldContent, mergedContent);
+    return {
+      path: prepared.path,
+      hash: afterHash,
       diff,
-      changed: oldContent !== change.newContent,
+      changed: oldContent !== mergedContent,
       additions: countLines(diff, "+"),
       deletions: countLines(diff, "-"),
+      mutation,
+      appliedHunkIds: [...accepted],
+      rejectedHunks: prepared.hunks.filter((hunk) => !accepted.has(hunk.id)),
     };
   }
 
   async deleteFile(
     inputPath: string,
     expectedHash?: string | null,
-  ): Promise<FileChangeResult> {
+  ): Promise<FileMutationResult> {
     const current = await this.readText(inputPath);
     if (expectedHash !== undefined && expectedHash !== current.hash) {
       throw new Error(`File changed since it was read: ${inputPath}`);
@@ -148,6 +251,14 @@ export class WorkspaceFileService {
     const diff = this.diff(inputPath, current.content, "");
     const path = this.resolvePath(inputPath);
     await this.assertNoSymlinkPath(path, inputPath);
+    const mutation: FileMutationRecord = {
+      id: randomUUID(),
+      path: current.path,
+      operation: "delete",
+      before: { content: current.content, hash: current.hash },
+      afterHash: null,
+      acceptedHunkIds: [],
+    };
     await unlink(path);
     return {
       path: current.path,
@@ -156,7 +267,68 @@ export class WorkspaceFileService {
       changed: true,
       additions: 0,
       deletions: countLines(diff, "-"),
+      mutation,
     };
+  }
+
+  async rollbackMutation(
+    mutation: FileMutationRecord,
+  ): Promise<FileMutationRollbackResult> {
+    this.assertMutationRecord(mutation);
+    const actualHash = await this.readOptionalHash(mutation.path);
+    if (actualHash !== mutation.afterHash) {
+      return {
+        status: "conflict",
+        mutationId: mutation.id,
+        path: mutation.path,
+        operation: mutation.operation,
+        expectedHash: mutation.afterHash,
+        actualHash,
+      };
+    }
+
+    const path = this.resolvePath(mutation.path);
+    await this.assertNoSymlinkPath(path, mutation.path);
+    if (mutation.before === null) {
+      await unlink(path);
+      return {
+        status: "rolled_back",
+        mutationId: mutation.id,
+        path: mutation.path,
+        operation: mutation.operation,
+        hash: null,
+      };
+    }
+
+    await mkdir(dirname(path), { recursive: true });
+    await this.atomicWrite(path, mutation.before.content, actualHash !== null);
+    return {
+      status: "rolled_back",
+      mutationId: mutation.id,
+      path: mutation.path,
+      operation: mutation.operation,
+      hash: mutation.before.hash,
+    };
+  }
+
+  private async atomicWrite(
+    path: string,
+    content: string,
+    replaceExisting: boolean,
+  ): Promise<void> {
+    const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await writeFile(temporaryPath, content, "utf8");
+      try {
+        await rename(temporaryPath, path);
+      } catch (error) {
+        if (!replaceExisting) throw error;
+        await rm(path, { force: true });
+        await rename(temporaryPath, path);
+      }
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
   }
 
   private async readOptional(
@@ -169,6 +341,44 @@ export class WorkspaceFileService {
         return undefined;
       }
       throw error;
+    }
+  }
+
+  private async readOptionalHash(inputPath: string): Promise<string | null> {
+    const path = this.resolvePath(inputPath);
+    await this.assertNoSymlinkPath(path, inputPath);
+    try {
+      return hashBuffer(await readFile(path));
+    } catch (error) {
+      if (isMissing(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private assertMutationRecord(mutation: FileMutationRecord): void {
+    if (!mutation.id) {
+      throw new Error("Mutation record ID must not be empty.");
+    }
+    if (
+      mutation.before !== null &&
+      hash(mutation.before.content) !== mutation.before.hash
+    ) {
+      throw new Error(
+        `Mutation preimage hash does not match: ${mutation.path}`,
+      );
+    }
+    if (mutation.operation === "write" && mutation.afterHash === null) {
+      throw new Error(
+        `Write mutation must have an after hash: ${mutation.path}`,
+      );
+    }
+    if (
+      mutation.operation === "delete" &&
+      (mutation.before === null || mutation.afterHash !== null)
+    ) {
+      throw new Error(`Delete mutation record is invalid: ${mutation.path}`);
     }
   }
 
@@ -242,6 +452,123 @@ export class WorkspaceFileService {
 
 export function hash(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function hashBuffer(content: Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function createFileChangeHunks(
+  path: string,
+  original: string,
+  proposal: string,
+): FileChangeHunk[] {
+  const changes = diffLines(original, proposal);
+  const hunks: FileChangeHunk[] = [];
+  let originalLine = 1;
+  for (let index = 0; index < changes.length;) {
+    const change = changes[index];
+    if (!change) break;
+    if (!change.added && !change.removed) {
+      originalLine += lineCount(change.value);
+      index += 1;
+      continue;
+    }
+    const startLine = originalLine;
+    let removed = "";
+    let replacement = "";
+    let removedLines = 0;
+    while (index < changes.length) {
+      const part = changes[index];
+      if (!part || (!part.added && !part.removed)) break;
+      if (part.removed) {
+        removed += part.value;
+        const count = lineCount(part.value);
+        removedLines += count;
+        originalLine += count;
+      }
+      if (part.added) replacement += part.value;
+      index += 1;
+    }
+    const endLine = startLine + removedLines;
+    const identity = JSON.stringify({
+      version: 1,
+      path,
+      startLine,
+      endLine,
+      originalHash: hash(removed),
+      replacementHash: hash(replacement),
+    });
+    hunks.push({
+      id: `h1:${hash(identity)}`,
+      path,
+      startLine,
+      endLine,
+      original: removed,
+      replacement,
+    });
+  }
+  return hunks;
+}
+
+function applyFileChangeHunks(
+  original: string,
+  hunks: readonly FileChangeHunk[],
+): string {
+  let content = original;
+  const ordered = [...hunks].sort(
+    (left, right) =>
+      right.startLine - left.startLine || right.endLine - left.endLine,
+  );
+  let previousStart = Number.POSITIVE_INFINITY;
+  for (const hunk of ordered) {
+    if (hunk.endLine > previousStart) {
+      throw new Error(`Overlapping approved hunk: ${hunk.id}`);
+    }
+    const start = lineOffset(original, hunk.startLine);
+    const end = lineOffset(original, hunk.endLine);
+    if (original.slice(start, end) !== hunk.original) {
+      throw new Error(`Approved hunk does not match its base: ${hunk.id}`);
+    }
+    content = `${content.slice(0, start)}${hunk.replacement}${content.slice(end)}`;
+    previousStart = hunk.startLine;
+  }
+  return content;
+}
+
+function lineOffset(content: string, oneBasedLine: number): number {
+  if (oneBasedLine < 1) throw new Error("Hunk line numbers must be positive.");
+  if (oneBasedLine === 1) return 0;
+  let line = 1;
+  const endings = /\r\n|\n|\r/g;
+  for (const match of content.matchAll(endings)) {
+    line += 1;
+    if (line === oneBasedLine) return (match.index ?? 0) + match[0].length;
+  }
+  if (line === oneBasedLine - 1 || oneBasedLine === line + 1) {
+    return content.length;
+  }
+  if (oneBasedLine === line) return content.length;
+  throw new Error(`Hunk line ${oneBasedLine} is outside the file.`);
+}
+
+function lineCount(value: string): number {
+  if (!value) return 0;
+  const endings = value.match(/\r\n|\n|\r/g)?.length ?? 0;
+  return endings + (/\r\n$|\n$|\r$/.test(value) ? 0 : 1);
+}
+
+function samePreparedChange(
+  left: PreparedFileChange,
+  right: PreparedFileChange,
+): boolean {
+  return (
+    left.kind === right.kind &&
+    left.path === right.path &&
+    left.baseHash === right.baseHash &&
+    left.proposedHash === right.proposedHash &&
+    JSON.stringify(left.hunks) === JSON.stringify(right.hunks)
+  );
 }
 
 function countLines(diff: string, prefix: "+" | "-"): number {
