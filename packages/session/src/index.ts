@@ -53,6 +53,7 @@ export interface TaskRecord {
 export interface ContextItem {
   id: string;
   projectId: string;
+  sessionId?: string;
   taskId?: string;
   source:
     | "user"
@@ -80,6 +81,57 @@ export interface SessionEvent {
   type: string;
   payload: Record<string, unknown>;
   createdAt?: number;
+}
+
+export interface TraceSpanRecord<
+  TInput = unknown,
+  TOutput = unknown,
+  TContext = unknown,
+  TUsage = unknown,
+> {
+  projectId: string;
+  sessionId?: string;
+  taskId?: string;
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  kind: string;
+  name: string;
+  status: string;
+  input?: TInput;
+  output?: TOutput;
+  context?: TContext;
+  usage?: TUsage;
+  cost?: number;
+  startedAt: number;
+  endedAt?: number;
+  durationMs?: number;
+  providerId?: string;
+  modelId?: string;
+  agentId?: string;
+  stepId?: string;
+  toolName?: string;
+  error?: string;
+}
+
+export interface FinishTraceSpanUpdate<
+  TOutput = unknown,
+  TContext = unknown,
+  TUsage = unknown,
+> {
+  status?: string;
+  output?: TOutput;
+  context?: TContext;
+  usage?: TUsage;
+  cost?: number;
+  endedAt?: number;
+  durationMs?: number;
+  providerId?: string;
+  modelId?: string;
+  agentId?: string;
+  stepId?: string;
+  toolName?: string;
+  error?: string;
 }
 
 export interface SessionStoreOptions {
@@ -334,21 +386,24 @@ export class SessionStore {
   addContextItem(
     item: Omit<ContextItem, "id" | "projectId" | "createdAt">,
   ): ContextItem {
+    const sessionId = this.resolveContextSessionId(item.sessionId, item.taskId);
     const result: ContextItem = {
       ...item,
       id: randomId(),
       projectId: this.project.id,
+      sessionId,
       createdAt: Date.now(),
     };
     this.projectDb
       .prepare(
         `INSERT INTO context_items
-         (id, project_id, task_id, source, content, file_path, start_line, end_line, priority, pinned, token_estimate, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, project_id, session_id, task_id, source, content, file_path, start_line, end_line, priority, pinned, token_estimate, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         result.id,
         result.projectId,
+        result.sessionId ?? null,
         result.taskId ?? null,
         result.source,
         result.content,
@@ -363,27 +418,214 @@ export class SessionStore {
     return result;
   }
 
-  listContextItems(taskId?: string): ContextItem[] {
+  listContextItems(): ContextItem[];
+  listContextItems(taskId: string): ContextItem[];
+  listContextItems(
+    sessionId: string,
+    taskId: string | undefined,
+  ): ContextItem[];
+  listContextItems(firstId?: string, taskId?: string): ContextItem[] {
+    const sessionId =
+      taskId !== undefined ||
+      (firstId !== undefined && this.isSessionId(firstId))
+        ? firstId
+        : undefined;
+    const resolvedTaskId = sessionId ? taskId : firstId;
+    const rows = sessionId
+      ? (this.projectDb
+          .prepare(
+            `SELECT * FROM context_items
+             WHERE project_id = ? AND (session_id IS NULL OR session_id = ?) AND (task_id IS NULL OR task_id = ?)
+             ORDER BY pinned DESC, CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, created_at DESC`,
+          )
+          .all(
+            this.project.id,
+            sessionId,
+            resolvedTaskId ?? null,
+          ) as unknown as SqliteContextItem[])
+      : (this.projectDb
+          .prepare(
+            `SELECT * FROM context_items
+             WHERE project_id = ? AND (task_id IS NULL OR task_id = ?)
+             ORDER BY pinned DESC, CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, created_at DESC`,
+          )
+          .all(
+            this.project.id,
+            resolvedTaskId ?? null,
+          ) as unknown as SqliteContextItem[]);
+    return rows.map(deserializeContextItem);
+  }
+
+  removeContextItem(itemId: string): boolean;
+  removeContextItem(sessionId: string, itemId: string): boolean;
+  removeContextItem(firstId: string, secondId?: string): boolean {
+    if (!secondId) {
+      const result = this.projectDb
+        .prepare("DELETE FROM context_items WHERE id = ? AND project_id = ?")
+        .run(firstId, this.project.id);
+      return result.changes > 0;
+    }
+
+    const firstIsSession = this.isSessionId(firstId);
+    const sessionId = firstIsSession ? firstId : secondId;
+    const itemId = firstIsSession ? secondId : firstId;
+    if (!firstIsSession && !this.isSessionId(sessionId)) return false;
+    const result = this.projectDb
+      .prepare(
+        "DELETE FROM context_items WHERE id = ? AND project_id = ? AND session_id = ?",
+      )
+      .run(itemId, this.project.id, sessionId);
+    return result.changes > 0;
+  }
+
+  startTraceSpan<
+    TInput = unknown,
+    TOutput = unknown,
+    TContext = unknown,
+    TUsage = unknown,
+  >(
+    span: Omit<
+      TraceSpanRecord<TInput, TOutput, TContext, TUsage>,
+      "projectId" | "status" | "startedAt" | "endedAt" | "durationMs"
+    > &
+      Partial<
+        Pick<
+          TraceSpanRecord<TInput, TOutput, TContext, TUsage>,
+          "status" | "startedAt"
+        >
+      >,
+  ): TraceSpanRecord<TInput, TOutput, TContext, TUsage> {
+    const sessionId = this.resolveContextSessionId(span.sessionId, span.taskId);
+    const result: TraceSpanRecord<TInput, TOutput, TContext, TUsage> = {
+      ...span,
+      projectId: this.project.id,
+      sessionId,
+      status: span.status ?? "running",
+      startedAt: span.startedAt ?? Date.now(),
+    };
+    this.projectDb
+      .prepare(
+        `INSERT INTO trace_spans
+         (project_id, session_id, task_id, trace_id, span_id, parent_span_id, kind, name, status, input_json, output_json, context_json, usage_json, cost, started_at, ended_at, duration_ms, provider_id, model_id, agent_id, step_id, tool_name, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        result.projectId,
+        result.sessionId ?? null,
+        result.taskId ?? null,
+        result.traceId,
+        result.spanId,
+        result.parentSpanId ?? null,
+        result.kind,
+        result.name,
+        result.status,
+        serializeJson(result.input),
+        serializeJson(result.output),
+        serializeJson(result.context),
+        serializeJson(result.usage),
+        result.cost ?? null,
+        result.startedAt,
+        null,
+        null,
+        result.providerId ?? null,
+        result.modelId ?? null,
+        result.agentId ?? null,
+        result.stepId ?? null,
+        result.toolName ?? null,
+        result.error ?? null,
+      );
+    return result;
+  }
+
+  finishTraceSpan<TOutput = unknown, TContext = unknown, TUsage = unknown>(
+    traceId: string,
+    spanId: string,
+    update: FinishTraceSpanUpdate<TOutput, TContext, TUsage> = {},
+  ): TraceSpanRecord<unknown, TOutput, TContext, TUsage> | undefined {
+    const current = this.getTraceSpan<unknown, TOutput, TContext, TUsage>(
+      traceId,
+      spanId,
+    );
+    if (!current) return undefined;
+
+    const endedAt = update.endedAt ?? Date.now();
+    const durationMs = update.durationMs ?? endedAt - current.startedAt;
+    const status = update.status ?? (update.error ? "failed" : "completed");
+    this.projectDb
+      .prepare(
+        `UPDATE trace_spans SET
+           status = ?, output_json = ?, context_json = ?, usage_json = ?, cost = ?,
+           ended_at = ?, duration_ms = ?, provider_id = ?, model_id = ?, agent_id = ?,
+           step_id = ?, tool_name = ?, error = ?
+         WHERE project_id = ? AND trace_id = ? AND span_id = ?`,
+      )
+      .run(
+        status,
+        update.output === undefined
+          ? serializeJson(current.output)
+          : serializeJson(update.output),
+        update.context === undefined
+          ? serializeJson(current.context)
+          : serializeJson(update.context),
+        update.usage === undefined
+          ? serializeJson(current.usage)
+          : serializeJson(update.usage),
+        update.cost ?? current.cost ?? null,
+        endedAt,
+        durationMs,
+        update.providerId ?? current.providerId ?? null,
+        update.modelId ?? current.modelId ?? null,
+        update.agentId ?? current.agentId ?? null,
+        update.stepId ?? current.stepId ?? null,
+        update.toolName ?? current.toolName ?? null,
+        update.error ?? current.error ?? null,
+        this.project.id,
+        traceId,
+        spanId,
+      );
+    return this.getTraceSpan<unknown, TOutput, TContext, TUsage>(
+      traceId,
+      spanId,
+    );
+  }
+
+  getTraceSpan<
+    TInput = unknown,
+    TOutput = unknown,
+    TContext = unknown,
+    TUsage = unknown,
+  >(
+    traceId: string,
+    spanId: string,
+  ): TraceSpanRecord<TInput, TOutput, TContext, TUsage> | undefined {
+    const row = this.projectDb
+      .prepare(
+        "SELECT * FROM trace_spans WHERE project_id = ? AND trace_id = ? AND span_id = ?",
+      )
+      .get(this.project.id, traceId, spanId) as SqliteTraceSpan | undefined;
+    return row
+      ? deserializeTraceSpan<TInput, TOutput, TContext, TUsage>(row)
+      : undefined;
+  }
+
+  listTraceSpans<
+    TInput = unknown,
+    TOutput = unknown,
+    TContext = unknown,
+    TUsage = unknown,
+  >(
+    traceId: string,
+  ): Array<TraceSpanRecord<TInput, TOutput, TContext, TUsage>> {
     const rows = this.projectDb
       .prepare(
-        `SELECT * FROM context_items WHERE project_id = ? AND (task_id IS NULL OR task_id = ?)
-         ORDER BY pinned DESC, CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, created_at DESC`,
+        `SELECT * FROM trace_spans
+         WHERE project_id = ? AND trace_id = ?
+         ORDER BY started_at, rowid`,
       )
-      .all(this.project.id, taskId ?? null) as unknown as SqliteContextItem[];
-    return rows.map((row) => ({
-      id: row.id,
-      projectId: row.project_id,
-      taskId: row.task_id ?? undefined,
-      source: row.source as ContextItem["source"],
-      content: row.content,
-      filePath: row.file_path ?? undefined,
-      startLine: row.start_line ?? undefined,
-      endLine: row.end_line ?? undefined,
-      priority: row.priority as ContextItem["priority"],
-      pinned: row.pinned === 1,
-      tokenEstimate: row.token_estimate,
-      createdAt: row.created_at,
-    }));
+      .all(this.project.id, traceId) as unknown as SqliteTraceSpan[];
+    return rows.map((row) =>
+      deserializeTraceSpan<TInput, TOutput, TContext, TUsage>(row),
+    );
   }
 
   setGlobalSetting(key: string, value: string): void {
@@ -519,9 +761,27 @@ export class SessionStore {
     return result.changes > 0;
   }
 
-  buildContext(taskId: string | undefined, maxCharacters: number): string {
-    const items = this.listContextItems(taskId);
-    let remaining = maxCharacters;
+  buildContext(taskId: string | undefined, maxCharacters: number): string;
+  buildContext(
+    sessionId: string,
+    taskId: string | undefined,
+    maxCharacters: number,
+  ): string;
+  buildContext(
+    firstId: string | undefined,
+    taskIdOrMaxCharacters: string | number | undefined,
+    scopedMaxCharacters?: number,
+  ): string {
+    const scoped = scopedMaxCharacters !== undefined;
+    const items = scoped
+      ? this.listContextItems(
+          firstId as string,
+          taskIdOrMaxCharacters as string | undefined,
+        )
+      : this.listContextItems(firstId as string);
+    let remaining = scoped
+      ? scopedMaxCharacters
+      : (taskIdOrMaxCharacters as number);
     const selected: string[] = [];
     for (const item of items) {
       if (item.content.length > remaining && selected.length > 0) continue;
@@ -530,6 +790,35 @@ export class SessionStore {
       if (remaining <= 0) break;
     }
     return selected.join("\n\n");
+  }
+
+  private isSessionId(id: string): boolean {
+    return this.projectDb
+      .prepare("SELECT 1 FROM sessions WHERE id = ? AND project_id = ?")
+      .get(id, this.project.id)
+      ? true
+      : false;
+  }
+
+  private resolveContextSessionId(
+    sessionId: string | undefined,
+    taskId: string | undefined,
+  ): string | undefined {
+    if (!taskId) {
+      if (sessionId && !this.isSessionId(sessionId)) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      return sessionId;
+    }
+
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+    if (sessionId && sessionId !== task.sessionId) {
+      throw new Error(
+        `Task ${taskId} does not belong to session ${sessionId}.`,
+      );
+    }
+    return task.sessionId;
   }
 }
 
@@ -686,6 +975,7 @@ interface SqliteAgent {
 interface SqliteContextItem {
   id: string;
   project_id: string;
+  session_id: string | null;
   task_id: string | null;
   source: string;
   content: string;
@@ -696,6 +986,32 @@ interface SqliteContextItem {
   pinned: number;
   token_estimate: number;
   created_at: number;
+}
+
+interface SqliteTraceSpan {
+  project_id: string;
+  session_id: string | null;
+  task_id: string | null;
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  kind: string;
+  name: string;
+  status: string;
+  input_json: string | null;
+  output_json: string | null;
+  context_json: string | null;
+  usage_json: string | null;
+  cost: number | null;
+  started_at: number;
+  ended_at: number | null;
+  duration_ms: number | null;
+  provider_id: string | null;
+  model_id: string | null;
+  agent_id: string | null;
+  step_id: string | null;
+  tool_name: string | null;
+  error: string | null;
 }
 
 function deserializeSession(row: SqliteSession): SessionRecord {
@@ -739,6 +1055,67 @@ function deserializeAgent(row: SqliteAgent): AgentDefinition {
   };
 }
 
+function deserializeContextItem(row: SqliteContextItem): ContextItem {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    sessionId: row.session_id ?? undefined,
+    taskId: row.task_id ?? undefined,
+    source: row.source as ContextItem["source"],
+    content: row.content,
+    filePath: row.file_path ?? undefined,
+    startLine: row.start_line ?? undefined,
+    endLine: row.end_line ?? undefined,
+    priority: row.priority as ContextItem["priority"],
+    pinned: row.pinned === 1,
+    tokenEstimate: row.token_estimate,
+    createdAt: row.created_at,
+  };
+}
+
+function deserializeTraceSpan<TInput, TOutput, TContext, TUsage>(
+  row: SqliteTraceSpan,
+): TraceSpanRecord<TInput, TOutput, TContext, TUsage> {
+  return {
+    projectId: row.project_id,
+    sessionId: row.session_id ?? undefined,
+    taskId: row.task_id ?? undefined,
+    traceId: row.trace_id,
+    spanId: row.span_id,
+    parentSpanId: row.parent_span_id ?? undefined,
+    kind: row.kind,
+    name: row.name,
+    status: row.status,
+    input: deserializeJson<TInput>(row.input_json),
+    output: deserializeJson<TOutput>(row.output_json),
+    context: deserializeJson<TContext>(row.context_json),
+    usage: deserializeJson<TUsage>(row.usage_json),
+    cost: row.cost ?? undefined,
+    startedAt: row.started_at,
+    endedAt: row.ended_at ?? undefined,
+    durationMs: row.duration_ms ?? undefined,
+    providerId: row.provider_id ?? undefined,
+    modelId: row.model_id ?? undefined,
+    agentId: row.agent_id ?? undefined,
+    stepId: row.step_id ?? undefined,
+    toolName: row.tool_name ?? undefined,
+    error: row.error ?? undefined,
+  };
+}
+
+function serializeJson(value: unknown): string | null {
+  if (value === undefined) return null;
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) {
+    throw new Error("Trace span fields must contain JSON-serializable values.");
+  }
+  return serialized;
+}
+
+function deserializeJson<T>(value: string | null): T | undefined {
+  return value === null ? undefined : (JSON.parse(value) as T);
+}
+
 function isOrchestrationState(value: unknown): value is OrchestrationState {
   if (!value || typeof value !== "object") return false;
   const state = value as Partial<OrchestrationState>;
@@ -780,10 +1157,8 @@ function initializeGlobalDatabase(db: DatabaseSync): void {
       updated_at INTEGER NOT NULL
     );
   `);
-  try {
+  if (!tableHasColumn(db, "agents", "delegates_to")) {
     db.exec("ALTER TABLE agents ADD COLUMN delegates_to TEXT");
-  } catch {
-    // Existing databases already have the column.
   }
 }
 
@@ -829,6 +1204,7 @@ function initializeProjectDatabase(db: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS context_items (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id),
+      session_id TEXT REFERENCES sessions(id),
       task_id TEXT REFERENCES tasks(id),
       source TEXT NOT NULL,
       content TEXT NOT NULL,
@@ -840,10 +1216,67 @@ function initializeProjectDatabase(db: DatabaseSync): void {
       token_estimate INTEGER NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS trace_spans (
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      session_id TEXT REFERENCES sessions(id),
+      task_id TEXT REFERENCES tasks(id),
+      trace_id TEXT NOT NULL,
+      span_id TEXT NOT NULL,
+      parent_span_id TEXT,
+      kind TEXT NOT NULL,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      input_json TEXT,
+      output_json TEXT,
+      context_json TEXT,
+      usage_json TEXT,
+      cost REAL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      duration_ms INTEGER,
+      provider_id TEXT,
+      model_id TEXT,
+      agent_id TEXT,
+      step_id TEXT,
+      tool_name TEXT,
+      error TEXT,
+      PRIMARY KEY (project_id, trace_id, span_id)
+    );
     CREATE INDEX IF NOT EXISTS sessions_project_updated ON sessions(project_id, updated_at DESC);
     CREATE INDEX IF NOT EXISTS events_session_created ON events(session_id, created_at);
     CREATE INDEX IF NOT EXISTS context_project_priority ON context_items(project_id, priority, pinned);
+    CREATE INDEX IF NOT EXISTS trace_project_trace_started ON trace_spans(project_id, trace_id, started_at);
   `);
+  migrateContextItemSessions(db);
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS context_session_priority ON context_items(project_id, session_id, priority, pinned)",
+  );
+}
+
+function migrateContextItemSessions(db: DatabaseSync): void {
+  if (!tableHasColumn(db, "context_items", "session_id")) {
+    db.exec(
+      "ALTER TABLE context_items ADD COLUMN session_id TEXT REFERENCES sessions(id)",
+    );
+  }
+  db.exec(`
+    UPDATE context_items
+    SET session_id = (
+      SELECT tasks.session_id FROM tasks WHERE tasks.id = context_items.task_id
+    )
+    WHERE session_id IS NULL AND task_id IS NOT NULL
+  `);
+}
+
+function tableHasColumn(
+  db: DatabaseSync,
+  tableName: string,
+  columnName: string,
+): boolean {
+  const rows = db
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all() as unknown as Array<{ name: string }>;
+  return rows.some((row) => row.name === columnName);
 }
 
 function projectId(rootPath: string): string {
