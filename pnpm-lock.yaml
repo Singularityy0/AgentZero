@@ -188,18 +188,9 @@ importers:
       "@agentic-runtime/gateway":
         specifier: workspace:*
         version: link:../gateway
-      "@agentic-runtime/ollama":
+      "@agentic-runtime/runtime":
         specifier: workspace:*
-        version: link:../ollama
-      "@agentic-runtime/openai":
-        specifier: workspace:*
-        version: link:../openai
-      "@agentic-runtime/session":
-        specifier: workspace:*
-        version: link:../session
-      "@agentic-runtime/tools":
-        specifier: workspace:*
-        version: link:../tools
+        version: link:../runtime
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1

@@ -1,6 +1,12 @@
-import type { AgentEvent, MultiAgentEvent } from "@agentic-runtime/core";
+import type {
+  AgentEvent,
+  MultiAgentEvent,
+  OrchestrationEvent,
+} from "@agentic-runtime/core";
 import type { ToolCall } from "@agentic-runtime/core";
+import type { ToolPreview } from "@agentic-runtime/core";
 import type { ToolResult } from "@agentic-runtime/core";
+import type { GatewayEvent } from "@agentic-runtime/gateway";
 
 export type ActivityStatus =
   "idle" | "thinking" | "tool" | "approval" | "completed" | "failed";
@@ -13,6 +19,15 @@ export interface ToolActivity {
   status: "running" | "completed" | "failed";
   startedAt: number;
   finishedAt?: number;
+}
+
+export interface RouteActivity {
+  providerId: string;
+  modelId?: string;
+  reason?: string;
+  attempt?: number;
+  status: "selected" | "completed" | "failed";
+  failure?: string;
 }
 
 export interface HandoffActivity {
@@ -34,8 +49,14 @@ export interface TuiState {
   startedAt?: number;
   lastProgress?: string;
   toolActivities: ToolActivity[];
+  routeActivities: RouteActivity[];
   handoffs: HandoffActivity[];
-  approval?: { call: ToolCall; preview?: string };
+  approval?: {
+    call: ToolCall;
+    preview?: ToolPreview;
+    selectedHunkIds: string[];
+    focusedHunk: number;
+  };
   error?: string;
 }
 
@@ -49,8 +70,18 @@ export type TuiAction =
     }
   | { type: "agent_event"; agentId: string; event: AgentEvent }
   | { type: "multi_agent_event"; event: MultiAgentEvent }
-  | { type: "approval_requested"; call: ToolCall; preview?: string }
+  | { type: "gateway_event"; event: GatewayEvent }
+  | { type: "pipeline_event"; event: OrchestrationEvent }
+  | { type: "approval_requested"; call: ToolCall; preview?: ToolPreview }
+  | { type: "approval_focus_changed"; offset: -1 | 1 }
+  | { type: "approval_hunk_toggled" }
+  | { type: "approval_all_selected" }
   | { type: "approval_resolved"; approved: boolean }
+  | { type: "session_changed"; sessionId: string }
+  | { type: "agent_changed"; agentId: string }
+  | { type: "isolated_started" }
+  | { type: "isolated_completed"; text: string }
+  | { type: "isolated_failed"; error: string }
   | { type: "task_completed"; text: string }
   | { type: "task_failed"; error: string };
 
@@ -62,6 +93,7 @@ export const initialTuiState: TuiState = {
   step: 0,
   maxSteps: 24,
   toolActivities: [],
+  routeActivities: [],
   handoffs: [],
 };
 
@@ -84,8 +116,86 @@ export function reduceTuiState(state: TuiState, action: TuiAction): TuiState {
     return {
       ...state,
       status: "approval",
-      approval: { call: action.call, preview: action.preview },
+      approval: {
+        call: action.call,
+        preview: action.preview,
+        selectedHunkIds:
+          typeof action.preview === "object"
+            ? action.preview.hunks.map((hunk) => hunk.id)
+            : [],
+        focusedHunk: 0,
+      },
     };
+  }
+
+  if (action.type === "approval_focus_changed" && state.approval) {
+    const count =
+      typeof state.approval.preview === "object"
+        ? state.approval.preview.hunks.length
+        : 0;
+    if (count === 0) return state;
+    return {
+      ...state,
+      approval: {
+        ...state.approval,
+        focusedHunk:
+          (state.approval.focusedHunk + action.offset + count) % count,
+      },
+    };
+  }
+
+  if (action.type === "approval_hunk_toggled" && state.approval) {
+    const preview = state.approval.preview;
+    if (typeof preview !== "object") return state;
+    const hunk = preview.hunks[state.approval.focusedHunk];
+    if (!hunk) return state;
+    const selected = new Set(state.approval.selectedHunkIds);
+    if (selected.has(hunk.id)) selected.delete(hunk.id);
+    else selected.add(hunk.id);
+    return {
+      ...state,
+      approval: { ...state.approval, selectedHunkIds: [...selected] },
+    };
+  }
+
+  if (action.type === "approval_all_selected" && state.approval) {
+    const preview = state.approval.preview;
+    if (typeof preview !== "object") return state;
+    return {
+      ...state,
+      approval: {
+        ...state.approval,
+        selectedHunkIds: preview.hunks.map((hunk) => hunk.id),
+      },
+    };
+  }
+
+  if (action.type === "session_changed") {
+    return { ...state, sessionId: action.sessionId };
+  }
+
+  if (action.type === "agent_changed") {
+    return { ...state, activeAgentId: action.agentId };
+  }
+
+  if (action.type === "isolated_started") {
+    return {
+      ...state,
+      status: "thinking",
+      lastProgress: "Answering isolated /bytheway question",
+    };
+  }
+
+  if (action.type === "isolated_completed") {
+    return {
+      ...state,
+      status: "completed",
+      lastProgress: action.text,
+    };
+  }
+
+  if (action.type === "isolated_failed") {
+    return { ...state, status: "failed", error: action.error };
   }
 
   if (action.type === "task_completed") {
@@ -115,6 +225,105 @@ export function reduceTuiState(state: TuiState, action: TuiAction): TuiState {
     };
   }
 
+  if (action.type === "pipeline_event") {
+    const event = action.event;
+    if (event.type === "orchestration_started") {
+      return {
+        ...state,
+        status: "thinking",
+        lastProgress: "Pipeline started",
+      };
+    }
+    if (event.type === "step_started") {
+      return {
+        ...state,
+        activeAgentId: event.role,
+        status: "thinking",
+        lastProgress: `${event.role} stage started (attempt ${event.attempt})`,
+      };
+    }
+    if (event.type === "step_completed") {
+      return {
+        ...state,
+        status: "thinking",
+        lastProgress: `${event.role} stage completed`,
+      };
+    }
+    if (event.type === "step_retrying") {
+      return {
+        ...state,
+        status: "thinking",
+        lastProgress: `Retrying ${event.stepId}: ${event.reason}`,
+      };
+    }
+    if (event.type === "step_recovering") {
+      return {
+        ...state,
+        status: "thinking",
+        lastProgress: `Recovering ${event.stepId}: ${event.reason}`,
+      };
+    }
+    if (event.type === "orchestration_paused") {
+      return {
+        ...state,
+        status: "idle",
+        lastProgress: `Pipeline paused: ${event.reason}`,
+      };
+    }
+    if (event.type === "orchestration_completed") {
+      return {
+        ...state,
+        status: "thinking",
+        lastProgress: "Pipeline completed",
+      };
+    }
+    if (event.type === "orchestration_failed") {
+      return { ...state, status: "failed", error: event.reason };
+    }
+    return state;
+  }
+
+  if (action.type === "gateway_event") {
+    const event = action.event;
+    if (!event.type.startsWith("routing_")) return state;
+    const status =
+      event.type === "routing_attempt_completed"
+        ? "completed"
+        : event.type === "routing_attempt_failed"
+          ? "failed"
+          : "selected";
+    if (event.type === "routing_attempt_started") return state;
+    const activity: RouteActivity = {
+      providerId: event.providerId,
+      modelId: event.modelId,
+      reason: event.reason,
+      attempt: event.attempt,
+      status,
+      failure: event.failure?.code,
+    };
+    const existingIndex = state.routeActivities.findIndex(
+      (item) =>
+        item.providerId === activity.providerId &&
+        item.modelId === activity.modelId &&
+        item.attempt === activity.attempt,
+    );
+    const routeActivities = [...state.routeActivities];
+    if (existingIndex >= 0) routeActivities[existingIndex] = activity;
+    else routeActivities.push(activity);
+    return {
+      ...state,
+      provider: event.providerId,
+      model: event.modelId ?? state.model,
+      lastProgress:
+        status === "failed"
+          ? `${event.providerId}/${event.modelId ?? "unknown"} failed (${event.failure?.code ?? "unknown"}); trying fallback`
+          : status === "completed"
+            ? `${event.providerId}/${event.modelId ?? "unknown"} completed`
+            : `Routing to ${event.providerId}/${event.modelId ?? "unknown"}`,
+      routeActivities: routeActivities.slice(-8),
+    };
+  }
+
   if (action.type === "multi_agent_event") {
     const event = action.event;
     if (event.type === "agent_started") {
@@ -130,9 +339,9 @@ export function reduceTuiState(state: TuiState, action: TuiAction): TuiState {
                 parentAgentId: event.parentAgentId,
                 targetAgentId: event.agentId,
                 task: event.task,
-                status: "started",
+                status: "started" as const,
               },
-            ]
+            ].slice(-12)
           : state.handoffs,
       };
     }
@@ -161,6 +370,7 @@ export function reduceTuiState(state: TuiState, action: TuiAction): TuiState {
     return state;
   }
 
+  if (action.type !== "agent_event") return state;
   const event = action.event;
   if (event.type === "model_request") {
     return {
@@ -204,7 +414,13 @@ export function reduceTuiState(state: TuiState, action: TuiAction): TuiState {
         activity.id === event.call.id
           ? {
               ...activity,
-              result: event.result,
+              result: {
+                ...event.result,
+                output:
+                  event.result.output.length <= 4_000
+                    ? event.result.output
+                    : `${event.result.output.slice(0, 4_000)}\n[truncated in TUI state]`,
+              },
               status: event.result.isError ? "failed" : "completed",
               finishedAt: Date.now(),
             }

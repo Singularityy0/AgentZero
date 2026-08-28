@@ -14,10 +14,7 @@
   "dependencies": {
     "@agentic-runtime/core": "workspace:*",
     "@agentic-runtime/gateway": "workspace:*",
-    "@agentic-runtime/ollama": "workspace:*",
-    "@agentic-runtime/openai": "workspace:*",
-    "@agentic-runtime/session": "workspace:*",
-    "@agentic-runtime/tools": "workspace:*",
+    "@agentic-runtime/runtime": "workspace:*",
     "dotenv": "^16.4.7",
     "ink": "^7.1.1",
     "ink-select-input": "^6.2.0",

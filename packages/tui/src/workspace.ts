@@ -5,10 +5,12 @@ export function resolveWorkspaceRoot(
   arguments_: readonly string[],
   cwd = process.cwd(),
 ): string {
-  if (arguments_.length > 1) {
+  const workspaceArguments =
+    arguments_[0] === "--" ? arguments_.slice(1) : arguments_;
+  if (workspaceArguments.length > 1) {
     throw new Error("Usage: agentic-tui [workspace-path]");
   }
-  const path = resolve(cwd, arguments_[0] ?? ".");
+  const path = resolve(cwd, workspaceArguments[0] ?? ".");
   let stats: ReturnType<typeof statSync>;
   try {
     stats = statSync(path);

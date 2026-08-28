@@ -2,42 +2,35 @@ import React, { useEffect, useReducer, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
-import {
-  MultiAgentOrchestrator,
-  ToolRegistry,
-  analyzeCodeStructureTool,
-  computeAstDiffTool,
-  type AgentDefinition,
-  type ConversationMessage,
-  type LanguageModel,
-  type MultiAgentEvent,
-  type ToolCall,
+import type {
+  ConversationMessage,
+  MultiAgentEvent,
+  ToolApprovalResponse,
+  ToolCall,
+  ToolPreview,
 } from "@agentic-runtime/core";
 import {
-  createDefaultProviderGateway,
   DEFAULT_CREDENTIAL_ENV_FALLBACK,
   PROVIDER_FIELD_SPECS,
-  StoredCredentialResolver,
   validateStoredProvider,
 } from "@agentic-runtime/gateway";
 import {
-  loadProjectAgents,
-  loadProjectInstructions,
-  SessionStore,
+  createHeadlessRuntime,
+  DEFAULT_AGENT_ID,
+  DEFAULT_RUNTIME_LIMITS,
+  type AgentDefinition,
+  type HeadlessRuntimeService,
+  type RuntimeEvent,
+  type RuntimeModelRouteSelection,
+  type RuntimeModelSelection,
+  type RuntimeSettingsStore,
+  type RuntimeTaskHandle,
   type SessionRecord,
-} from "@agentic-runtime/session";
-import { createIdeTools } from "@agentic-runtime/tools";
+} from "@agentic-runtime/runtime";
+import { formatFileContexts, parseCommand } from "./commands.js";
 import { initialTuiState, reduceTuiState, type TuiState } from "./ui-state.js";
 
-const DEFAULT_AGENT_ID = "general";
-const CODING_AGENT_ID = "coding-agent";
-const REVIEWER_AGENT_ID = "reviewer";
-const TUI_MAX_MODEL_STEPS = 32;
-const RESERVED_AGENT_IDS = new Set([
-  DEFAULT_AGENT_ID,
-  CODING_AGENT_ID,
-  REVIEWER_AGENT_ID,
-]);
+const TUI_MAX_MODEL_STEPS = DEFAULT_RUNTIME_LIMITS.maxModelSteps;
 
 const colors = {
   cyan: "cyan",
@@ -51,8 +44,7 @@ const colors = {
 } as const;
 
 interface RuntimeContext {
-  store: SessionStore;
-  runtime: MultiAgentOrchestrator;
+  runtime: HeadlessRuntimeService;
   model: string;
   provider: string;
   session: SessionRecord;
@@ -66,9 +58,10 @@ export function App({
   const { exit } = useApp();
   const { stdout } = useStdout();
   const approvalHandler = useRef<
-    ((call: ToolCall, preview?: string) => Promise<boolean>) | undefined
+    | ((call: ToolCall, preview?: ToolPreview) => Promise<ToolApprovalResponse>)
+    | undefined
   >(undefined);
-  const eventHandler = useRef<((event: MultiAgentEvent) => void) | undefined>(
+  const eventHandler = useRef<((event: RuntimeEvent) => void) | undefined>(
     undefined,
   );
   const [runtimeContext] = useState(() =>
@@ -76,72 +69,66 @@ export function App({
       workspaceRoot,
       (call, preview) =>
         approvalHandler.current?.(call, preview) ?? Promise.resolve(false),
-      (event) => eventHandler.current?.(event),
     ),
   );
   const [state, dispatch] = useReducer(reduceTuiState, {
     ...initialTuiState,
-    activeAgentId: getInitialAgent(runtimeContext.store),
+    activeAgentId: getInitialAgent(runtimeContext.runtime),
     model: runtimeContext.model,
     provider: runtimeContext.provider,
     sessionId: runtimeContext.session.id,
   });
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [isolatedMessages, setIsolatedMessages] = useState<
+    ConversationMessage[]
+  >([]);
   const [activeAgentId, setActiveAgentId] = useState(state.activeAgentId);
   const [input, setInput] = useState("");
-  const approvalResolver = useRef<((approved: boolean) => void) | undefined>(
+  const approvalResolver = useRef<
+    ((decision: ToolApprovalResponse) => void) | undefined
+  >(undefined);
+  const activeTask = useRef<Pick<RuntimeTaskHandle, "cancel"> | undefined>(
     undefined,
   );
-  const activeTaskId = useRef<string | undefined>(undefined);
   const running =
     state.status === "thinking" ||
     state.status === "tool" ||
     state.status === "approval";
   const width = Math.max(60, Math.min(stdout.columns ?? 100, 140));
 
-  useEffect(() => () => runtimeContext.store.close(), [runtimeContext]);
+  useEffect(() => {
+    const unsubscribe = runtimeContext.runtime.subscribe((event) =>
+      eventHandler.current?.(event),
+    );
+    return () => {
+      unsubscribe();
+      void runtimeContext.runtime.close();
+    };
+  }, [runtimeContext]);
 
   approvalHandler.current = (call, preview) =>
     new Promise((resolve) => {
       approvalResolver.current = resolve;
-      runtimeContext.store.appendEvent({
-        sessionId: runtimeContext.session.id,
-        taskId: activeTaskId.current,
-        type: "approval_requested",
-        payload: { call, preview },
-      });
       dispatch({ type: "approval_requested", call, preview });
     });
-  eventHandler.current = (event) => {
+  eventHandler.current = (runtimeEvent) => {
+    if (runtimeEvent.type === "routing_event") {
+      dispatch({ type: "gateway_event", event: runtimeEvent.event });
+      return;
+    }
+    if (runtimeEvent.type === "pipeline_event") {
+      dispatch({ type: "pipeline_event", event: runtimeEvent.event });
+      return;
+    }
+    if (runtimeEvent.type !== "orchestration_event") return;
+    const event: MultiAgentEvent = runtimeEvent.event;
     if (event.type === "agent_event" && event.agentEvent) {
-      if (event.agentEvent.type === "context_compacted") {
-        runtimeContext.store.addContextItem({
-          taskId: activeTaskId.current,
-          source: "summary",
-          content: event.agentEvent.summary,
-          priority: "critical",
-          pinned: false,
-          tokenEstimate: Math.ceil(event.agentEvent.summary.length / 4),
-        });
-      }
-      runtimeContext.store.appendEvent({
-        sessionId: runtimeContext.session.id,
-        taskId: activeTaskId.current,
-        type: event.agentEvent.type,
-        payload: { agentId: event.agentId, event: event.agentEvent },
-      });
       dispatch({
         type: "agent_event",
         agentId: event.agentId,
         event: event.agentEvent,
       });
     } else {
-      runtimeContext.store.appendEvent({
-        sessionId: runtimeContext.session.id,
-        taskId: activeTaskId.current,
-        type: event.type,
-        payload: { event },
-      });
       dispatch({ type: "multi_agent_event", event });
     }
   };
@@ -152,23 +139,63 @@ export function App({
         if (approvalResolver.current) {
           approvalResolver.current(false);
           approvalResolver.current = undefined;
+          activeTask.current?.cancel();
+          dispatch({ type: "approval_resolved", approved: false });
+          return;
+        } else if (activeTask.current) {
+          activeTask.current.cancel();
         } else {
           exit();
         }
       }
-      if (
-        state.approval &&
-        (value.toLowerCase() === "y" || value.toLowerCase() === "n")
-      ) {
+      if (!state.approval) return;
+      const preview = state.approval.preview;
+      if (typeof preview === "object") {
+        if (key.upArrow || key.downArrow) {
+          dispatch({
+            type: "approval_focus_changed",
+            offset: key.upArrow ? -1 : 1,
+          });
+          return;
+        }
+        if (value === " ") {
+          dispatch({ type: "approval_hunk_toggled" });
+          return;
+        }
+        if (value.toLowerCase() === "a") {
+          approvalResolver.current?.(true);
+          approvalResolver.current = undefined;
+          dispatch({ type: "approval_resolved", approved: true });
+          return;
+        }
+        if (value.toLowerCase() === "r" || value.toLowerCase() === "n") {
+          approvalResolver.current?.(false);
+          approvalResolver.current = undefined;
+          dispatch({ type: "approval_resolved", approved: false });
+          return;
+        }
+        if (value.toLowerCase() === "y" || key.return) {
+          const acceptedHunkIds = state.approval.selectedHunkIds;
+          const accepted = new Set(acceptedHunkIds);
+          const decision = {
+            acceptedHunkIds,
+            rejectedHunkIds: preview.hunks
+              .map((hunk) => hunk.id)
+              .filter((id) => !accepted.has(id)),
+          };
+          approvalResolver.current?.(decision);
+          approvalResolver.current = undefined;
+          dispatch({
+            type: "approval_resolved",
+            approved: acceptedHunkIds.length > 0,
+          });
+        }
+        return;
+      }
+      if (value.toLowerCase() === "y" || value.toLowerCase() === "n") {
         const approved = value.toLowerCase() === "y";
         approvalResolver.current?.(approved);
         approvalResolver.current = undefined;
-        runtimeContext.store.appendEvent({
-          sessionId: runtimeContext.session.id,
-          taskId: activeTaskId.current,
-          type: "approval_resolved",
-          payload: { approved },
-        });
         dispatch({ type: "approval_resolved", approved });
       }
     },
@@ -190,13 +217,114 @@ export function App({
       ]);
       return;
     }
+    const parsedCommand = parseCommand(prompt);
+    if (parsedCommand?.type === "invalid") {
+      setMessages((current) => [
+        ...current,
+        { role: "assistant", content: parsedCommand.message },
+      ]);
+      return;
+    }
+    if (parsedCommand?.type === "context") {
+      try {
+        if (parsedCommand.action === "list") {
+          const contexts = runtimeContext.runtime.listFileContext(
+            runtimeContext.session.id,
+          );
+          setMessages((current) => [
+            ...current,
+            {
+              role: "assistant",
+              content:
+                contexts.length > 0
+                  ? `Manual context snapshots:\n${formatFileContexts(contexts)}`
+                  : "No manual file context is selected.",
+            },
+          ]);
+        } else if (parsedCommand.action === "add") {
+          const added = await runtimeContext.runtime.addFileContext({
+            sessionId: runtimeContext.session.id,
+            path: parsedCommand.path,
+            range:
+              parsedCommand.startLine === undefined
+                ? undefined
+                : {
+                    startLine: parsedCommand.startLine,
+                    endLine: parsedCommand.endLine ?? parsedCommand.startLine,
+                  },
+          });
+          setMessages((current) => [
+            ...current,
+            {
+              role: "assistant",
+              content: `Added context snapshot: ${formatFileContexts([added])}`,
+            },
+          ]);
+        } else {
+          const removed = runtimeContext.runtime.removeFileContext({
+            sessionId: runtimeContext.session.id,
+            path: parsedCommand.path,
+            range:
+              parsedCommand.startLine === undefined
+                ? undefined
+                : {
+                    startLine: parsedCommand.startLine,
+                    endLine: parsedCommand.endLine ?? parsedCommand.startLine,
+                  },
+          });
+          setMessages((current) => [
+            ...current,
+            {
+              role: "assistant",
+              content: `Removed ${removed} manual context selection${removed === 1 ? "" : "s"}.`,
+            },
+          ]);
+        }
+      } catch (error) {
+        setMessages((current) => [
+          ...current,
+          {
+            role: "assistant",
+            content: error instanceof Error ? error.message : String(error),
+          },
+        ]);
+      }
+      return;
+    }
+    if (parsedCommand?.type === "bytheway") {
+      setIsolatedMessages((current) => [
+        ...current,
+        { role: "user", content: `[BY THE WAY]\n${parsedCommand.prompt}` },
+      ]);
+      dispatch({ type: "isolated_started" });
+      try {
+        const handle = runtimeContext.runtime.startIsolatedQuestion({
+          sessionId: runtimeContext.session.id,
+          agentId: activeAgentId,
+          prompt: parsedCommand.prompt,
+        });
+        activeTask.current = handle;
+        const result = await handle.completion;
+        setIsolatedMessages((current) => [
+          ...current,
+          { role: "assistant", content: `[BY THE WAY]\n${result.text}` },
+        ]);
+        dispatch({ type: "isolated_completed", text: result.text });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        dispatch({ type: "isolated_failed", error: message });
+      } finally {
+        activeTask.current = undefined;
+      }
+      return;
+    }
     if (prompt === "/agents") {
       setMessages((current) => [
         ...current,
         {
           role: "assistant",
           content: formatAgents(
-            runtimeContext.store.listAgents(),
+            runtimeContext.runtime.listAgents(),
             activeAgentId,
           ),
         },
@@ -208,14 +336,14 @@ export function App({
         ...current,
         {
           role: "assistant",
-          content: `Active agent: ${activeAgentId}\n\n${formatAgents(runtimeContext.store.listAgents(), activeAgentId)}`,
+          content: `Active agent: ${activeAgentId}\n\n${formatAgents(runtimeContext.runtime.listAgents(), activeAgentId)}`,
         },
       ]);
       return;
     }
     if (prompt.startsWith("/agent ")) {
       const id = prompt.slice(7).trim();
-      const agent = runtimeContext.store.getAgent(id);
+      const agent = runtimeContext.runtime.getAgent(id);
       if (!agent?.enabled) {
         setMessages((current) => [
           ...current,
@@ -223,14 +351,17 @@ export function App({
         ]);
       } else {
         setActiveAgentId(id);
+        dispatch({ type: "agent_changed", agentId: id });
         dispatch({ type: "task_completed", text: `Active agent: ${id}` });
       }
       return;
     }
     if (prompt === "/new") {
-      const session = runtimeContext.store.createSession();
+      const session = runtimeContext.runtime.createSession();
       runtimeContext.session = session;
       setMessages([]);
+      setIsolatedMessages([]);
+      dispatch({ type: "session_changed", sessionId: session.id });
       dispatch({
         type: "task_completed",
         text: `Started session ${session.id}`,
@@ -239,7 +370,8 @@ export function App({
     }
     if (prompt === "/clear") {
       setMessages([]);
-      runtimeContext.store.saveMessages(runtimeContext.session.id, []);
+      setIsolatedMessages([]);
+      runtimeContext.runtime.clearSession(runtimeContext.session.id);
       dispatch({ type: "task_completed", text: "Current transcript cleared" });
       return;
     }
@@ -249,7 +381,7 @@ export function App({
         {
           role: "assistant",
           content: formatSessions(
-            runtimeContext.store.listSessions(),
+            runtimeContext.runtime.listSessions(),
             runtimeContext.session.id,
           ),
         },
@@ -258,7 +390,7 @@ export function App({
     }
     if (prompt === "/settings" || prompt.startsWith("/settings ")) {
       const reply = await handleSettingsCommand(
-        runtimeContext.store,
+        runtimeContext.runtime.settings,
         prompt.slice("/settings".length).trim(),
       );
       setMessages((current) => [
@@ -271,99 +403,37 @@ export function App({
   };
 
   const runTask = async (prompt: string): Promise<void> => {
-    const task = runtimeContext.store.createTask(
-      runtimeContext.session.id,
-      prompt,
-    );
-    activeTaskId.current = task.id;
-    runtimeContext.store.updateSession(runtimeContext.session.id, {
-      status: "running",
-    });
-    runtimeContext.store.updateTask(task.id, {
-      status: "running",
-      currentStage: "agent",
-    });
-    runtimeContext.store.appendEvent({
-      sessionId: runtimeContext.session.id,
-      taskId: task.id,
-      type: "task_started",
-      payload: { prompt, agentId: activeAgentId },
-    });
-    dispatch({
-      type: "task_started",
-      taskId: task.id,
-      sessionId: runtimeContext.session.id,
-      agentId: activeAgentId,
-      maxSteps: TUI_MAX_MODEL_STEPS,
-    });
-    const history = messages.filter((message) => message.role !== "system");
     try {
-      const contextString = runtimeContext.store.buildContext(task.id, 20000);
-      const result = await runtimeContext.runtime.run(
-        activeAgentId,
+      const handle = runtimeContext.runtime.startTask({
+        sessionId: runtimeContext.session.id,
+        agentId: activeAgentId,
         prompt,
-        contextString,
-        history,
-      );
-      const nextMessages = result.messages ?? [
-        ...history,
-        { role: "user" as const, content: prompt },
-        { role: "assistant" as const, content: result.text },
-      ];
-      setMessages(nextMessages);
-      runtimeContext.store.saveMessages(
-        runtimeContext.session.id,
-        nextMessages,
-      );
+      });
+      activeTask.current = handle;
+      dispatch({
+        type: "task_started",
+        taskId: handle.taskId,
+        sessionId: handle.sessionId,
+        agentId: activeAgentId,
+        maxSteps: TUI_MAX_MODEL_STEPS,
+      });
+      const result = await handle.completion;
+      setMessages(result.messages);
       if (result.status === "completed") {
-        runtimeContext.store.updateTask(task.id, {
-          status: "completed",
-          currentStage: "completed",
-          state: { ...task.state, result: result.text },
-        });
-        runtimeContext.store.appendEvent({
-          sessionId: runtimeContext.session.id,
-          taskId: task.id,
-          type: "task_completed",
-          payload: { text: result.text },
-        });
         dispatch({ type: "task_completed", text: result.text });
+      } else if (result.status === "paused") {
+        dispatch({
+          type: "task_completed",
+          text: `Task paused: ${result.text}`,
+        });
       } else {
-        runtimeContext.store.updateTask(task.id, {
-          status: "failed",
-          currentStage: "failed",
-          state: { ...task.state, errors: [result.text] },
-        });
-        runtimeContext.store.appendEvent({
-          sessionId: runtimeContext.session.id,
-          taskId: task.id,
-          type: "task_failed",
-          payload: { error: result.text },
-        });
         dispatch({ type: "task_failed", error: result.text });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      runtimeContext.store.updateTask(task.id, {
-        status: "failed",
-        currentStage: "failed",
-        state: { ...task.state, errors: [message] },
-      });
-      runtimeContext.store.updateSession(runtimeContext.session.id, {
-        status: "idle",
-      });
-      runtimeContext.store.appendEvent({
-        sessionId: runtimeContext.session.id,
-        taskId: task.id,
-        type: "task_failed",
-        payload: { error: message },
-      });
       dispatch({ type: "task_failed", error: message });
     } finally {
-      runtimeContext.store.updateSession(runtimeContext.session.id, {
-        status: "idle",
-      });
-      activeTaskId.current = undefined;
+      activeTask.current = undefined;
     }
   };
 
@@ -371,7 +441,7 @@ export function App({
     <Box flexDirection="column" width={width} minHeight={20}>
       <Header state={state} width={width} />
       <Box flexDirection="column" paddingX={1} flexGrow={1}>
-        {messages
+        {[...messages, ...isolatedMessages]
           .filter((message) => message.role !== "system")
           .slice(-8)
           .map((message, index) => (
@@ -487,6 +557,16 @@ function ActivityPanel({
         )}{" "}
         {state.lastProgress ?? "Waiting"}
       </Text>
+      {state.routeActivities.slice(-3).map((route, index) => (
+        <Text
+          key={`${route.providerId}-${route.modelId}-${route.attempt}-${index}`}
+          color={route.status === "failed" ? colors.red : colors.magenta}
+        >
+          {route.status === "failed" ? " FAILOVER " : " ROUTE "}
+          {route.providerId}/{route.modelId ?? "unknown"}
+          {route.reason ? ` - ${summarize(route.reason)}` : ""}
+        </Text>
+      ))}
       {state.handoffs.slice(-3).map((handoff, index) => (
         <Text
           key={`${handoff.parentAgentId}-${handoff.targetAgentId}-${index}`}
@@ -560,10 +640,32 @@ function ApprovalPanel({
         Tool: <Text color={colors.white}>{approval.call.name}</Text>
       </Text>
       <Text color={colors.gray}>{JSON.stringify(approval.call.arguments)}</Text>
-      {approval.preview ? (
+      {typeof approval.preview === "string" ? (
         <Text color={colors.gray}>{approval.preview}</Text>
+      ) : approval.preview ? (
+        <Box flexDirection="column">
+          <Text color={colors.gray}>{approval.preview.text}</Text>
+          {approval.preview.hunks.map((hunk, index) => {
+            const selected = approval.selectedHunkIds.includes(hunk.id);
+            const focused = index === approval.focusedHunk;
+            return (
+              <Text
+                key={hunk.id}
+                color={selected ? colors.green : colors.red}
+                bold={focused}
+              >
+                {focused ? ">" : " "} [{selected ? "accept" : "reject"}]{" "}
+                {hunk.id} {hunk.path}:{hunk.startLine}-{hunk.endLine}
+              </Text>
+            );
+          })}
+        </Box>
       ) : null}
-      <Text color={colors.yellow}>[y] allow once [n] deny [Ctrl+C] cancel</Text>
+      <Text color={colors.yellow}>
+        {typeof approval.preview === "object"
+          ? "[Up/Down] hunk [Space] toggle [y/Enter] apply selected [a] accept all [r] reject all"
+          : "[y] allow once [n] deny [Ctrl+C] cancel"}
+      </Text>
     </Box>
   );
 }
@@ -592,250 +694,109 @@ function Footer({ state }: { state: TuiState }): React.ReactElement {
 
 function createRuntimeContext(
   workspaceRoot: string,
-  approval: (call: ToolCall, preview?: string) => Promise<boolean>,
-  onEvent: (event: MultiAgentEvent) => void,
+  approval: (
+    call: ToolCall,
+    preview?: ToolPreview,
+  ) => Promise<ToolApprovalResponse>,
 ): RuntimeContext {
-  const provider = (process.env.MODEL_PROVIDER ?? "ollama").toLowerCase();
-  const modelName =
-    provider === "ollama"
-      ? (process.env.OLLAMA_MODEL ?? "")
-      : provider === "groq"
-        ? (process.env.GROQ_MODEL ??
-          process.env.OPENAI_COMPATIBLE_MODEL ??
-          "qwen/qwen3.6-27b")
-        : (process.env.OPENROUTER_MODEL ??
-          process.env.OPENAI_COMPATIBLE_MODEL ??
-          process.env.OPENAI_MODEL ??
-          "");
-  const store = new SessionStore({ projectRoot: workspaceRoot });
-  store.registerAgent({
-    id: DEFAULT_AGENT_ID,
-    name: "Architect",
-    description:
-      "Strictly-planning lead coordinator that turns requests into focused, atomic steps for the coding specialist.",
-    systemPrompt: `You are ARCHITECT, the lead planner for an agentic coding IDE.
-
-Persona
-- You are calm, precise, and operationally disciplined.
-- You act like a strong technical lead: clarify the objective internally, gather only the evidence needed to plan, and keep the user informed without noise.
-- You do not pretend to have performed work that was not verified by a tool or specialist.
-
-STRICTLY A PLANNER
-- You NEVER write code and NEVER modify files yourself.
-- You must NEVER call apply_patch, write_file, create_file, delete_file, run_command, compile_code, run_code, format_code, syntax_check, or any other mutating or execution tool. Those tools are not part of your toolset; if a task seems to require them, that is a signal to delegate, not to improvise around the restriction.
-- Your only allowed tools are list_directory, read_file, find_files, and browse_url, used strictly to gather evidence for planning.
-
-Primary responsibility
-1. Classify each request as conversation, investigation, research, or implementation work.
-2. Answer simple conversation directly. Never delegate greetings, acknowledgements, or questions that need no tools.
-3. For read-only questions, use list_directory, read_file, find_files, and browse_url only when evidence is needed.
-4. For anything requiring an edit, a shell command, a build, a test, a package change, a Git mutation, or any other implementation work, produce a plan and delegate it to coding-agent. Never attempt it yourself.
-5. Your output for implementation work must be a numbered, atomic list of steps, for example:
-   1. Step 1...
-   2. Step 2...
-   Followed by a call to handoff_agent(targetAgentId='coding-agent', task='<focused task>', context='<evidence/file paths>', reason='<why>').
-6. When a specialist returns, evaluate whether it answered the requested objective. If evidence is incomplete, request one focused follow-up instead of repeating the entire task.
-7. Summarize verified results, affected files, checks run, failures, and remaining decisions.
-
-Tool and safety policy
-- Respect your tool boundary. Do not emulate unavailable tools with shell snippets, invented Python, or prose instructions for the user to run commands.
-- Never bypass approval. Mutation and side-effect permissions belong exclusively to the coding specialist.
-- Avoid duplicate tool calls and stop when the objective is complete or blocked.
-
-Communication
-- Keep updates concise, factual, and action-oriented.
-- State assumptions only when they materially affect the result.
-- Do not reveal private chain-of-thought. Show safe progress: what is being investigated, planned, delegated, or blocked.
-- Do not ask the user to execute a tool that a specialist can execute.
-
-Project instructions may be supplied separately. Follow them whenever they apply.`,
-    capabilities: ["classification", "planning", "delegation"],
-    allowedTools: ["list_directory", "read_file", "find_files", "browse_url"],
-    delegatesTo: CODING_AGENT_ID,
-    maxSteps: 24,
-    enabled: true,
+  const model = modelSelectionFromEnvironment(process.env);
+  const runtime = createHeadlessRuntime({
+    workspaceRoot,
+    model,
+    credentialEnvironmentFallback: DEFAULT_CREDENTIAL_ENV_FALLBACK,
+    requestApproval: (request) => approval(request.call, request.preview),
   });
-  store.registerAgent({
-    id: CODING_AGENT_ID,
-    name: "Coder",
-    description:
-      "Surgical implementer that turns a focused plan from Architect into an exact patch, then hands off for verification.",
-    systemPrompt: `You are SURGICAL CODER, the implementation specialist for an agentic coding IDE.
-
-Persona
-- You are token-efficient and direct. No pleasantries, no broad explanations of what the code does.
-- You receive a focused plan and evidence from Architect (or a direct task from the user) and implement exactly what was asked, nothing more.
-
-Workflow
-1. Use analyze_code_structure {code, symbols} to slice large files down to only the relevant semantic blocks before reasoning about them, saving context tokens.
-2. Use compute_ast_diff {original, proposal} to get the structural DiffChunk(s) describing the exact change before writing it.
-3. Apply the change with apply_patch, write_file, create_file, or delete_file using exact oldContent/newContent taken from what you actually read or sliced. Never guess at file contents.
-4. Use run_command only when a command is required to implement or validate the change (installing a dependency, generating a file, etc.).
-5. Immediately after the mutation succeeds, call handoff_agent(targetAgentId='reviewer', task='Verify <what>', context='<diff/files changed>', reason='Implementation complete') so the change gets independently verified. Do not declare the task complete yourself.
-
-Constraints
-- Do not explain broadly or narrate obvious steps; report only what changed and why a decision was non-obvious.
-- Never stage or commit node_modules, dist, build, target, caches, logs, credentials, or other generated output.
-- Before a requested commit, inspect git_status and git_diff, verify .gitignore excludes generated dependency output, and stage only explicit source, configuration, documentation, and lockfile paths.
-- If a dependency install is required, explain why, request runtime approval for the command, and commit only manifest/lockfile changes; never commit the installed dependency directory.
-
-${loadProjectInstructions(store.project.rootPath).join("\n\n")}`,
-    capabilities: ["coding", "implementation", "delegation"],
-    allowedTools: [
-      "read_file",
-      "find_files",
-      "list_directory",
-      "apply_patch",
-      "write_file",
-      "create_file",
-      "delete_file",
-      "run_command",
-      "analyze_code_structure",
-      "compute_ast_diff",
-      "git_status",
-      "git_diff",
-      "git_log",
-      "git_branches",
-    ],
-    delegatesTo: REVIEWER_AGENT_ID,
-    maxSteps: 24,
-    enabled: true,
-  });
-  store.registerAgent({
-    id: REVIEWER_AGENT_ID,
-    name: "Reviewer",
-    description: "Dual-blind verification agent that verifies Coder work.",
-    systemPrompt: `You are DUAL-BLIND VERIFIER, the verification specialist for an agentic coding IDE.
-
-Sole job: verify Coder's work. You do not implement features and you do not mutate files except to fix a failure you have personally verified.
-
-Workflow
-1. Run syntax checks via compile_code or syntax_check (for example tsc --noEmit) on the affected files.
-2. Run the relevant test suite via run_command.
-3. Check git_diff to confirm the change matches what was reported and nothing unintended (node_modules, dist, build, credentials) is staged.
-4. If any check fails, call handoff_agent(targetAgentId='coding-agent', task='Fix the following failure', context='<full error trace and affected files>', reason='Verification failed') with the complete error trace so Coder can fix it without re-discovering the failure.
-5. If every check passes, return a final success summary listing the verified files, the diff, and each check that passed.
-
-Constraints
-- Never mutate files directly unless you are fixing a failure you just verified yourself, and even then keep the fix minimal and re-verify it.
-- Be precise about what was checked; do not claim a check passed unless a tool actually ran it.`,
-    capabilities: ["verification", "review"],
-    allowedTools: [
-      "read_file",
-      "find_files",
-      "list_directory",
-      "run_command",
-      "compile_code",
-      "git_diff",
-      "syntax_check",
-    ],
-    delegatesTo: CODING_AGENT_ID,
-    maxSteps: 24,
-    enabled: true,
-  });
-  for (const agent of loadProjectAgents(store.project.rootPath))
-    if (!RESERVED_AGENT_IDS.has(agent.id)) store.registerAgent(agent);
-  const model = createModel(provider, modelName, store);
-  const runtime = new MultiAgentOrchestrator(
-    store,
-    () => model,
-    () => {
-      const registry = new ToolRegistry();
-      for (const tool of createIdeTools()) registry.register(tool);
-      registry.register(analyzeCodeStructureTool);
-      registry.register(computeAstDiffTool);
-      return registry;
-    },
-    {
-      cwd: store.project.rootPath,
-      requestApproval: approval,
-      maxDepth: 4,
-      maxHandoffs: 8,
-      maxHandoffsPerPair: 2,
-      maxModelSteps: TUI_MAX_MODEL_STEPS,
-      maxDurationMs: 10 * 60_000,
-      onEvent,
-    },
-  );
   return {
-    store,
     runtime,
-    model: modelName,
-    provider,
-    // Resume is explicit: stale sessions must not silently become model context.
-    session: store.createSession(),
+    model: model.modelId,
+    provider: model.providerId,
+    session: runtime.createSession(),
   };
 }
 
-function createModel(
-  provider: string,
-  modelName: string,
-  store: SessionStore,
-): LanguageModel {
-  // Settings saved through /settings or the GUI always win; a matching
-  // OLLAMA_ENDPOINT/OPENROUTER_API_KEY/etc. in .env is only used the first
-  // time, before anything has been saved to the settings store.
-  const credentials = new StoredCredentialResolver(
-    store,
-    DEFAULT_CREDENTIAL_ENV_FALLBACK,
-  );
-  const gateway = createDefaultProviderGateway({ credentials });
-  const storedBaseUrl = (fallback: string): string | undefined =>
-    store.getProviderSetting(provider, "baseUrl") ?? fallback;
-  if (provider === "ollama") {
-    gateway.configure({
-      providerId: "ollama",
-      baseUrl: storedBaseUrl(
-        process.env.OLLAMA_ENDPOINT ?? "http://localhost:11434",
-      ),
-    });
-  } else if (provider === "openrouter") {
-    gateway.configure({
-      providerId: "openrouter",
-      credentialRef: "openrouter",
-    });
-  } else if (provider === "groq") {
-    gateway.configure({
-      providerId: "groq",
-      credentialRef: "groq",
-    });
-  } else if (provider === "openai-compatible") {
-    gateway.configure({
-      providerId: "openai-compatible",
-      baseUrl: storedBaseUrl(process.env.OPENAI_COMPATIBLE_BASE_URL ?? ""),
-      credentialRef: "openai-compatible",
-      manualModelId:
-        store.getProviderSetting("openai-compatible", "manualModelId") ??
-        modelName,
-    });
-  } else {
+function modelSelectionFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+): RuntimeModelSelection {
+  const providerId = (environment.MODEL_PROVIDER ?? "ollama").toLowerCase();
+  if (
+    providerId !== "ollama" &&
+    providerId !== "groq" &&
+    providerId !== "openrouter" &&
+    providerId !== "openai-compatible"
+  ) {
     throw new Error(
-      `Unsupported MODEL_PROVIDER: ${provider}. Use ollama, groq, openrouter, or openai-compatible.`,
+      "Unsupported MODEL_PROVIDER: " +
+        providerId +
+        ". Use ollama, groq, openrouter, or openai-compatible.",
     );
   }
-  if (!modelName)
-    throw new Error(`Set a model for ${provider} before starting the TUI.`);
-  gateway.registerModel({
-    id: modelName,
-    name: modelName,
-    providerId: provider,
-    capabilities: {
-      tools: true,
-      vision: false,
-      reasoning: false,
-      streaming: true,
-      structuredOutput: true,
-    },
-    metadata: {},
-  });
-  gateway.select(provider, modelName);
-  return gateway;
+
+  const modelId =
+    providerId === "ollama"
+      ? (environment.OLLAMA_MODEL ?? "")
+      : providerId === "groq"
+        ? (environment.GROQ_MODEL ??
+          environment.OPENAI_COMPATIBLE_MODEL ??
+          "qwen/qwen3.6-27b")
+        : (environment.OPENROUTER_MODEL ??
+          environment.OPENAI_COMPATIBLE_MODEL ??
+          environment.OPENAI_MODEL ??
+          "");
+  const baseUrl =
+    providerId === "ollama"
+      ? (environment.OLLAMA_ENDPOINT ?? "http://localhost:11434")
+      : providerId === "openai-compatible"
+        ? environment.OPENAI_COMPATIBLE_BASE_URL
+        : undefined;
+
+  const fallbacks: RuntimeModelRouteSelection[] = [];
+  if (environment.OLLAMA_MODEL) {
+    fallbacks.push({
+      providerId: "ollama",
+      modelId: environment.OLLAMA_MODEL,
+      baseUrl: environment.OLLAMA_ENDPOINT ?? "http://localhost:11434",
+      credentialRef: null,
+    });
+  }
+  if (environment.GROQ_MODEL) {
+    fallbacks.push({
+      providerId: "groq",
+      modelId: environment.GROQ_MODEL,
+      credentialRef: "groq",
+    });
+  }
+  if (environment.OPENROUTER_MODEL) {
+    fallbacks.push({
+      providerId: "openrouter",
+      modelId: environment.OPENROUTER_MODEL,
+      credentialRef: "openrouter",
+    });
+  }
+  if (
+    environment.OPENAI_COMPATIBLE_MODEL &&
+    environment.OPENAI_COMPATIBLE_BASE_URL
+  ) {
+    fallbacks.push({
+      providerId: "openai-compatible",
+      modelId: environment.OPENAI_COMPATIBLE_MODEL,
+      baseUrl: environment.OPENAI_COMPATIBLE_BASE_URL,
+      credentialRef: "openai-compatible",
+    });
+  }
+
+  return {
+    providerId,
+    modelId,
+    baseUrl,
+    credentialRef: providerId === "ollama" ? null : providerId,
+    fallbacks,
+  };
 }
 
-function getInitialAgent(store: SessionStore): string {
-  return store.getAgent(DEFAULT_AGENT_ID)?.enabled
+function getInitialAgent(runtime: HeadlessRuntimeService): string {
+  return runtime.getAgent(DEFAULT_AGENT_ID)?.enabled
     ? DEFAULT_AGENT_ID
-    : (store.listAgents().find((agent) => agent.enabled)?.id ??
+    : (runtime.listAgents().find((agent) => agent.enabled)?.id ??
         DEFAULT_AGENT_ID);
 }
 
@@ -860,11 +821,18 @@ function formatSessions(sessions: SessionRecord[], active: string): string {
 }
 
 function helpText(): string {
-  return "/help  /new  /clear  /sessions  /agents  /agent [id]  /settings  /details  /thinking  /exit\nTab switches agents. Ctrl+C cancels the active task or exits.";
+  return [
+    "/help  /new  /clear  /sessions  /agents  /agent [id]  /settings  /exit",
+    "/context [list]",
+    "/context add <file>[:line|start-end]",
+    "/context remove <file>[:line|start-end]",
+    "/bytheway <isolated question>",
+    "Ctrl+C cancels the active operation or exits.",
+  ].join("\n");
 }
 
 async function handleSettingsCommand(
-  store: SessionStore,
+  store: RuntimeSettingsStore,
   rest: string,
 ): Promise<string> {
   if (!rest) return formatProviderSettings(store);
@@ -915,7 +883,7 @@ async function handleSettingsCommand(
         `Use key=/baseUrl=/model=, "validate", or "clear".`;
 }
 
-function formatProviderSettings(store: SessionStore): string {
+function formatProviderSettings(store: RuntimeSettingsStore): string {
   const lines = PROVIDER_FIELD_SPECS.map((spec) => {
     const hasCredential = Boolean(store.getCredential(spec.id));
     const configured = spec.credentialRequired
@@ -929,7 +897,10 @@ function formatProviderSettings(store: SessionStore): string {
   ].join("\n");
 }
 
-function formatProviderDetail(store: SessionStore, providerId: string): string {
+function formatProviderDetail(
+  store: RuntimeSettingsStore,
+  providerId: string,
+): string {
   const spec = PROVIDER_FIELD_SPECS.find((entry) => entry.id === providerId);
   if (!spec) return `Unknown provider: ${providerId}`;
   const credential = store.getCredential(spec.id);
