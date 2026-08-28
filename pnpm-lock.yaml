@@ -102,6 +102,39 @@ importers:
         specifier: ^5.0.0
         version: 5.23.2(ws@8.21.3)
 
+  packages/retrieval:
+    dependencies:
+      "@agentic-runtime/search":
+        specifier: workspace:*
+        version: link:../search
+      "@agentic-runtime/workspace":
+        specifier: workspace:*
+        version: link:../workspace
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/runtime:
+    dependencies:
+      "@agentic-runtime/core":
+        specifier: workspace:*
+        version: link:../core
+      "@agentic-runtime/gateway":
+        specifier: workspace:*
+        version: link:../gateway
+      "@agentic-runtime/retrieval":
+        specifier: workspace:*
+        version: link:../retrieval
+      "@agentic-runtime/session":
+        specifier: workspace:*
+        version: link:../session
+      "@agentic-runtime/tools":
+        specifier: workspace:*
+        version: link:../tools
+      "@agentic-runtime/workspace":
+        specifier: workspace:*
+        version: link:../workspace
+
   packages/search:
     dependencies:
       "@vscode/ripgrep":

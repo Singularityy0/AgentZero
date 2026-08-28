@@ -1,0 +1,26 @@
+{
+  "name": "@agentic-runtime/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agentic-runtime/core": "workspace:*",
+    "@agentic-runtime/gateway": "workspace:*",
+    "@agentic-runtime/retrieval": "workspace:*",
+    "@agentic-runtime/session": "workspace:*",
+    "@agentic-runtime/tools": "workspace:*",
+    "@agentic-runtime/workspace": "workspace:*"
+  }
+}
