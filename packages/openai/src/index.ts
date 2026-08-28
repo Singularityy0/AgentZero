@@ -1,11 +1,14 @@
 import OpenAI from "openai";
-import type {
-  AssistantMessage,
-  ConversationMessage,
-  LanguageModel,
-  ModelRequest,
-  ModelResponse,
-  ToolCall,
+import {
+  ModelError,
+  toModelError,
+  type AssistantMessage,
+  type ConversationMessage,
+  type LanguageModel,
+  type ModelRequest,
+  type ModelResponse,
+  type ModelUsage,
+  type ToolCall,
 } from "@agentic-runtime/core";
 import type {
   FunctionTool,
@@ -27,35 +30,67 @@ export class OpenAIModel implements LanguageModel {
 
   constructor(options: OpenAIResponseOptions) {
     if (!options.apiKey.trim()) {
-      throw new Error("An OpenAI API key is required.");
+      throw new ModelError("An OpenAI API key is required.", {
+        code: "authentication",
+        retryable: false,
+      });
     }
 
     this.client = new OpenAI({
       apiKey: options.apiKey,
       baseURL: options.baseURL,
+      maxRetries: 0,
     });
     this.model = options.model ?? DEFAULT_OPENAI_MODEL;
   }
 
   async respond(request: ModelRequest): Promise<ModelResponse> {
-    const response = await this.client.responses.create({
-      model: this.model,
-      input: toResponseInput(request.messages),
-      tools: request.tools.map(toFunctionTool),
-    });
-    const toolCalls = response.output
-      .filter(
-        (item): item is OpenAI.Responses.ResponseFunctionToolCall =>
-          item.type === "function_call",
-      )
-      .map(toToolCall);
-    const message: AssistantMessage = {
-      role: "assistant",
-      content: response.output_text,
-      toolCalls,
-    };
+    const startedAt = Date.now();
+    try {
+      const response = await this.client.responses.create(
+        {
+          model: this.model,
+          input: toResponseInput(request.messages),
+          tools: request.tools.map(toFunctionTool),
+        },
+        { signal: request.signal },
+      );
+      const toolCalls = response.output
+        .filter(
+          (item): item is OpenAI.Responses.ResponseFunctionToolCall =>
+            item.type === "function_call",
+        )
+        .map(toToolCall);
+      const message: AssistantMessage = {
+        role: "assistant",
+        content: response.output_text,
+        toolCalls,
+      };
+      const usage = normalizeResponsesUsage(response.usage);
+      const finishReason =
+        response.incomplete_details?.reason ?? response.status;
 
-    return { message, text: response.output_text, toolCalls };
+      return {
+        message,
+        text: response.output_text,
+        toolCalls,
+        ...(usage ? { usage } : {}),
+        timing: { durationMs: Date.now() - startedAt },
+        model: response.model,
+        responseId: response.id,
+        createdAt: new Date(response.created_at * 1_000).toISOString(),
+        ...(finishReason ? { finishReason } : {}),
+      };
+    } catch (error) {
+      if (request.signal?.aborted) {
+        throw new ModelError("OpenAI request was cancelled.", {
+          code: "cancelled",
+          retryable: false,
+          cause: error,
+        });
+      }
+      throw toModelError(error, "OpenAI request failed.");
+    }
   }
 }
 
@@ -68,48 +103,108 @@ export class OpenAICompatibleChatModel implements LanguageModel {
       Pick<OpenAIResponseOptions, "apiKey" | "model">
     > & { baseURL: string },
   ) {
+    if (!options.apiKey.trim()) {
+      throw new ModelError("An API key is required.", {
+        code: "authentication",
+        retryable: false,
+      });
+    }
     this.client = new OpenAI({
       apiKey: options.apiKey,
       baseURL: options.baseURL,
+      maxRetries: 0,
     });
   }
 
   async respond(request: ModelRequest): Promise<ModelResponse> {
-    const response = await this.client.chat.completions.create({
-      model: this.options.model,
-      messages: request.messages.map(toChatMessage),
-      tools: request.tools.map((tool) => ({
-        type: "function" as const,
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters,
+    const startedAt = Date.now();
+    try {
+      const response = await this.client.chat.completions.create(
+        {
+          model: this.options.model,
+          messages: request.messages.map(toChatMessage),
+          tools: request.tools.map((tool) => ({
+            type: "function" as const,
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.parameters,
+            },
+          })),
         },
-      })),
-    });
-    const message = response.choices[0]?.message;
-    if (!message) throw new Error("Provider returned no completion choices.");
-    const toolCalls = (message.tool_calls ?? []).flatMap((call) => {
-      if (call.type !== "function") return [];
-      try {
-        const arguments_ = JSON.parse(call.function.arguments) as Record<
-          string,
-          unknown
-        >;
-        return [
-          { id: call.id, name: call.function.name, arguments: arguments_ },
-        ];
-      } catch {
-        throw new Error(`Invalid arguments for tool "${call.function.name}".`);
+        { signal: request.signal },
+      );
+      const choice = response.choices[0];
+      const message = choice?.message;
+      if (!message) throw new Error("Provider returned no completion choices.");
+      const toolCalls = (message.tool_calls ?? []).flatMap((call) => {
+        if (call.type !== "function") return [];
+        try {
+          const arguments_ = JSON.parse(call.function.arguments) as Record<
+            string,
+            unknown
+          >;
+          return [
+            { id: call.id, name: call.function.name, arguments: arguments_ },
+          ];
+        } catch {
+          throw new Error(
+            `Invalid arguments for tool "${call.function.name}".`,
+          );
+        }
+      });
+      const content = message.content ?? "";
+      const usage = normalizeChatUsage(response.usage);
+      return {
+        message: { role: "assistant", content, toolCalls },
+        text: content,
+        toolCalls,
+        ...(usage ? { usage } : {}),
+        timing: { durationMs: Date.now() - startedAt },
+        model: response.model,
+        responseId: response.id,
+        createdAt: new Date(response.created * 1_000).toISOString(),
+        finishReason: choice.finish_reason,
+      };
+    } catch (error) {
+      if (request.signal?.aborted) {
+        throw new ModelError("OpenAI-compatible request was cancelled.", {
+          code: "cancelled",
+          retryable: false,
+          cause: error,
+        });
       }
-    });
-    const content = message.content ?? "";
-    return {
-      message: { role: "assistant", content, toolCalls },
-      text: content,
-      toolCalls,
-    };
+      throw toModelError(error, "OpenAI-compatible request failed.");
+    }
   }
+}
+
+function normalizeResponsesUsage(
+  usage: OpenAI.Responses.Response["usage"],
+): ModelUsage | undefined {
+  if (!usage) return undefined;
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    totalTokens: usage.total_tokens,
+    cachedInputTokens: usage.input_tokens_details.cached_tokens,
+    reasoningTokens: usage.output_tokens_details.reasoning_tokens,
+  };
+}
+
+function normalizeChatUsage(
+  usage: OpenAI.Chat.Completions.ChatCompletion["usage"],
+): ModelUsage | undefined {
+  if (!usage) return undefined;
+  const cachedInputTokens = usage.prompt_tokens_details?.cached_tokens;
+  const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens;
+  return {
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    totalTokens: usage.total_tokens,
+    ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
+  };
 }
 
 export async function generateOpenAIResponse(

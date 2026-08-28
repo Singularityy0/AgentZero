@@ -1,22 +1,57 @@
+import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 
-import type { ConversationMessage, ToolCall, ToolMessage } from "./messages.js";
+import type {
+  CompactedTaskState,
+  ContextCompactionCheckpoint,
+  ConversationMessage,
+  SystemMessage,
+  ToolCall,
+  ToolMessage,
+} from "./messages.js";
 import type { AgentEvent } from "./events.js";
-import type { LanguageModel } from "./model.js";
+import {
+  classifyModelError,
+  estimateModelRequestTokens,
+  type LanguageModel,
+  type ModelRequest,
+  type ModelResponse,
+} from "./model.js";
 import { ToolRegistry } from "./tool-registry.js";
 import type {
+  ApprovalDecision,
+  FileDiffPreview,
+  ToolApprovalResponse,
   ToolExecutionContext,
+  ToolPreview,
   ToolPreviewContext,
   ToolResult,
 } from "./tools.js";
 import { rustClient } from "./rust-tools.js";
 
+export interface ContextCompactionOptions {
+  triggerRatio?: number;
+  targetRatio?: number;
+  recoveryTargetRatio?: number;
+  maxPasses?: number;
+  maxRecoveryAttempts?: number;
+  minimumRecentExchanges?: number;
+  fallbackContextWindowTokens?: number;
+  reservedOutputTokens?: number;
+}
+
 export interface AgentRunnerOptions {
   cwd: string;
   maxSteps?: number;
-  requestApproval: (call: ToolCall, preview?: string) => Promise<boolean>;
+  maxToolCalls?: number;
+  requestApproval: (
+    call: ToolCall,
+    preview?: ToolPreview,
+  ) => Promise<ToolApprovalResponse>;
   signal?: AbortSignal;
   beforeModelRequest?: () => void;
+  enforceWorkflowCompletion?: boolean;
+  compaction?: false | ContextCompactionOptions;
   onEvent?: (event: AgentEvent) => void | Promise<void>;
 }
 
@@ -27,6 +62,8 @@ export interface AgentRunResult {
 
 export class AgentRunner {
   private readonly maxSteps: number;
+  private readonly maxToolCalls: number;
+  private currentModelCallId?: string;
 
   constructor(
     private readonly model: LanguageModel,
@@ -34,6 +71,10 @@ export class AgentRunner {
     private readonly options: AgentRunnerOptions,
   ) {
     this.maxSteps = options.maxSteps ?? 12;
+    this.maxToolCalls = options.maxToolCalls ?? 128;
+    if (this.maxToolCalls < 1) {
+      throw new Error("maxToolCalls must be at least 1.");
+    }
   }
 
   async run(messages: ConversationMessage[]): Promise<AgentRunResult> {
@@ -41,30 +82,20 @@ export class AgentRunner {
     const executedToolNames: string[] = [];
     let workspaceRevision = 0;
     let duplicateCallCount = 0;
+    let toolCallCount = 0;
     let hadNoOpMutation = false;
     let lastResponseText = "";
-    const workflow = createWorkflowState(messages);
+    const workflow =
+      this.options.enforceWorkflowCompletion === false
+        ? { followUp: () => undefined }
+        : createWorkflowState(messages);
 
     for (let step = 0; step < this.maxSteps; step += 1) {
-      await this.compactContextIfNecessary(messages);
+      await this.compactContextIfNecessary(messages, "token_threshold");
 
-      this.options.beforeModelRequest?.();
-      await this.emit({
-        type: "model_request",
-        messageCount: messages.length,
-        toolCount: this.tools.list().length,
-      });
-      const response = await this.model.respond({
-        messages,
-        tools: this.tools.list(),
-      });
+      const response = await this.requestModelWithContextRecovery(messages);
       messages.push(response.message);
       lastResponseText = response.text;
-      await this.emit({
-        type: "model_response",
-        text: response.text,
-        toolCallCount: response.toolCalls.length,
-      });
 
       if (response.toolCalls.length === 0) {
         const followUp = workflow.followUp(executedToolNames, hadNoOpMutation);
@@ -77,8 +108,22 @@ export class AgentRunner {
       }
 
       for (const call of response.toolCalls) {
-        executedToolNames.push(call.name);
-        await this.emit({ type: "tool_requested", call });
+        toolCallCount += 1;
+        if (toolCallCount > this.maxToolCalls) {
+          const text = `The run was stopped after reaching the ${this.maxToolCalls}-tool-call safety limit.`;
+          await this.emit({ type: "agent_safety_limit", text });
+          return { text, messages };
+        }
+        if (this.options.signal?.aborted) {
+          throw new Error("Agent run cancelled.");
+        }
+        const toolSpanId = randomUUID();
+        await this.emit({
+          type: "tool_requested",
+          spanId: toolSpanId,
+          parentSpanId: this.currentModelCallId,
+          call,
+        });
         const signature = JSON.stringify([call.name, call.arguments]);
         const cached = cachedToolResults.get(signature);
         if (cached?.workspaceRevision === workspaceRevision) {
@@ -88,7 +133,13 @@ export class AgentRunner {
               `Duplicate ${call.name} call skipped because the workspace has not changed. ` +
               "Use the earlier tool result already present in the conversation and continue the task without calling it again.",
           };
-          await this.emit({ type: "tool_completed", call, result });
+          await this.emit({
+            type: "tool_completed",
+            spanId: toolSpanId,
+            parentSpanId: this.currentModelCallId,
+            call,
+            result,
+          });
           messages.push(this.toToolMessage(call, result));
           if (duplicateCallCount >= 4) {
             const text =
@@ -101,6 +152,7 @@ export class AgentRunner {
         }
 
         const result = await this.executeTool(call);
+        if (!result.isError) executedToolNames.push(call.name);
         if (
           result.changed === false &&
           ["apply_patch", "write_file", "create_file", "delete_file"].includes(
@@ -111,7 +163,13 @@ export class AgentRunner {
         }
         if (result.changed === true) workspaceRevision += 1;
         cachedToolResults.set(signature, { result, workspaceRevision });
-        await this.emit({ type: "tool_completed", call, result });
+        await this.emit({
+          type: "tool_completed",
+          spanId: toolSpanId,
+          parentSpanId: this.currentModelCallId,
+          call,
+          result,
+        });
         messages.push(this.toToolMessage(call, result));
       }
     }
@@ -123,15 +181,189 @@ export class AgentRunner {
     return { text, messages };
   }
 
+  private async requestModelWithContextRecovery(
+    messages: ConversationMessage[],
+  ): Promise<ModelResponse> {
+    const options = this.compactionOptions();
+    for (let attempt = 0; ; attempt += 1) {
+      const request = this.createModelRequest(messages);
+      const callId = randomUUID();
+      const startedAt = Date.now();
+      this.options.beforeModelRequest?.();
+      await this.emit({
+        type: "model_request",
+        callId,
+        messageCount: messages.length,
+        toolCount: request.tools.length,
+        request: { messages: request.messages, tools: request.tools },
+      });
+      try {
+        const response = await this.model.respond(request);
+        this.currentModelCallId = callId;
+        await this.emit({
+          type: "model_response",
+          callId,
+          text: response.text,
+          toolCallCount: response.toolCalls.length,
+          response,
+          durationMs: Date.now() - startedAt,
+        });
+        return response;
+      } catch (error) {
+        if (
+          classifyModelError(error).code !== "context_length" ||
+          attempt >= options.maxRecoveryAttempts
+        ) {
+          throw error;
+        }
+        const estimate = this.estimateRequest(request);
+        const targetTokens = Math.floor(
+          (estimate.contextWindowTokens - estimate.reservedOutputTokens) *
+            options.recoveryTargetRatio,
+        );
+        await this.emit({
+          type: "context_limit_recovery",
+          attempt: attempt + 1,
+          estimatedTokens: estimate.inputTokens,
+          targetTokens,
+        });
+        const compacted = await this.compactContextIfNecessary(
+          messages,
+          "context_limit",
+        );
+        if (!compacted) throw error;
+      }
+    }
+  }
+
   private async compactContextIfNecessary(
     messages: ConversationMessage[],
+    reason: ContextCompactionCheckpoint["reason"],
+  ): Promise<boolean> {
+    if (this.options.compaction === false) return false;
+    const options = this.compactionOptions();
+    const initialRequest = this.createModelRequest(messages);
+    const initialEstimate = this.estimateRequest(initialRequest);
+    const usableTokens =
+      initialEstimate.contextWindowTokens -
+      initialEstimate.reservedOutputTokens;
+    const triggerTokens = Math.floor(usableTokens * options.triggerRatio);
+    const targetTokens = Math.floor(
+      usableTokens *
+        (reason === "context_limit"
+          ? options.recoveryTargetRatio
+          : options.targetRatio),
+    );
+    if (
+      reason === "token_threshold" &&
+      initialEstimate.inputTokens < triggerTokens
+    ) {
+      return false;
+    }
+
+    await this.pruneReadFileResults(messages);
+    const tokensAfterPruning = this.estimateRequest(
+      this.createModelRequest(messages),
+    ).inputTokens;
+    let changed = tokensAfterPruning < initialEstimate.inputTokens;
+    let previousTokens = tokensAfterPruning;
+    for (let pass = 1; pass <= options.maxPasses; pass += 1) {
+      const currentTokens = this.estimateRequest(
+        this.createModelRequest(messages),
+      ).inputTokens;
+      if (currentTokens <= targetTokens && changed) return true;
+      const checkpoint = this.compactOldestExchanges(
+        messages,
+        reason,
+        pass,
+        currentTokens,
+        options.minimumRecentExchanges,
+      );
+      if (!checkpoint) break;
+      if (checkpoint.estimatedTokensAfter >= previousTokens) break;
+      changed = true;
+      previousTokens = checkpoint.estimatedTokensAfter;
+      await this.emit({
+        type: "context_compacted",
+        summary: JSON.stringify(checkpoint.state),
+        checkpoint,
+      });
+      if (checkpoint.estimatedTokensAfter <= targetTokens) break;
+    }
+    return changed;
+  }
+
+  private compactOldestExchanges(
+    messages: ConversationMessage[],
+    reason: ContextCompactionCheckpoint["reason"],
+    pass: number,
+    estimatedTokensBefore: number,
+    minimumRecentExchanges: number,
+  ): ContextCompactionCheckpoint | undefined {
+    const instructions = messages.filter(
+      (message): message is SystemMessage =>
+        message.role === "system" && message.kind !== "compaction",
+    );
+    const existing = messages.find(
+      (message): message is SystemMessage =>
+        message.role === "system" && message.kind === "compaction",
+    );
+    const conversation = messages.filter(
+      (message) => message.role !== "system",
+    );
+    const exchanges = groupConversationExchanges(conversation);
+    const lastUserIndex = lastUserExchangeIndex(exchanges);
+    const recentStart = Math.max(0, exchanges.length - minimumRecentExchanges);
+    const compactable = exchanges.filter(
+      (_exchange, index) => index !== lastUserIndex && index < recentStart,
+    );
+    if (compactable.length === 0) return undefined;
+    const selectedExchangeCount = Math.max(
+      1,
+      Math.ceil(compactable.length / 2),
+    );
+    const selected = compactable.slice(0, selectedExchangeCount).flat();
+    const selectedSet = new Set(selected);
+    const keptConversation = conversation.filter(
+      (message) => !selectedSet.has(message),
+    );
+    const state = buildCompactedTaskState(
+      parseCompactedTaskState(existing?.content),
+      instructions,
+      selected,
+      conversation,
+    );
+    const summaryMessage: SystemMessage = {
+      role: "system",
+      kind: "compaction",
+      content: `[Structured compact task state]\n${JSON.stringify(state)}`,
+    };
+    const nextMessages: ConversationMessage[] = [
+      ...instructions,
+      summaryMessage,
+      ...keptConversation,
+    ];
+    const estimatedTokensAfter = this.estimateRequest(
+      this.createModelRequest(nextMessages),
+    ).inputTokens;
+    if (estimatedTokensAfter >= estimatedTokensBefore) return undefined;
+    messages.length = 0;
+    messages.push(...nextMessages);
+    return {
+      version: 1,
+      reason,
+      pass,
+      estimatedTokensBefore,
+      estimatedTokensAfter,
+      compactedMessageCount: selected.length,
+      state,
+      createdAt: Date.now(),
+    };
+  }
+
+  private async pruneReadFileResults(
+    messages: ConversationMessage[],
   ): Promise<void> {
-    const threshold = 20_000;
-    const totalLength = () =>
-      messages.reduce((sum, message) => sum + message.content.length, 0);
-
-    if (totalLength() <= threshold) return;
-
     for (let index = 0; index < messages.length; index += 1) {
       const message = messages[index];
       if (
@@ -141,10 +373,8 @@ export class AgentRunner {
       ) {
         continue;
       }
-
       const file = parseReadFilePayload(message.content);
       if (!file) continue;
-
       const extension = extname(file.path).slice(1).toLowerCase() || "ts";
       try {
         rustClient.start();
@@ -157,50 +387,48 @@ export class AgentRunner {
           }),
         };
       } catch {
-        // The model-backed compaction below remains available without Rust.
+        // Structured exchange compaction remains available without Rust.
       }
     }
+  }
 
-    if (totalLength() <= threshold) return;
+  private createModelRequest(
+    messages: readonly ConversationMessage[],
+  ): ModelRequest {
+    return {
+      messages,
+      tools: this.tools.list(),
+      signal: this.options.signal,
+    };
+  }
 
-    const systemPrompts = messages.filter(
-      (message) => message.role === "system",
-    );
-    const conversation = messages.filter(
-      (message) => message.role !== "system",
-    );
+  private estimateRequest(request: ModelRequest): RequiredModelContextEstimate {
+    const options = this.compactionOptions();
+    const modelEstimate = this.model.estimateContext?.(request);
+    return {
+      inputTokens:
+        modelEstimate?.inputTokens ?? estimateModelRequestTokens(request),
+      contextWindowTokens:
+        modelEstimate?.contextWindowTokens ??
+        options.fallbackContextWindowTokens,
+      reservedOutputTokens:
+        modelEstimate?.reservedOutputTokens ?? options.reservedOutputTokens,
+    };
+  }
 
-    if (conversation.length <= 4) return;
-
-    const splitIndex = Math.floor(conversation.length / 2);
-    const toSummarize = conversation.slice(0, splitIndex);
-    const toKeep = conversation.slice(splitIndex);
-    const summaryRequest: ConversationMessage[] = [
-      {
-        role: "system",
-        content:
-          "Summarize the technical analysis, decisions, completed work, failures, and remaining work in these messages so another model can continue. Preserve concrete file paths, constraints, and verification results. Be concise.",
-      },
-      ...toSummarize,
-    ];
-
-    try {
-      this.options.beforeModelRequest?.();
-      const response = await this.model.respond({
-        messages: summaryRequest,
-        tools: [],
-      });
-      const summaryMessage: ConversationMessage = {
-        role: "system",
-        content: `[Session summary of earlier context]\n${response.text}`,
-      };
-
-      await this.emit({ type: "context_compacted", summary: response.text });
-      messages.length = 0;
-      messages.push(...systemPrompts, summaryMessage, ...toKeep);
-    } catch {
-      // Keep the original context when compaction cannot complete safely.
-    }
+  private compactionOptions(): Required<ContextCompactionOptions> {
+    const configured = this.options.compaction || {};
+    return {
+      triggerRatio: configured.triggerRatio ?? 0.75,
+      targetRatio: configured.targetRatio ?? 0.6,
+      recoveryTargetRatio: configured.recoveryTargetRatio ?? 0.45,
+      maxPasses: configured.maxPasses ?? 4,
+      maxRecoveryAttempts: configured.maxRecoveryAttempts ?? 2,
+      minimumRecentExchanges: configured.minimumRecentExchanges ?? 2,
+      fallbackContextWindowTokens:
+        configured.fallbackContextWindowTokens ?? 8192,
+      reservedOutputTokens: configured.reservedOutputTokens ?? 1024,
+    };
   }
 
   private async emit(event: AgentEvent): Promise<void> {
@@ -225,9 +453,10 @@ export class AgentRunner {
       };
     }
 
+    let approval: ToolExecutionContext["approval"];
     if (tool.approval !== "auto") {
       const previewContext: ToolPreviewContext = { cwd: this.options.cwd };
-      let preview: string | undefined;
+      let preview: ToolPreview | undefined;
       try {
         preview = tool.preview
           ? await tool.preview(call.arguments, previewContext)
@@ -239,10 +468,36 @@ export class AgentRunner {
         };
       }
 
-      const approved = await this.options.requestApproval(call, preview);
-      if (!approved) {
+      const response = await this.options.requestApproval(call, preview);
+      if (response === false) {
         return { output: "Tool execution denied by the user.", isError: true };
       }
+      let decision: ApprovalDecision;
+      try {
+        decision = normalizeApprovalDecision(response, preview);
+      } catch (error) {
+        return {
+          output: `Invalid approval decision: ${error instanceof Error ? error.message : String(error)}`,
+          isError: true,
+        };
+      }
+      if (
+        preview &&
+        typeof preview !== "string" &&
+        preview.hunks.length > 0 &&
+        decision.acceptedHunkIds.length === 0
+      ) {
+        return {
+          output: formatRejectedHunks(preview.hunks),
+          isError: true,
+          changed: false,
+          review: {
+            acceptedHunkIds: [],
+            rejectedHunks: preview.hunks,
+          },
+        };
+      }
+      approval = preview ? { preview, decision } : undefined;
     } else {
       await this.emit({ type: "tool_auto_approved", call });
     }
@@ -251,6 +506,7 @@ export class AgentRunner {
       cwd: this.options.cwd,
       signal: this.options.signal ?? new AbortController().signal,
       requestApproval: async () => true,
+      approval,
     };
 
     try {
@@ -273,12 +529,22 @@ export class AgentRunner {
       result.truncated ? "output truncated" : undefined,
     ].filter(Boolean);
     const suffix = metadata.length > 0 ? `\n[${metadata.join(", ")}]` : "";
+    const review = result.review
+      ? `\n\n[Human review]\nAccepted hunks: ${result.review.acceptedHunkIds.join(", ") || "none"}\n${formatRejectedHunks(result.review.rejectedHunks)}`
+      : "";
 
     return {
       role: "tool",
       toolCallId: call.id,
       toolName: call.name,
-      content: `${result.output}${suffix}`,
+      content: `${result.output}${suffix}${review}`,
+      metadata:
+        result.changedFiles || result.contextArtifacts
+          ? {
+              changedFiles: result.changedFiles,
+              contextArtifacts: result.contextArtifacts,
+            }
+          : undefined,
     };
   }
 }
@@ -310,6 +576,245 @@ function parseReadFilePayload(content: string): ReadFilePayload | undefined {
   } catch {
     return undefined;
   }
+}
+
+interface RequiredModelContextEstimate {
+  inputTokens: number;
+  contextWindowTokens: number;
+  reservedOutputTokens: number;
+}
+
+function groupConversationExchanges(
+  messages: readonly ConversationMessage[],
+): ConversationMessage[][] {
+  const exchanges: ConversationMessage[][] = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (!message) continue;
+    const exchange = [message];
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      const callIds = new Set(message.toolCalls.map((call) => call.id));
+      while (true) {
+        const result = messages[index + 1];
+        if (result?.role !== "tool" || !callIds.has(result.toolCallId)) {
+          break;
+        }
+        exchange.push(result);
+        index += 1;
+      }
+    }
+    exchanges.push(exchange);
+  }
+  return exchanges;
+}
+
+function lastUserExchangeIndex(
+  exchanges: readonly ConversationMessage[][],
+): number {
+  for (let index = exchanges.length - 1; index >= 0; index -= 1) {
+    if (exchanges[index]?.some((message) => message.role === "user")) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function parseCompactedTaskState(
+  content: string | undefined,
+): CompactedTaskState | undefined {
+  if (!content) return undefined;
+  const start = content.indexOf("{");
+  if (start < 0) return undefined;
+  try {
+    const value = JSON.parse(
+      content.slice(start),
+    ) as Partial<CompactedTaskState>;
+    return value.version === 1 && typeof value.objective === "string"
+      ? {
+          version: 1,
+          objective: value.objective,
+          plan: stringArray(value.plan),
+          completedWork: stringArray(value.completedWork),
+          failures: stringArray(value.failures),
+          changedFiles: Array.isArray(value.changedFiles)
+            ? value.changedFiles.filter(
+                (file): file is { path: string; hash?: string } =>
+                  typeof file === "object" &&
+                  file !== null &&
+                  "path" in file &&
+                  typeof file.path === "string",
+              )
+            : [],
+          verificationStatus: stringArray(value.verificationStatus),
+          retrievedSlices: stringArray(value.retrievedSlices),
+          projectRules: stringArray(value.projectRules),
+          openQuestions: stringArray(value.openQuestions),
+        }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildCompactedTaskState(
+  existing: CompactedTaskState | undefined,
+  instructions: readonly SystemMessage[],
+  selected: readonly ConversationMessage[],
+  conversation: readonly ConversationMessage[],
+): CompactedTaskState {
+  const latestObjective = [...conversation]
+    .reverse()
+    .find((message) => message.role === "user")?.content;
+  const state: CompactedTaskState = existing
+    ? structuredClone(existing)
+    : {
+        version: 1,
+        objective: latestObjective ? bounded(latestObjective, 4000) : "",
+        plan: [],
+        completedWork: [],
+        failures: [],
+        changedFiles: [],
+        verificationStatus: [],
+        retrievedSlices: [],
+        projectRules: [],
+        openQuestions: [],
+      };
+  if (latestObjective) state.objective = bounded(latestObjective, 4000);
+  for (const instruction of instructions) {
+    addUnique(state.projectRules, bounded(instruction.content, 1600), 8);
+  }
+  for (const message of selected) {
+    const content = bounded(message.content, 1600);
+    if (/\b(plan|step|todo)\b/i.test(content))
+      addUnique(state.plan, content, 10);
+    if (/\b(error|failed|failure|denied|timeout)\b/i.test(content)) {
+      addUnique(state.failures, content, 10);
+    }
+    if (/\b(verified|verification|passed|test|build|lint)\b/i.test(content)) {
+      addUnique(state.verificationStatus, content, 10);
+    }
+    if (message.role === "assistant" && content.trim().endsWith("?")) {
+      addUnique(state.openQuestions, content, 8);
+    }
+    if (message.role === "assistant" && content.trim()) {
+      addUnique(state.completedWork, content, 12);
+    }
+    if (message.role === "tool") {
+      if (/Rejected hunks/i.test(content)) {
+        addUnique(state.failures, content, 10);
+      }
+      for (const file of message.metadata?.changedFiles ?? []) {
+        const existingFile = state.changedFiles.find(
+          (item) => item.path === file.path,
+        );
+        if (existingFile) existingFile.hash = file.hash;
+        else state.changedFiles.push(file);
+        state.changedFiles = state.changedFiles.slice(-20);
+      }
+      if (message.toolName === "retrieve_context") {
+        addUnique(state.retrievedSlices, content, 12);
+      }
+      const file = parseFileIdentity(message.content);
+      if (file && !state.changedFiles.some((item) => item.path === file.path)) {
+        state.changedFiles.push(file);
+        state.changedFiles = state.changedFiles.slice(-20);
+      }
+    }
+  }
+  return state;
+}
+
+function parseFileIdentity(
+  content: string,
+): { path: string; hash?: string } | undefined {
+  try {
+    const value = JSON.parse(content) as Record<string, unknown>;
+    if (typeof value.path !== "string") return undefined;
+    return {
+      path: value.path,
+      hash: typeof value.hash === "string" ? value.hash : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function addUnique(values: string[], value: string, limit: number): void {
+  if (!value || values.includes(value)) return;
+  values.push(value);
+  if (values.length > limit) values.splice(0, values.length - limit);
+}
+
+function bounded(value: string, length: number): string {
+  return value.length <= length
+    ? value
+    : `${value.slice(0, length)}\n[truncated]`;
+}
+
+function normalizeApprovalDecision(
+  response: ToolApprovalResponse,
+  preview: ToolPreview | undefined,
+): ApprovalDecision {
+  if (typeof response === "boolean") {
+    const ids = isFileDiffPreview(preview)
+      ? preview.hunks.map((hunk) => hunk.id)
+      : [];
+    return response
+      ? { acceptedHunkIds: ids, rejectedHunkIds: [] }
+      : { acceptedHunkIds: [], rejectedHunkIds: ids };
+  }
+  if (!isFileDiffPreview(preview)) {
+    throw new Error("Block decisions require a structured file diff preview.");
+  }
+  const available = new Set(preview.hunks.map((hunk) => hunk.id));
+  const accepted = new Set(response.acceptedHunkIds);
+  const rejected = new Set(response.rejectedHunkIds);
+  if (
+    accepted.size !== response.acceptedHunkIds.length ||
+    rejected.size !== response.rejectedHunkIds.length
+  ) {
+    throw new Error("Hunk IDs must not be duplicated.");
+  }
+  for (const id of accepted) {
+    if (!available.has(id) || rejected.has(id)) {
+      throw new Error(`Invalid accepted hunk ID: ${id}`);
+    }
+  }
+  for (const id of rejected) {
+    if (!available.has(id)) throw new Error(`Invalid rejected hunk ID: ${id}`);
+  }
+  if (accepted.size + rejected.size !== available.size) {
+    throw new Error("Every proposed hunk must be accepted or rejected.");
+  }
+  return {
+    acceptedHunkIds: [...accepted],
+    rejectedHunkIds: [...rejected],
+  };
+}
+
+function isFileDiffPreview(
+  preview: ToolPreview | undefined,
+): preview is FileDiffPreview {
+  return typeof preview === "object" && preview?.kind === "file_diff";
+}
+
+function formatRejectedHunks(
+  hunks: readonly FileDiffPreview["hunks"][number][],
+): string {
+  if (hunks.length === 0) return "Rejected hunks: none";
+  return [
+    "Rejected hunks (continue without re-requesting these unchanged):",
+    ...hunks.map(
+      (hunk) =>
+        `- ${hunk.id} ${hunk.path}:${hunk.startLine}-${hunk.endLine}\n${bounded(hunk.replacement, 800)}`,
+    ),
+  ].join("\n");
 }
 
 interface WorkflowState {

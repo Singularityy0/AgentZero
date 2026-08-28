@@ -7,10 +7,65 @@ export interface ToolDefinition {
 
 export type ToolApproval = "auto" | "ask";
 
+export interface ProposedHunk {
+  id: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  original: string;
+  replacement: string;
+}
+
+export interface FileDiffPreview {
+  kind: "file_diff";
+  path: string;
+  baseHash: string | null;
+  proposedHash: string;
+  text: string;
+  hunks: ProposedHunk[];
+}
+
+export type ToolPreview = string | FileDiffPreview;
+
+export interface ApprovalDecision {
+  acceptedHunkIds: string[];
+  rejectedHunkIds: string[];
+}
+
+export type ToolApprovalResponse = boolean | ApprovalDecision;
+
+export interface ToolReviewResult {
+  acceptedHunkIds: string[];
+  rejectedHunks: ProposedHunk[];
+}
+
+export interface WorkspaceMutationRecord {
+  id: string;
+  path: string;
+  operation: "write" | "delete";
+  before: { content: string; hash: string } | null;
+  afterHash: string | null;
+  acceptedHunkIds: string[];
+}
+
+export interface ContextArtifact {
+  source: "file" | "retrieval" | "manual" | "tool";
+  path?: string;
+  hash?: string;
+  startLine?: number;
+  endLine?: number;
+  content: string;
+  tokenEstimate: number;
+}
+
 export interface ToolExecutionContext {
   cwd: string;
   signal: AbortSignal;
   requestApproval: (reason: string) => Promise<boolean>;
+  approval?: {
+    preview: ToolPreview;
+    decision: ApprovalDecision;
+  };
 }
 
 export interface ToolPreviewContext {
@@ -24,13 +79,17 @@ export interface ToolResult {
   exitCode?: number;
   timedOut?: boolean;
   truncated?: boolean;
+  review?: ToolReviewResult;
+  changedFiles?: Array<{ path: string; hash?: string }>;
+  workspaceMutation?: WorkspaceMutationRecord;
+  contextArtifacts?: ContextArtifact[];
 }
 
 export interface Tool extends ToolDefinition {
   preview?: (
     arguments_: Record<string, unknown>,
     context: ToolPreviewContext,
-  ) => Promise<string>;
+  ) => Promise<ToolPreview>;
   execute(
     arguments_: Record<string, unknown>,
     context: ToolExecutionContext,

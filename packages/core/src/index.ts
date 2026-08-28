@@ -1,12 +1,28 @@
 export type {
   AssistantMessage,
+  CompactedTaskState,
+  ContextCompactionCheckpoint,
   ConversationMessage,
   SystemMessage,
   ToolCall,
   ToolMessage,
   UserMessage,
 } from "./messages.js";
-export type { LanguageModel, ModelRequest, ModelResponse } from "./model.js";
+export {
+  ModelError,
+  classifyModelError,
+  toModelError,
+  estimateModelRequestTokens,
+  type LanguageModel,
+  type ModelContextEstimate,
+  type ModelErrorClassification,
+  type ModelErrorCode,
+  type ModelErrorOptions,
+  type ModelRequest,
+  type ModelResponse,
+  type ModelTiming,
+  type ModelUsage,
+} from "./model.js";
 export { ToolRegistry } from "./tool-registry.js";
 export type {
   Tool,
@@ -15,6 +31,14 @@ export type {
   ToolPreviewContext,
   ToolResult,
   ToolApproval,
+  ToolPreview,
+  FileDiffPreview,
+  ProposedHunk,
+  ApprovalDecision,
+  ToolApprovalResponse,
+  ToolReviewResult,
+  WorkspaceMutationRecord,
+  ContextArtifact,
 } from "./tools.js";
 export { AgentRunner } from "./agent.js";
 export type { AgentRunResult, AgentRunnerOptions } from "./agent.js";
@@ -29,6 +53,7 @@ export {
   type OrchestrationEvent,
   type OrchestrationPlan,
   type OrchestrationStage,
+  type PendingStepRecovery,
   type OrchestrationState,
   type OrchestrationStep,
   type StepResult,

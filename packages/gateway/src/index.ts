@@ -1,7 +1,11 @@
-import type {
-  LanguageModel,
-  ModelRequest,
-  ModelResponse,
+import {
+  ModelError,
+  toModelError,
+  type LanguageModel,
+  type ModelContextEstimate,
+  type ModelErrorCode,
+  type ModelRequest,
+  type ModelResponse,
 } from "@agentic-runtime/core";
 import { OllamaModel } from "@agentic-runtime/ollama";
 import { OpenAICompatibleChatModel } from "@agentic-runtime/openai";
@@ -48,6 +52,97 @@ export interface ModelInfo {
   metadata: Record<string, unknown>;
 }
 
+export interface ModelRoutePreference {
+  providerId: string;
+  modelId: string;
+  /** Lower values are preferred. Array order is used when omitted. */
+  preference?: number;
+  /** Alias for preference for callers that use priority terminology. */
+  priority?: number;
+}
+
+export interface RouteRankingCandidate {
+  model: ModelInfo;
+  preference: number;
+  cooldownUntil?: number;
+}
+
+export interface RouteRankingRequirements {
+  requiresTools: boolean;
+  contextTokens: number;
+  estimatedOutputTokens: number;
+  now: number;
+}
+
+export interface RankedModelRoute {
+  model: ModelInfo;
+  preference: number;
+  contextTokens: number;
+  estimatedCost: number | null;
+  cooldownUntil?: number;
+  inCooldown: boolean;
+  eligible: boolean;
+  reason: string;
+}
+
+export function estimateModelRequestTokens(request: ModelRequest): number {
+  const characters =
+    serializedLength(request.messages) + serializedLength(request.tools);
+  return characters === 0 ? 0 : Math.ceil(characters / 4);
+}
+
+export function rankModelRoutes(
+  candidates: readonly RouteRankingCandidate[],
+  requirements: RouteRankingRequirements,
+): RankedModelRoute[] {
+  const contextTokens = Math.max(0, requirements.contextTokens);
+  const outputTokens = Math.max(0, requirements.estimatedOutputTokens);
+  return candidates
+    .map((candidate): RankedModelRoute => {
+      const supportsTools =
+        !requirements.requiresTools || candidate.model.capabilities.tools;
+      const contextFits =
+        candidate.model.contextWindow === undefined ||
+        contextTokens + outputTokens <= candidate.model.contextWindow;
+      const cooldownUntil = candidate.cooldownUntil;
+      const inCooldown =
+        cooldownUntil !== undefined && cooldownUntil > requirements.now;
+      const estimatedCost = estimateModelCost(
+        candidate.model,
+        contextTokens,
+        outputTokens,
+      );
+      const eligibilityReason = !supportsTools
+        ? "tools required but unsupported"
+        : !contextFits
+          ? `estimated context ${contextTokens + outputTokens} exceeds window ${candidate.model.contextWindow}`
+          : undefined;
+      const costReason =
+        estimatedCost === null
+          ? "cost unknown"
+          : `estimated cost ${estimatedCost.toFixed(6)}`;
+      const contextReason =
+        candidate.model.contextWindow === undefined
+          ? `estimated context ${contextTokens}; window unknown`
+          : `estimated context ${contextTokens}/${candidate.model.contextWindow}`;
+      const reason = eligibilityReason
+        ? `rejected: ${eligibilityReason}`
+        : `${inCooldown ? "cooldown active; " : ""}preference ${candidate.preference}; ${requirements.requiresTools ? "tools supported" : "tools not required"}; ${contextReason}; ${costReason}`;
+
+      return {
+        model: candidate.model,
+        preference: candidate.preference,
+        contextTokens,
+        estimatedCost,
+        cooldownUntil,
+        inCooldown,
+        eligible: supportsTools && contextFits,
+        reason,
+      };
+    })
+    .sort(compareRankedRoutes);
+}
+
 export interface ProviderConfig {
   providerId: string;
   baseUrl?: string;
@@ -72,6 +167,12 @@ export interface ProviderAdapter {
   createRoute(model: ModelInfo): Promise<ModelRoute>;
 }
 
+export interface GatewayFailure {
+  code: ModelErrorCode;
+  retryable: boolean;
+  status?: number;
+}
+
 export interface GatewayEvent {
   type:
     | "provider_configured"
@@ -83,12 +184,21 @@ export interface GatewayEvent {
     | "model_discovery_failed"
     | "models_refreshed"
     | "model_selected"
+    | "routing_decision"
+    | "routing_attempt_started"
+    | "routing_attempt_completed"
+    | "routing_attempt_failed"
     | "llm_request_started"
     | "llm_request_completed"
     | "llm_request_failed";
   providerId: string;
   modelId?: string;
   detail?: string;
+  reason?: string;
+  attempt?: number;
+  contextTokens?: number;
+  estimatedCost?: number | null;
+  failure?: GatewayFailure;
 }
 
 export interface CredentialResolver {
@@ -196,17 +306,55 @@ export class ModelRegistry {
   }
 }
 
+export const DEFAULT_MAX_ROUTE_ATTEMPTS = 3;
+export const DEFAULT_ROUTE_COOLDOWN_MS = 30_000;
+export const DEFAULT_ESTIMATED_OUTPUT_TOKENS = 1_024;
+
+export interface ProviderGatewayOptions {
+  maxAttempts?: number;
+  cooldownMs?: number;
+  estimatedOutputTokens?: number;
+  now?: () => number;
+}
+
 export class ProviderGateway implements LanguageModel {
   readonly models = new ModelRegistry();
   private selected?: ModelInfo;
+  private routePreferences: ModelRoutePreference[] = [];
+  private readonly cooldowns = new Map<string, number>();
+  private readonly maxAttempts: number;
+  private readonly cooldownMs: number;
+  private readonly estimatedOutputTokens: number;
+  private readonly now: () => number;
+
   constructor(
     readonly providers: ProviderRegistry,
     private readonly onEvent?: (event: GatewayEvent) => void,
-  ) {}
+    options: ProviderGatewayOptions = {},
+  ) {
+    this.maxAttempts = positiveInteger(
+      options.maxAttempts,
+      DEFAULT_MAX_ROUTE_ATTEMPTS,
+      "maxAttempts",
+    );
+    this.cooldownMs = nonNegativeNumber(
+      options.cooldownMs,
+      DEFAULT_ROUTE_COOLDOWN_MS,
+      "cooldownMs",
+    );
+    this.estimatedOutputTokens = nonNegativeNumber(
+      options.estimatedOutputTokens,
+      DEFAULT_ESTIMATED_OUTPUT_TOKENS,
+      "estimatedOutputTokens",
+    );
+    this.now = options.now ?? Date.now;
+  }
+
   configure(config: ProviderConfig): void {
     this.providers.get(config.providerId).configure(config);
     this.emit({ type: "provider_configured", providerId: config.providerId });
   }
+
   async validate(providerId: string): Promise<void> {
     this.emit({ type: "provider_validation_started", providerId });
     try {
@@ -221,6 +369,7 @@ export class ProviderGateway implements LanguageModel {
       throw error;
     }
   }
+
   async discover(providerId: string, refresh = false): Promise<ModelInfo[]> {
     this.emit({ type: "model_discovery_started", providerId });
     try {
@@ -244,13 +393,53 @@ export class ProviderGateway implements LanguageModel {
       throw error;
     }
   }
+
   select(providerId: string, modelId: string): ModelInfo {
     const model = this.models.get(providerId, modelId);
     if (!model) throw new Error(`Model not found: ${providerId}/${modelId}`);
     this.selected = model;
+    this.routePreferences = [{ providerId, modelId }];
     this.emit({ type: "model_selected", providerId, modelId });
     return model;
   }
+
+  setRoutePreferences(
+    preferences: readonly ModelRoutePreference[],
+  ): readonly ModelRoutePreference[] {
+    if (preferences.length === 0) {
+      throw new Error("At least one model route preference is required.");
+    }
+    const seen = new Set<string>();
+    const normalized = preferences.map((preference, index) => {
+      const model = this.models.get(preference.providerId, preference.modelId);
+      if (!model) {
+        throw new Error(
+          `Model not found: ${preference.providerId}/${preference.modelId}`,
+        );
+      }
+      const key = keyFor(preference.providerId, preference.modelId);
+      if (seen.has(key)) throw new Error(`Duplicate model route: ${key}`);
+      seen.add(key);
+      const value = routePreferenceValue(preference, index);
+      return { ...preference, preference: value };
+    });
+
+    this.routePreferences = normalized;
+    const primary = normalized[0]!;
+    this.selected = this.models.get(primary.providerId, primary.modelId);
+    this.emit({
+      type: "model_selected",
+      providerId: primary.providerId,
+      modelId: primary.modelId,
+      reason: `${normalized.length} route preferences configured`,
+    });
+    return this.getRoutePreferences();
+  }
+
+  getRoutePreferences(): readonly ModelRoutePreference[] {
+    return this.routePreferences.map((preference) => ({ ...preference }));
+  }
+
   registerModel(model: ModelInfo): ModelInfo {
     this.models.replace(model.providerId, [
       ...this.models.list(model.providerId),
@@ -258,40 +447,158 @@ export class ProviderGateway implements LanguageModel {
     ]);
     return model;
   }
+
   getSelected(): ModelInfo | undefined {
     return this.selected;
   }
+
   async route(model = this.selected): Promise<ModelRoute> {
     if (!model) throw new Error("No model selected.");
     return this.providers.get(model.providerId).createRoute(model);
   }
-  async respond(request: ModelRequest): Promise<ModelResponse> {
-    const route = await this.route();
-    this.emit({
-      type: "llm_request_started",
-      providerId: route.providerId,
-      modelId: route.modelId,
-    });
-    try {
-      const response = await route.execute(request);
-      this.emit({
-        type: "llm_request_completed",
-        providerId: route.providerId,
-        modelId: route.modelId,
-      });
-      return response;
-    } catch (error) {
-      this.emit({
-        type: "llm_request_failed",
-        providerId: route.providerId,
-        modelId: route.modelId,
-        detail: safeError(error),
-      });
-      throw error;
-    }
+
+  estimateContext(request: ModelRequest): ModelContextEstimate {
+    const primary = this.routePreferences[0];
+    const model = primary
+      ? this.models.get(primary.providerId, primary.modelId)
+      : this.selected;
+    return {
+      inputTokens: estimateModelRequestTokens(request),
+      contextWindowTokens: model?.contextWindow,
+      reservedOutputTokens: this.estimatedOutputTokens,
+    };
   }
+
+  rankRoutes(request: ModelRequest): RankedModelRoute[] {
+    const contextTokens = estimateModelRequestTokens(request);
+    const now = this.now();
+    const candidates = this.routePreferences.flatMap(
+      (preference, index): RouteRankingCandidate[] => {
+        const model = this.models.get(
+          preference.providerId,
+          preference.modelId,
+        );
+        return model
+          ? [
+              {
+                model,
+                preference: routePreferenceValue(preference, index),
+                cooldownUntil: this.cooldowns.get(
+                  keyFor(model.providerId, model.id),
+                ),
+              },
+            ]
+          : [];
+      },
+    );
+    return rankModelRoutes(candidates, {
+      requiresTools: request.tools.length > 0,
+      contextTokens,
+      estimatedOutputTokens: this.estimatedOutputTokens,
+      now,
+    });
+  }
+
+  async respond(request: ModelRequest): Promise<ModelResponse> {
+    if (this.routePreferences.length === 0 && this.selected) {
+      this.routePreferences = [
+        { providerId: this.selected.providerId, modelId: this.selected.id },
+      ];
+    }
+    const rankedRoutes = this.rankRoutes(request);
+    const ranked = rankedRoutes
+      .filter((candidate) => candidate.eligible)
+      .slice(0, this.maxAttempts);
+    if (ranked.length === 0) {
+      const contextTooLarge = rankedRoutes.some((candidate) =>
+        candidate.reason.includes("exceeds window"),
+      );
+      throw new ModelError(
+        this.routePreferences.length === 0
+          ? "No model selected."
+          : contextTooLarge
+            ? "No configured route can fit the request context."
+            : "No route supports the request requirements.",
+        contextTooLarge
+          ? { code: "context_length", retryable: true }
+          : { code: "invalid_request", retryable: false },
+      );
+    }
+
+    let previousFailure: GatewayFailure | undefined;
+    for (let index = 0; index < ranked.length; index += 1) {
+      const candidate = ranked[index]!;
+      const attempt = index + 1;
+      const reason = previousFailure
+        ? `failover after ${previousFailure.code}; ${candidate.reason}`
+        : candidate.reason;
+      const event = {
+        providerId: candidate.model.providerId,
+        modelId: candidate.model.id,
+        reason,
+        attempt,
+        contextTokens: candidate.contextTokens,
+        estimatedCost: candidate.estimatedCost,
+      };
+      this.emit({ type: "routing_decision", ...event });
+      this.emit({ type: "routing_attempt_started", ...event });
+      this.emit({ type: "llm_request_started", ...event });
+
+      try {
+        const route = await this.route(candidate.model);
+        const response = await route.execute(request);
+        response.providerId ??= candidate.model.providerId;
+        response.model ??= candidate.model.id;
+        if (response.cost === undefined && response.usage) {
+          response.cost =
+            estimateModelCost(
+              candidate.model,
+              response.usage.inputTokens,
+              response.usage.outputTokens,
+            ) ?? undefined;
+        }
+        const resolvedResponse = response;
+        this.emit({ type: "routing_attempt_completed", ...event });
+        this.emit({ type: "llm_request_completed", ...event });
+        return resolvedResponse;
+      } catch (error) {
+        const modelError = toModelError(error);
+        const failure: GatewayFailure = {
+          code: modelError.code,
+          retryable: modelError.retryable,
+          status: modelError.status,
+        };
+        this.emit({
+          type: "routing_attempt_failed",
+          ...event,
+          failure,
+        });
+        this.emit({ type: "llm_request_failed", ...event, failure });
+        if (modelError.retryable && modelError.code !== "context_length") {
+          this.cooldowns.set(
+            keyFor(candidate.model.providerId, candidate.model.id),
+            this.now() + this.cooldownMs,
+          );
+        }
+        if (!modelError.retryable || attempt === ranked.length) {
+          throw modelError;
+        }
+        previousFailure = failure;
+      }
+    }
+
+    throw new ModelError("All model routes failed.", {
+      code: "unknown",
+      retryable: false,
+    });
+  }
+
   private emit(event: GatewayEvent): void {
-    this.onEvent?.(event);
+    try {
+      this.onEvent?.(event);
+    } catch {
+      // Telemetry observers must never control routing or failover.
+    }
   }
 }
 
@@ -644,7 +951,7 @@ export async function validateStoredProvider(
 }
 
 export function createDefaultProviderGateway(
-  options: {
+  options: ProviderGatewayOptions & {
     credentials?: CredentialResolver;
     fetcher?: typeof fetch;
     onEvent?: (event: GatewayEvent) => void;
@@ -657,7 +964,7 @@ export function createDefaultProviderGateway(
     .register(new OpenRouterProvider(credentials, options.fetcher))
     .register(new OpenAICompatibleProvider(credentials, options.fetcher))
     .register(new OllamaProvider(credentials, options.fetcher)); // All are free-tier providers
-  return new ProviderGateway(registry, options.onEvent);
+  return new ProviderGateway(registry, options.onEvent, options);
 }
 
 /** Groq's model list has no per-token pricing and no active/expert count, so
@@ -751,6 +1058,85 @@ function manualModel(providerId: string, id: string): ModelInfo {
     // totalParameters may be supplied via catalog later
   };
 }
+export function estimateModelCost(
+  model: ModelInfo,
+  inputTokens: number,
+  outputTokens: number,
+): number | null {
+  if (model.providerId === "ollama") return 0;
+  const inputPrice = model.pricing?.inputPerMillion;
+  const outputPrice = model.pricing?.outputPerMillion;
+  if (inputPrice === undefined && outputPrice === undefined) return null;
+  return (
+    ((inputPrice ?? 0) * Math.max(0, inputTokens) +
+      (outputPrice ?? 0) * Math.max(0, outputTokens)) /
+    1_000_000
+  );
+}
+
+function compareRankedRoutes(
+  left: RankedModelRoute,
+  right: RankedModelRoute,
+): number {
+  if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
+  if (left.inCooldown !== right.inCooldown) return left.inCooldown ? 1 : -1;
+  if (left.preference !== right.preference) {
+    return left.preference - right.preference;
+  }
+  const leftCost = left.estimatedCost ?? Number.POSITIVE_INFINITY;
+  const rightCost = right.estimatedCost ?? Number.POSITIVE_INFINITY;
+  if (leftCost !== rightCost) return leftCost - rightCost;
+  const leftWindow = left.model.contextWindow ?? Number.POSITIVE_INFINITY;
+  const rightWindow = right.model.contextWindow ?? Number.POSITIVE_INFINITY;
+  if (leftWindow !== rightWindow) return leftWindow - rightWindow;
+  return keyFor(left.model.providerId, left.model.id).localeCompare(
+    keyFor(right.model.providerId, right.model.id),
+  );
+}
+
+function serializedLength(value: unknown): number {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+function routePreferenceValue(
+  preference: ModelRoutePreference,
+  fallback: number,
+): number {
+  const value = preference.preference ?? preference.priority ?? fallback;
+  if (!Number.isFinite(value)) {
+    throw new Error("A route preference must be a finite number.");
+  }
+  return value;
+}
+
+function positiveInteger(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isInteger(resolved) || resolved < 1) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return resolved;
+}
+
+function nonNegativeNumber(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isFinite(resolved) || resolved < 0) {
+    throw new Error(`${name} must be a non-negative number.`);
+  }
+  return resolved;
+}
+
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
@@ -774,5 +1160,10 @@ function keyFor(providerId: string, modelId: string): string {
   return `${providerId}:${modelId}`;
 }
 function safeError(error: unknown): string {
-  return error instanceof Error ? error.message : "Provider request failed.";
+  const message =
+    error instanceof Error ? error.message : "Provider request failed.";
+  return message
+    .replace(/(bearer\s+)[^\s"']+/giu, "$1[REDACTED]")
+    .replace(/([?&](?:api_?key|token|secret)=)[^&\s]+/giu, "$1[REDACTED]")
+    .slice(0, 500);
 }

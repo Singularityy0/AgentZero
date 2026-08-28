@@ -44,7 +44,7 @@ export interface MultiAgentResult {
   runId: string;
   agentId: string;
   text: string;
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "paused";
   handoffs: number;
   messages?: ConversationMessage[];
 }
@@ -78,7 +78,11 @@ export interface MultiAgentOptions {
   maxHandoffs?: number;
   maxHandoffsPerPair?: number;
   maxModelSteps?: number;
+  maxToolCalls?: number;
   maxDurationMs?: number;
+  allowHandoffs?: boolean;
+  enforceWorkflowCompletion?: boolean;
+  beforeModelRequest?: () => void;
   signal?: AbortSignal;
   onEvent?: (event: MultiAgentEvent) => void | Promise<void>;
 }
@@ -184,7 +188,7 @@ export class MultiAgentOrchestrator {
       agentId,
       depth,
     );
-    if (!tools.has("handoff_agent")) {
+    if (this.options.allowHandoffs !== false && !tools.has("handoff_agent")) {
       tools.register(this.createHandoffTool(state, agentId, depth));
     }
     const messages: ConversationMessage[] = [
@@ -200,9 +204,14 @@ export class MultiAgentOrchestrator {
     const runner = new AgentRunner(model, tools, {
       cwd: this.options.cwd,
       maxSteps: agent.maxSteps,
+      maxToolCalls: this.options.maxToolCalls,
       requestApproval: this.options.requestApproval,
       signal: this.options.signal,
-      beforeModelRequest: () => this.consumeModelStep(state),
+      beforeModelRequest: () => {
+        this.consumeModelStep(state);
+        this.options.beforeModelRequest?.();
+      },
+      enforceWorkflowCompletion: this.options.enforceWorkflowCompletion,
       onEvent: async (event) => {
         await this.options.onEvent?.({
           type: "agent_event",

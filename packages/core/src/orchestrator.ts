@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 export type AgentRole =
-  "planner" | "researcher" | "coder" | "verifier" | "reviewer";
+  "planner" | "retriever" | "researcher" | "coder" | "verifier" | "reviewer";
 
 export type OrchestrationStage =
   | "planning"
@@ -50,6 +50,12 @@ export interface StepResult extends AgentWorkResult {
   completedAt: number;
 }
 
+export interface PendingStepRecovery {
+  stepId: string;
+  afterAttempt: number;
+  failure: AgentWorkResult;
+}
+
 export interface OrchestrationState {
   runId: string;
   objective: string;
@@ -57,6 +63,8 @@ export interface OrchestrationState {
   completedStepIds: string[];
   results: Record<string, StepResult>;
   attempts: Record<string, number>;
+  failureFingerprints?: Record<string, string>;
+  pendingRecovery?: PendingStepRecovery;
   totalAttempts: number;
   failure?: string;
   startedAt: number;
@@ -94,6 +102,14 @@ export type OrchestrationEvent =
       summary: string;
     }
   | {
+      type: "step_recovering";
+      runId: string;
+      stepId: string;
+      role: AgentRole;
+      attempt: number;
+      reason: string;
+    }
+  | {
       type: "step_retrying";
       runId: string;
       stepId: string;
@@ -123,6 +139,10 @@ export interface TaskOrchestratorOptions {
   maxDurationMs?: number;
   signal?: AbortSignal;
   checkpoint?: OrchestrationCheckpointStore;
+  recoverStep?: (
+    request: AgentWorkRequest,
+    failure: AgentWorkResult,
+  ) => Promise<AgentWorkResult | undefined>;
   onEvent?: (event: OrchestrationEvent) => void | Promise<void>;
 }
 
@@ -158,11 +178,11 @@ export class TaskOrchestrator {
     context = "",
   ): Promise<OrchestrationState> {
     validatePlan(plan);
-    const startedAt = Date.now();
+    const invokedAt = Date.now();
     const saved = await this.options.checkpoint?.load();
     const state = saved
       ? restoreState(saved, plan)
-      : createState(plan, this.options.runId ?? randomUUID(), startedAt);
+      : createState(plan, this.options.runId ?? randomUUID(), invokedAt);
 
     if (state.stage === "completed") return state;
     await this.emit({
@@ -174,7 +194,7 @@ export class TaskOrchestrator {
 
     try {
       while (state.completedStepIds.length < plan.steps.length) {
-        this.checkLimits(state, startedAt);
+        this.checkLimits(state, invokedAt);
         const step = nextReadyStep(plan, state);
         if (!step) {
           return this.fail(
@@ -203,7 +223,7 @@ export class TaskOrchestrator {
           plan.objective,
           context,
           previousResults,
-          startedAt,
+          invokedAt,
         );
 
         if (!result) return state;
@@ -253,9 +273,29 @@ export class TaskOrchestrator {
     previousResults: readonly StepResult[],
     startedAt: number,
   ): Promise<StepResult | undefined> {
-    let previousFailureKey: string | undefined;
+    const failureFingerprints = (state.failureFingerprints ??= {});
+    let previousFailureKey: string | undefined = failureFingerprints[step.id];
+    const recoveryRequest: AgentWorkRequest = {
+      runId: state.runId,
+      step,
+      objective,
+      context,
+      previousResults,
+      signal: this.options.signal,
+    };
+    if (state.pendingRecovery?.stepId === step.id) {
+      const pending = state.pendingRecovery;
+      const recovered = await this.performRecovery(
+        state,
+        recoveryRequest,
+        pending.failure,
+        pending.afterAttempt,
+      );
+      if (!recovered) return undefined;
+    }
+    const firstAttempt = (state.attempts[step.id] ?? 0) + 1;
     for (
-      let attempt = 1;
+      let attempt = firstAttempt;
       attempt <= this.options.maxAttemptsPerStep;
       attempt += 1
     ) {
@@ -288,10 +328,11 @@ export class TaskOrchestrator {
           summary: error instanceof Error ? error.message : String(error),
         };
       }
-      const failureKey = result.success
-        ? undefined
-        : (result.progressKey ?? `${result.summary}:${result.output ?? ""}`);
       const passed = step.role === "verifier" ? result.passed === true : true;
+      const failureKey =
+        result.success && passed
+          ? undefined
+          : (result.progressKey ?? `${result.summary}:${result.output ?? ""}`);
 
       if (result.success && passed) {
         return {
@@ -312,7 +353,26 @@ export class TaskOrchestrator {
         return undefined;
       }
       previousFailureKey = failureKey;
+      if (failureKey) failureFingerprints[step.id] = failureKey;
+      state.updatedAt = Date.now();
+      await this.save(state);
       if (attempt < this.options.maxAttemptsPerStep) {
+        if (this.options.recoverStep) {
+          state.pendingRecovery = {
+            stepId: step.id,
+            afterAttempt: attempt,
+            failure: result,
+          };
+          state.updatedAt = Date.now();
+          await this.save(state);
+          const recovered = await this.performRecovery(
+            state,
+            recoveryRequest,
+            result,
+            attempt,
+          );
+          if (!recovered) return undefined;
+        }
         await this.emit({
           type: "step_retrying",
           runId: state.runId,
@@ -329,6 +389,35 @@ export class TaskOrchestrator {
       `Step "${step.id}" failed after ${this.options.maxAttemptsPerStep} attempts.`,
     );
     return undefined;
+  }
+
+  private async performRecovery(
+    state: OrchestrationState,
+    request: AgentWorkRequest,
+    failure: AgentWorkResult,
+    attempt: number,
+  ): Promise<boolean> {
+    const reason = failure.summary || "The worker did not complete the step.";
+    await this.emit({
+      type: "step_recovering",
+      runId: state.runId,
+      stepId: request.step.id,
+      role: request.step.role,
+      attempt,
+      reason,
+    });
+    const recovery = await this.options.recoverStep?.(request, failure);
+    if (recovery && !recovery.success) {
+      await this.fail(
+        state,
+        `Recovery for step "${request.step.id}" failed: ${recovery.summary}`,
+      );
+      return false;
+    }
+    delete state.pendingRecovery;
+    state.updatedAt = Date.now();
+    await this.save(state);
+    return true;
   }
 
   private checkLimits(state: OrchestrationState, startedAt: number): void {
@@ -386,6 +475,7 @@ function createState(
     completedStepIds: [],
     results: {},
     attempts: {},
+    failureFingerprints: {},
     totalAttempts: 0,
     startedAt,
     updatedAt: startedAt,
@@ -412,6 +502,7 @@ function restoreState(
     completedStepIds: [...saved.completedStepIds],
     results: { ...saved.results },
     attempts: { ...saved.attempts },
+    failureFingerprints: { ...(saved.failureFingerprints ?? {}) },
   };
 }
 
@@ -432,6 +523,7 @@ function stageForRole(role: AgentRole): OrchestrationStage {
   switch (role) {
     case "planner":
       return "planning";
+    case "retriever":
     case "researcher":
       return "researching";
     case "coder":
