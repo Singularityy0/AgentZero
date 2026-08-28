@@ -26,8 +26,10 @@ packages/tui/src/        Interactive terminal chat interface
 packages/tools/src/      Separate IDE-facing tools
 packages/workspace/src/  Safe file operations and patch/diff service
 packages/search/src/     Ripgrep-backed text and file search
+packages/retrieval/src/  Persistent project-isolated semantic code retrieval
 packages/session/src/    SQLite global/project/session persistence
 packages/gateway/src/    Provider registry, routing, credential resolution
+packages/runtime/src/    Headless application service shared by TUI and future IDE hosts
 packages/gui/src/        Browser-based settings/chat/diff/dashboard UI (Vite)
 packages/gui-server/src/ Local node:http bridge: settings API + static GUI host
 rust/src/                Rust sidecar for AST slicing, diff hunks, and state primitives
@@ -52,7 +54,6 @@ pnpm install
 pnpm build
 pnpm typecheck
 pnpm test
-pnpm example:openai "your prompt"
 pnpm tui
 pnpm settings
 pnpm lint
@@ -67,7 +68,7 @@ Build artifacts are emitted under package `dist/` directories and
 
 - The workspace installs successfully with pnpm; building the hybrid core also
   requires a working Rust/Cargo toolchain.
-- `@agentic-runtime/core`, `@agentic-runtime/openai`, and
+- `@agentic-runtime/core`, `@agentic-runtime/runtime`, `@agentic-runtime/openai`, and
   `@agentic-runtime/ollama`, `@agentic-runtime/command`,
   `@agentic-runtime/search`, `@agentic-runtime/tools`,
   `@agentic-runtime/tui`, and `@agentic-runtime/workspace` compile successfully.
@@ -117,21 +118,41 @@ Build artifacts are emitted under package `dist/` directories and
 - Tool approval is fail-safe: explicitly read-only workspace/search tools run
   automatically, while mutations and all shell-backed tools require approval.
 - `@agentic-runtime/core` now exposes `TaskOrchestrator`, a bounded sequential
-  multi-agent workflow with dependency checks, retries, stuck-failure detection,
-  time/attempt budgets, and checkpoint callbacks.
+  multi-agent workflow with dependency checks, persisted retry/failure state,
+  verifier recovery, stuck-failure detection, time/attempt budgets, and
+  checkpoint callbacks.
+- The headless runtime executes coding tasks through the checkpointed
+  `planner -> retriever -> coder -> verifier -> reviewer` pipeline and exposes
+  `resumeTask()` so completed stages are skipped after process restart.
+- `AgentRunner` performs structured token-budget compaction, supports repeated
+  compaction, preserves project rules/task facts/file hashes, and retries bounded
+  context-length failures without advancing the workflow step.
+- File mutation previews contain stable addressable hunks and a base hash.
+  Boolean approvals remain compatible, while structured decisions can apply only
+  accepted hunks, reject stale bases, and return rejected hunks to the agent.
+- Verifier recovery state, hash-guarded rollback primitives, fresh retrieval,
+  replanning, and corrective approval exist. Default file tools do not yet return
+  their mutation records to the runtime journal, so normal end-to-end rollback
+  remains incomplete. Command and Git side effects are not guessed at.
+- Session-scoped manual file/line context and isolated `/bytheway` are exposed by
+  the headless runtime and TUI without contaminating the durable main transcript.
+- SQLite trace schemas and runtime handlers preserve task, pipeline, agent,
+  provider, compaction, and isolated-question spans. Model and tool correlation,
+  exact request/response data, and context propagation remain incomplete.
+- Model requests are abortable; paused tasks, pending recovery, and task-wide
+  model budgets survive resume. Tool-call floods and TUI activity memory are
+  bounded, and stalled observers cannot block runtime progress.
 - `@agentic-runtime/session` exposes `createTaskCheckpointStore` to persist and
   resume orchestration state inside project-isolated SQLite task records.
 - `SessionStore` persists registry-driven agent definitions, and
   `MultiAgentOrchestrator` resolves agents by ID with bounded `handoff_agent`
   delegation instead of hardcoded role implementations.
-- The TUI uses `MultiAgentOrchestrator` directly, maintains SQLite-backed
-  `general` and `coding-agent` definitions, defaults to the meta-agent, and
+- The TUI consumes `HeadlessRuntimeService`, defaults to the Architect, and
   supports `/agents` plus `/agent <id>` for selection.
 - Restricted agents can use `delegatesTo`; blocked tool calls are converted to
   automatic specialist handoffs instead of being executed or silently lost.
-- Custom agents can be created, edited, listed, selected, and deleted from the
-  TUI with `/agent-create`, `/agent-edit`, `/agents`, `/agent`, and
-  `/agent-delete`; definitions persist in the global SQLite database.
+- Custom agent definitions persist in global SQLite and project Markdown files.
+  The current TUI lists and selects agents but does not expose CRUD commands.
 - Versioned project agents can be defined in `.agentic/agents/*.md` using YAML
   frontmatter plus a Markdown system prompt; these are imported at TUI startup.
 - The agent runner continues explicit multi-step coding requests when a model
@@ -141,8 +162,8 @@ Build artifacts are emitted under package `dist/` directories and
   whether a reread is required.
 - The default agent safety budget is 24 model steps to allow read, edit,
   approval, verification, and final-response workflows.
-- Ollama requests time out after 45 seconds by default; `OLLAMA_TIMEOUT_MS` can
-  override the interactive request limit.
+- Gateway-created Ollama requests currently use the adapter's 300-second timeout;
+  `OLLAMA_TIMEOUT_MS` is not wired into runtime composition.
 - An isolated Ollama IDE test successfully created and read a TypeScript file
   through `create_file` and `read_file`.
 - The multi-step edit workflow has been tested through inspection, patching,

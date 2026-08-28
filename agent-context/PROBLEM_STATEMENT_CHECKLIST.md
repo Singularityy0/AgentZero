@@ -12,10 +12,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Multi-step edit, reread, and verification continuation.
 - [x] Registry-driven agents and specialist handoff are supported by
       `MultiAgentOrchestrator`.
-- [~] Dependency-ordered task planning and bounded retry recovery exist.
+- [x] The live headless coding path runs a checkpointed planner, retriever,
+      coder, verifier, and reviewer pipeline with bounded corrective recovery.
 - [x] Attempt/time budgets and repeated-failure safeguards.
-- [~] Delegation is supported; model-driven planning, disagreement handling,
-  and replanning remain.
+- [~] Verifier failure triggers recovery, fresh retrieval, replanning, corrective
+  coding, and reverification. Hash-guarded rollback primitives exist, but
+  default file tools do not yet forward mutation records into the journal.
 
 ## 2. Model and Hosting Constraints
 
@@ -38,11 +40,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 ## 3. Smart Routing
 
 - [~] Provider abstraction exists (Groq, OpenRouter, Ollama, OpenAI-compatible).
-- [~] Provider selection exists, but only as configuration.
-- [ ] Complexity-aware model routing.
-- [ ] Context-size, token-budget, rate-limit, and cost-aware routing.
-- [ ] Transparent routing explanations.
-- [ ] Automatic fallback while preserving progress.
+- [x] Ordered provider/model route preferences are configurable.
+- [~] Routing uses tool need, context fit, cost, preference, and cooldown;
+  richer task-complexity classification remains.
+- [x] Context-size, rate-limit cooldown, and estimated-cost-aware ranking.
+- [x] Transparent routing explanations are emitted live and persisted.
+- [x] Automatic retryable fallback reuses the exact request and task state.
 - [x] Mandatory settings screen for provider API keys. Both TUI (`/settings`)
       and GUI (`pnpm settings`) read/write the same global-SQLite-backed
       credentials via `StoredCredentialResolver`; validated end-to-end with a
@@ -51,23 +54,25 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## 4. Automatic Context Compaction
 
-- [~] Automatic context-size monitoring uses character count, not model tokens.
-- [~] A fixed 20,000-character trigger exists; model-window-aware policy remains.
-- [~] Older messages are summarized, but retention guarantees are not tested.
-- [ ] Repeated compaction support.
-- [ ] Recovery from provider context-limit errors.
+- [x] Automatic context monitoring estimates provider-visible request tokens.
+- [x] Compaction uses the selected route window and configurable trigger/target.
+- [x] Structured state retains objective, work, failures, files/hashes,
+      verification, retrieval, project rules, and open questions.
+- [x] Repeated compaction is bounded and regression-tested.
+- [x] Context-limit errors trigger bounded compaction and same-step retry.
 
 ## 5. Code Retrieval Pipeline
 
 - [x] Workspace-isolated filesystem access.
 - [x] Ripgrep-backed text and file search.
 - [~] Search results are normalized to workspace-relative paths.
-- [ ] Per-project persistent code index.
-- [ ] Semantic/structural retrieval beyond keyword search.
-- [ ] Symbol, dependency, and execution-flow understanding.
-- [ ] Context selection and relevance ranking.
-- [ ] Retrieval quality detection and recovery.
-- [ ] Retrieval-memory isolation between projects.
+- [x] Per-project persistent SQLite code index.
+- [x] TypeScript/TSX semantic structure plus mixed-language text fallback.
+- [~] Symbols, imports, exports, references, and calls are indexed; full CPG
+  control/data-flow analysis remains deferred.
+- [x] Ranked line-scoped context selection.
+- [x] Broadening/narrowing recovery for poor retrieval.
+- [x] Retrieval and memory isolation between canonical project roots.
 
 ## 6. Long-Horizon, Multi-Session Tasks
 
@@ -75,17 +80,18 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Global settings and project-isolated databases.
 - [x] Sessions, tasks, events, and context items are persisted.
 - [x] Session resume support exists at the persistence level.
-- [ ] Durable orchestration checkpoints.
-- [ ] Exact resume of interrupted multi-agent tasks.
-- [ ] Recovery after crashes, timeouts, or provider failures.
+- [x] Durable orchestration checkpoints in project SQLite.
+- [~] `resumeTask()` skips completed stages; active shell/model calls restart from
+  the last durable boundary rather than mid-call.
+- [x] Retryable provider failures preserve the live request/checkpoint.
 
 ## 7. Manual Context Control
 
-- [ ] Add/remove files from active context.
-- [ ] Add/remove selected code blocks.
-- [ ] Clickable file tags in user input.
-- [ ] Clickable file/line tags in agent output.
-- [ ] Isolated `/bytheway` command with context restoration.
+- [x] Add/remove session-scoped file snapshots from active context.
+- [x] Add/remove inclusive selected line blocks.
+- [~] File/line tag parsing works in TUI commands; clickable IDE rendering remains.
+- [~] Output traces retain file/line artifacts; clickable IDE rendering remains.
+- [x] Isolated `/bytheway` has zero prior context and preserves the main transcript.
 
 ## 8. Autonomous Tool Use
 
@@ -117,22 +123,24 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Mutation previews before approval.
 - [x] Whole-operation approval/denial.
 - [~] Conflict detection prevents stale writes.
-- [~] Rust emits addressable line hunks and can apply selected hunks; approval UI
-  and runtime contracts are not wired to per-hunk decisions.
-- [ ] Accept-all and reject-all review actions.
-- [ ] Correct continuation after partial approval or rejection.
+- [x] Workspace previews emit stable line hunks bound to the expected base hash.
+- [x] Runtime/TUI support per-hunk decisions plus accept-all/reject-all.
+- [x] Partial application is atomic, stale bases fail closed, and rejected hunks
+      are returned to agent context for continuation.
 
 ## 11. Observability Dashboard
 
-- [~] Runtime event structures are being introduced.
-- [x] TUI agent, tool, approval, and task lifecycle events are persisted.
-- [ ] Full agent/tool call hierarchy.
-- [ ] Drill-down into exact inputs and outputs.
-- [ ] Thought/process visibility or suitable progress trace.
-- [ ] Exact context files and code chunks per agent.
-- [ ] Per-agent token and timing metrics.
-- [ ] Live task dashboard.
-- [ ] Historical task inspection.
+- [~] Runtime emits and persists task, pipeline, agent, provider, compaction, and
+  isolated-question trace spans.
+- [x] TUI agent, tool, approval, routing, pipeline, and task events are persisted.
+- [~] The trace schema supports the complete hierarchy, but `AgentRunner` does not
+  yet emit model/tool correlation IDs and complete request/response payloads.
+- [~] Safe progress and routing/recovery events are persisted.
+- [~] Context artifact contracts exist, but tool-message propagation is incomplete.
+- [~] Provider timing, route, and available cost are recorded where supplied;
+  per-model usage is incomplete in the hierarchy.
+- [ ] Live IDE dashboard rendering.
+- [~] Partial historical trace inspection is available by API.
 
 ## Deliverables
 
@@ -141,8 +149,8 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [ ] Verified Windows, macOS, and Linux builds.
 - [ ] Clean-machine setup documentation.
 - [ ] Linux setup instructions with provider API-key setup.
-- [ ] Architecture documentation with diagrams.
-- [ ] Tool-calling format and tradeoff documentation.
+- [x] Architecture documentation with diagrams.
+- [x] Tool-calling format and tradeoff documentation.
 - [ ] Comparison of alternative architectural approaches.
 - [ ] Presentation plan for a maximum 10-minute presentation with at least 2 presenters.
 
@@ -161,12 +169,11 @@ model/hosting constraints - is mostly done):
    Remaining: populate `MODEL_PARAMETER_CATALOG` with real entries, surface
    the `unverified` flag in a UI, and add the 16GB/8GB local-hardware
    soft-check.
-3. Smart routing signals, visible reasoning, and provider fallback (Phase 2).
-4. Context compaction (Phase 3).
-5. Code indexing and high-quality retrieval (Phase 4).
-6. Multi-agent orchestration with planning, verification, and backtracking
-   (Phase 5).
-7. Block-level HITL review (Phase 6).
-8. Manual context control and `/bytheway` (Phase 7).
-9. Observability dashboard (Phase 8).
-10. Documentation, cross-platform builds, and presentation prep (Phase 9).
+3. Connect default workspace mutations to verifier rollback.
+4. Complete model/tool trace correlation and context propagation.
+5. Enforce task cost, parameter verification, and local-hardware constraints.
+6. Add task discovery and resume to clients.
+7. Add the IDE runtime transport and connect the browser workbench.
+8. Build the observability dashboard from corrected traces.
+9. Verify cross-platform builds and prepare submission materials.
+10. Add the thin Tauri packaging layer last.

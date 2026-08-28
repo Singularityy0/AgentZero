@@ -170,6 +170,66 @@
   of a misleading per-agent 24-step limit.
 - Verified 30 TypeScript tests, 8 Rust tests, the hybrid build, and ESLint.
 
+- Added `@agentic-runtime/runtime`, a headless application service that owns
+  built-in agents, provider/tool composition, persisted sessions/tasks/events,
+  approvals, cancellation, and per-task multi-agent orchestration.
+- Migrated the TUI from direct `SessionStore`/gateway/tool/orchestrator ownership
+  to the headless service, making it a presentation adapter suitable for later
+  replacement or reuse by an IDE/Tauri transport.
+- Added transport-friendly runtime event, task-handle, approval, model-selection,
+  settings, and limit contracts; each task now captures immutable session/task
+  correlation and receives a fresh orchestrator.
+- Fixed `/new` and `/agent` presentation state updates, implemented active-task
+  cancellation through the service, and removed nonexistent help commands.
+- Added the runtime package to build, clean, typecheck, workspace dependencies,
+  and integration coverage. Verified 31 TypeScript tests.
+
+- Added typed model errors, route ranking, cooldowns, retryable provider
+  failover, persisted routing events, and live TUI route/failover activity.
+- Added `@agentic-runtime/retrieval`, a persistent project-isolated SQLite index
+  with TypeScript semantic extraction, mixed-language fallback, ranked slices,
+  incremental hashes, and query recovery.
+- Promoted `TaskOrchestrator` into the headless coding path as the sequential
+  planner/retriever/coder/verifier/reviewer pipeline. Added persisted attempts
+  and failure fingerprints, corrective coder recovery, one global pipeline model
+  budget, and `HeadlessRuntimeService.resumeTask()` stage resume.
+- Replaced fixed-character compaction with token-window-aware structured state,
+  bounded repeated compaction, context-limit retry, task checkpoint persistence,
+  and preservation of project rules, rejected hunks, and changed file hashes.
+- Added base-hash-bound stable diff hunks and structured approvals with boolean
+  compatibility. The TUI supports per-hunk toggles and accept-all/reject-all;
+  the workspace atomically applies selected hunks and feeds rejections back to
+  the model.
+- Verified 44 TypeScript tests after adding pipeline, resume, compaction,
+  context-recovery, partial-approval, insertion/deletion, and conflict coverage.
+- Added durable pending recovery and a hash-guarded workspace mutation journal.
+  Failed verification now rolls back safe file-tool changes, preserves later user
+  edits on conflict, refreshes retrieval, replans, requires fresh approval, and
+  reverifies. External command/Git side effects block automatic rollback.
+- Added persisted hierarchical trace spans for tasks, pipeline stages, agents,
+  model calls, provider attempts, tools, and compaction with sanitized exact I/O,
+  context artifacts, token usage, timing, route, and available cost.
+- Added session-isolated `/context` file/line snapshots and a zero-context
+  `/bytheway` execution path that leaves the main transcript unchanged.
+- Hardened long runs with abortable provider calls, disabled hidden OpenAI SDK
+  retries, persisted model budgets, paused cancellation, tool-call caps,
+  observer-safe events, route activity deduplication, and bounded TUI state.
+- Expanded the deterministic suite to 54 TypeScript tests plus 8 Rust tests.
+- Made TUI workspace argument parsing accept pnpm's forwarded `--` separator
+  and documented Git Bash-safe relative and forward-slash paths.
+- Excluded ignored disposable `tmp/` workspaces from repository linting.
+- Routed command-only test, build, lint, and syntax requests directly to the
+  verifier instead of the mutation pipeline, and supplied project instructions
+  to the verifier so it uses repository-defined commands.
+- Added source-grounded architecture/status and runbook/interface references
+  under `docs/`, including current recovery and tracing gaps and a prioritized
+  path to the IDE transport and final Tauri wrapper.
+- Audit correction: the recovery state machine and trace schema were added, but
+  default file tools do not yet populate the mutation journal and `AgentRunner`
+  does not yet emit complete model/tool correlation data. Earlier entries that
+  describe those paths as complete refer to intended behavior, not current
+  end-to-end wiring. The current TypeScript suite contains 47 tests.
+
 ## Next Steps
 
 - Refine the IDE Observability Dashboard to show full call hierarchy traces per the PS requirements.

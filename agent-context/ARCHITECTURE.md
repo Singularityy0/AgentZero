@@ -29,9 +29,18 @@ These are future boundaries, not implemented modules:
 Keep the core package independent of specific LLM vendors and agent
 frameworks.
 
+`@agentic-runtime/runtime` is the headless application boundary above these
+packages. It composes the provider gateway, `SessionStore`, concrete IDE/Rust
+tools, built-in agent policy, approvals, task lifecycle, cancellation, and event
+persistence. Clients do not construct orchestration directly: the TUI consumes
+this service now, and future IDE/Tauri hosts should expose the same service over
+HTTP, SSE/WebSocket, or Tauri commands/events. Browser or webview code must not
+import Node-only runtime packages directly.
+
 `TaskOrchestrator` is the provider-neutral multi-agent workflow boundary. It
 executes a dependency-checked plan sequentially through role-specific workers
-(`planner`, `researcher`, `coder`, `verifier`, and `reviewer`). Sequential
+(`planner`, `retriever`, `coder`, `verifier`, and `reviewer`; `researcher`
+remains a compatibility role). Sequential
 execution is intentional for the first reliable path: it prevents concurrent
 agents from conflicting over the same working tree. Workers can internally use
 `AgentRunner` and receive only scoped context plus prior step results.
@@ -66,13 +75,14 @@ were available.
 
 ## Explicitly Not Implemented
 
-- Complexity/cost/rate-limit-aware routing and automatic provider failover
-- A persistent project-wide semantic code index and ranked retrieval pipeline
-- Full structured context compaction tied to model token budgets
-- Backtracking and replanning in the live TUI execution path
-- Block-level approval wired through the workspace mutation flow
-- Exact crash resume for active multi-agent runs
-- Complete hierarchical tracing with token, timing, and context-slice metrics
+- Rollback of arbitrary shell, Git, network, package-manager, or external-process
+  side effects. Recovery safely restores only approved workspace file-tool
+  mutations and stops instead of guessing when untracked side effects occurred.
+- Exact continuation of an in-flight arbitrary shell process; model HTTP calls
+  are cancellable and resume starts a fresh call from the durable checkpoint.
+  resume starts from the last durable stage checkpoint.
+- Complete hierarchical tracing with token, timing, cost, and context-slice metrics
+- Parallel execution of independent read-only pipeline stages
 
 The core `LanguageModel` interface is provider-neutral. `OpenAIModel` and
 `OllamaModel` implement it independently. The TUI selects one from
@@ -111,12 +121,18 @@ permissions. Project files are imported into the global registry at TUI startup;
 reserved built-in IDs cannot be overridden.
 
 `ToolRegistry` validates every model argument object with `ajv` before the
-`AgentRunner` asks for approval. Mutating tools provide a preview to the TUI;
-the TUI displays that preview before allowing execution.
+`AgentRunner` asks for approval. File mutations prepare a base-hash-bound diff
+with stable line hunks. Approval can remain boolean (accept/reject all) or carry
+accepted/rejected hunk IDs. The workspace rereads the file, rejects stale bases,
+and applies accepted hunks atomically; rejected hunks are returned in model
+context so execution can continue around them.
 
 Session persistence is split by scope: global SQLite stores user settings and
 credential references, while a project SQLite database stores sessions, tasks,
-events, context items, and future checkpoints. The project ID is derived from
+events, session/task-scoped context items, orchestration checkpoints, workspace
+recovery journals, and hierarchical trace spans. Manual file snapshots are
+session-isolated. `/bytheway` uses one model call with only its prompt and never
+reads or mutates the durable main transcript. The project ID is derived from
 the canonical project root, and all project queries are scoped to that ID.
 The TUI is only the current client; it does not own durable conversation state.
 
@@ -131,9 +147,22 @@ follow-through stages such as mutation, reread, and build/verification. If the
 model returns text before those stages, it receives an internal continuation
 request instead of ending the run early.
 
-Project-wide language indexing, LSP-backed retrieval, and image analysis remain
-deferred. Per-input tree-sitter AST slicing exists in the Rust sidecar but is not
-yet a persistent semantic retrieval pipeline.
+After verifier failure, the runtime persists pending recovery state and can roll
+back journaled file mutations in reverse order when current hashes match, then
+refresh retrieval, replan, and invoke the Coder with fresh approval. Default file
+tools do not yet return mutation records to this journal, so normal end-to-end
+rollback remains incomplete. A later user edit must never be overwritten.
+
+Trace persistence currently covers tasks, pipeline steps, agents, provider
+attempts, compaction, and isolated questions. The schema supports model and tool
+spans, exact sanitized I/O, context artifacts, usage, timing, route, and cost,
+but `AgentRunner` does not yet emit the correlation fields and complete payloads
+needed to populate the full hierarchy. Sensitive fields are redacted.
+
+The persistent retrieval package indexes TypeScript/TSX symbols, imports,
+exports, references, calls, hashes, and line spans in project-isolated SQLite,
+with text fallback for mixed-language repositories. LSP diagnostics, image
+analysis, and a full control/data-flow graph remain deferred.
 
 ## Target Design Reference
 

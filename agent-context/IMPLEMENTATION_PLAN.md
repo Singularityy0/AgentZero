@@ -55,8 +55,10 @@ Verified by direct code inspection, not just docs:
 - Retrieval is ripgrep/keyword only (`packages/search`, `find_files`,
   `search_text`) — no index, no ranking, no structural understanding.
 - `TaskOrchestrator` (retry/budget/checkpoint engine) exists in
-  `packages/core/src/orchestrator.ts` but is not the TUI's live execution
-  path; `MultiAgentOrchestrator` is used directly instead.
+  `packages/core/src/orchestrator.ts` but is not the headless runtime's live
+  execution path. `HeadlessRuntimeService` currently creates a fresh
+  `MultiAgentOrchestrator` per task; composition and lifecycle are now
+  client-neutral and no longer owned by the TUI.
 - HITL review is whole-diff approve/deny only, no block-level accept/reject.
 - No observability dashboard exists (grep for `dashboard|tracing` hits docs
   only).
@@ -70,6 +72,32 @@ Ordered by (a) disqualification risk, (b) evaluation weight
 (Core Agentic Architecture is 36%: routing 5, compaction 5, retrieval 12,
 orchestration 14), (c) dependency order (routing/compaction need gateway
 events; dashboard needs the event stream those phases produce).
+
+### Core-to-IDE delivery sequence
+
+The desktop shell is deliberately last. Runtime behavior must not be duplicated
+inside React, a browser server, or Tauri commands.
+
+1. [x] Extract `@agentic-runtime/runtime` as the headless application boundary
+       and migrate the TUI to it.
+2. [x] Add typed provider failures, visible smart routing, and in-request
+       failover while preserving the live message/tool state.
+3. [x] Build the persistent per-project semantic index and ranked retrieval API.
+4. [~] Promote `TaskOrchestrator` into the headless service for planning,
+   checkpoints, verification, replanning, corrective recovery, and stage
+   resume. Hash-guarded rollback primitives exist, but default file tools do
+   not yet populate the runtime mutation journal.
+5. [x] Replace heuristic compaction with model-budget-aware structured task
+       state persisted through the runtime.
+6. [x] Expose typed diff hunks and partial approval through the headless approval
+       contract.
+7. [~] Add hierarchical runtime events and persisted trace schemas. Task,
+   pipeline, agent, provider, compaction, and isolated spans exist, but model
+   and tool correlation and complete payload propagation remain.
+8. [ ] Add an IDE transport host (HTTP/SSE or equivalent) over
+       `HeadlessRuntimeService`; the webview consumes DTOs only.
+9. [ ] Build the IDE workbench against that transport, then package it with a
+       thin Tauri wrapper as the final deployment step.
 
 ---
 
@@ -371,21 +399,22 @@ finishes correctly around the rejected hunk.
 
 ## Phase 7 — Manual context control + `/bytheway`
 
-**PS requirement:** 7. **Eval weight:** 6%. **Current state:** none.
+**PS requirement:** 7. **Eval weight:** 6%. **Status: done in the headless
+runtime and TUI.** Clickable GUI rendering remains workbench scope.
 
-- [ ] Add explicit add/remove-from-context actions in the TUI (a command like
+- [x] Add explicit add/remove-from-context actions in the TUI (a command like
       `/context add <file>[:<line-range>]` / `/context remove <file>`) backed
       by the existing project context-items table in `packages/session`.
 - [ ] Add clickable file/line tags: parse `path:line` or `path:line-range`
       tokens in both user input and agent output text, render them as
       clickable in the GUI, and make the TUI equivalent (e.g., a keybind to
       jump/insert) functional.
-- [ ] Implement `/bytheway <question>` as a one-off `AgentRunner` invocation
+- [x] Implement `/bytheway <question>` as a one-off `AgentRunner` invocation
       with an empty message history and no injected task context, using the
       same model/provider as the active session, then discard that
       sub-conversation and resume the original context exactly as it was —
       this should be a thin wrapper, not a new orchestrator mode.
-- [ ] Add a test: run `/bytheway`, assert it has zero access to prior
+- [x] Add a test: run `/bytheway`, assert it has zero access to prior
       context, then assert the next normal message still has full prior
       context intact.
 
@@ -396,13 +425,14 @@ unaffected afterward.
 
 ## Phase 8 — Observability dashboard
 
-**PS requirement:** 11. **Eval weight:** 8%. **Current state:** none (event
-persistence exists in `packages/session`, no UI consumes it as a hierarchy).
+**PS requirement:** 11. **Eval weight:** 8%. **Current state:** the full
+headless trace hierarchy and persistence API are implemented; dashboard rendering
+is deferred to the IDE workbench.
 
-- [ ] Confirm/extend the session event schema so every agent/tool
-      call records: parent call ID (for hierarchy), exact input, exact
-      output, token usage, start/end timestamps, and route (from Phase 2's
-      routing events).
+- [~] Extend persistence for task/pipeline/agent/model/provider/tool/compaction
+  spans. The schema and several span types exist, but `AgentRunner` still
+  needs stable model/tool IDs, complete sanitized request/response payloads,
+  usage, timing, and context propagation.
 - [ ] Build a dashboard view in `packages/gui` that renders the call
       hierarchy as a tree, using persisted events for finished tasks and a
       live subscription (poll or event stream) for running ones — same view,

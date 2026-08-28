@@ -8,9 +8,14 @@ is to keep each model's job narrow, limit the context and tools it receives,
 and use orchestration and verification to compensate for weaker single-model
 planning.
 
-The current implementation is a terminal client and runtime foundation. It is
-not yet a complete desktop IDE, smart provider gateway, semantic code index, or
-parallel multi-agent scheduler.
+The current implementation is a terminal client and headless runtime foundation
+with smart provider failover, persistent semantic retrieval, a checkpointed
+five-stage coding pipeline, recovery and replanning machinery, structured context
+compaction, block-level file approval, manual context control, isolated
+`/bytheway`, and persisted trace infrastructure. Default file tools do not yet
+forward mutation records into the recovery journal, and model/tool trace
+correlation remains incomplete. It is not yet the final desktop IDE transport or
+a parallel multi-agent scheduler.
 
 ## 2. Package Boundaries
 
@@ -26,6 +31,7 @@ The repository uses independent packages under `packages/`:
 - `workspace`: workspace-bound file access, hashes, atomic writes, conflict
   detection, and unified diff previews.
 - `search`: packaged ripgrep file and text search.
+- `retrieval`: project-isolated SQLite semantic index and ranked compact slices.
 - `tools`: concrete IDE, web, and Git tools assembled into a registry.
 - `session`: SQLite persistence for global settings, agents, sessions, tasks,
   events, and project context.
@@ -34,6 +40,10 @@ The repository uses independent packages under `packages/`:
 - `gateway`: provider registry, model catalog, Groq/OpenRouter/Ollama/
   OpenAI-compatible route support, and `StoredCredentialResolver` for
   settings-backed credentials.
+- `runtime`: reusable headless application service that owns built-in agents,
+  provider/tool composition, sessions, cancellable task execution, approvals,
+  event persistence, and task/session lifecycle. The TUI consumes this package;
+  a future IDE/Tauri host will expose the same API over transport.
 - `gui`: browser-based settings/chat/diff/dashboard UI (plain TypeScript +
   Vite, no Tauri/Electron).
 - `gui-server`: local `node:http` bridge exposing the provider-settings API
@@ -72,21 +82,22 @@ The fields have separate responsibilities:
 - `maxSteps` limits the model/tool loop for that agent.
 - `enabled` determines whether the orchestrator may start the agent.
 
-Every agent also receives the internal `handoff_agent` tool. The orchestrator
-enforces a maximum handoff depth of 6 and a maximum of 20 handoffs per run by
-default. It rejects unknown or disabled targets and detects duplicate active
-handoffs.
+Direct registry-driven runs can receive the internal `handoff_agent` tool when
+handoffs are enabled. The default runtime limits depth to 4, total handoffs to 8,
+and handoffs per source/target pair to 2. Unknown, disabled, duplicate, and
+excessive handoffs are rejected.
 
 ## 4. Built-In and Project Agents
 
-The TUI defines two built-in agents in `packages/tui/src/index.ts`:
+The runtime defines five built-in agents in
+`packages/runtime/src/default-agents.ts`:
 
-- `general`: a restricted meta-agent. It can inspect files, search, browse the
-  web, crawl sites, and inspect Git. It delegates implementation and mutation
-  work to `coding-agent`.
-- `coding-agent`: the implementation agent. It can use workspace, command,
-  verification, web, and Git tools. Side-effecting tools still require user
-  approval.
+- `general`: the read-only Architect and planner.
+- `retriever`: a registered retrieval specialist. The fixed pipeline currently
+  uses deterministic retrieval directly instead of invoking this agent.
+- `coding-agent`: the implementation specialist.
+- `verifier`: the command-only verification specialist.
+- `reviewer`: the final read-only reviewer.
 
 Built-in agents are registered at startup with `SessionStore.registerAgent()`.
 The operation is an SQLite upsert, so their current source definition refreshes
@@ -133,31 +144,21 @@ parses them with `gray-matter`, validates required fields, and returns
 after registering built-ins. A project file cannot override the reserved
 `general` or `coding-agent` IDs.
 
-The current agent CRUD commands are:
-
-```text
-/agents
-/agent <id>
-/agent-create <id>
-/agent-edit <id>
-/agent-delete <id>
-```
-
-CRUD-created agents are stored in SQLite. Project Markdown agents are the
-version-controlled source and are re-imported when the TUI starts. Reserved
-built-ins cannot be edited or deleted, and the active agent cannot be deleted.
+The current TUI supports `/agents`, `/agent`, and `/agent <id>`. Agent CRUD
+methods exist in persistence, but the current TUI does not expose create, edit,
+or delete commands. Project Markdown agents are re-imported when the TUI starts.
 
 ## 5. Runtime Execution Flow
 
 The normal flow is:
 
-1. The TUI loads `.env`, opens the global and project SQLite databases, and
-   loads project instructions from the root `AGENTS.md`.
-2. The TUI registers or refreshes the built-in agents and imports
-   `.agentic/agents/*.md` files.
+1. The TUI translates `.env` into an explicit model selection and constructs
+   `HeadlessRuntimeService`.
+2. The runtime opens global/project SQLite, loads project instructions,
+   refreshes built-in agents, and imports `.agentic/agents/*.md` files.
 3. The user selects an agent or uses the default `general` agent.
-4. A user message becomes a persisted session task and a `MultiAgentOrchestrator`
-   run.
+4. A user message enters the headless runtime, which persists the task and
+   constructs a fresh `MultiAgentOrchestrator` for that task.
 5. The orchestrator loads the agent definition, resolves its model and complete
    tool registry, then scopes the registry using `allowedTools`.
 6. The agent receives its system prompt, prior session history, and task.
@@ -187,11 +188,18 @@ configured. This prevents a restricted agent from bypassing its permission
 boundary by emitting the name of a blocked tool. Handoffs are currently nested
 and sequential.
 
-`TaskOrchestrator` is a separate provider-neutral planner that supports
-dependency-ordered sequential steps, retries, repeated-failure detection,
-attempt budgets, time budgets, and checkpoint callbacks. It is not yet the
-primary TUI execution path for every request, and independent steps are not
-currently executed in parallel.
+`TaskOrchestrator` is the provider-neutral checkpoint engine for coding tasks.
+The headless runtime runs planner, deterministic semantic retrieval, coder,
+verifier, and read-only reviewer stages in order. Verifier failure persists a
+pending recovery and can roll back journaled file mutations when their hashes
+still match, then refresh retrieval, obtain a revised Planner approach, and run
+a freshly approved corrective Coder. Default file tools currently omit the
+`workspaceMutation` result needed to populate that journal, so end-to-end
+rollback is incomplete. Persisted attempts,
+failure fingerprints, recovery phase, mutation journal, and model-request count
+survive resume. Conversational/read-only prompts and explicitly selected custom
+agents continue through the direct registry-driven path. Independent stages are
+not currently executed in parallel.
 
 ## 7. Tool Catalog and Safety
 
@@ -243,17 +251,21 @@ This prevents session state from one opened codebase being mixed with another.
 The core uses a provider-neutral `LanguageModel` interface. The current
 providers are:
 
-- OpenAI Responses API through `@agentic-runtime/openai`.
 - Ollama `/api/chat` through `@agentic-runtime/ollama`.
 - Groq, OpenRouter, and OpenAI-compatible/local endpoints through
   `@agentic-runtime/gateway`.
 
+`@agentic-runtime/openai` also contains a direct OpenAI Responses adapter, but
+the default runtime gateway does not register it as a selectable provider.
+
 The Ollama adapter supports native structured tool calls and a constrained JSON
-fallback for models that emit tool calls as text. Requests default to a
-45-second timeout in the TUI, configurable with `OLLAMA_TIMEOUT_MS`. The TUI
-still selects a single active provider/model through `MODEL_PROVIDER` and does
-not yet perform complexity-aware routing or automatic failover between
-providers.
+fallback for models that emit tool calls as text. Gateway-created requests use
+the adapter's current 300-second timeout; `OLLAMA_TIMEOUT_MS` is not wired. The
+TUI supplies an ordered primary/fallback route list. The gateway ranks
+configured routes using preference, tools, context fit, estimated cost, and
+cooldown state, emits visible routing reasons, and fails over on rate limits,
+context errors, timeouts, connections, and transient server failures without
+rebuilding the model request.
 
 Provider credentials, base URLs, and manual model IDs are stored in the global
 SQLite database via `SessionStore.setCredential`/`setProviderSetting` and
@@ -288,21 +300,20 @@ pnpm format:check
 The most important remaining gaps against the problem statement are:
 
 - Parallel orchestration for independent tasks.
-- Complexity-, context-, cost-, and rate-limit-aware provider routing.
-- Provider failover with progress preservation.
-- Production-grade context compaction tied to model token budgets and persisted
-  structured task state. A fixed-character-threshold prototype currently prunes
-  `read_file` payloads through Rust and summarizes older messages.
-- Structural code indexing and semantic retrieval.
-- Full resumable multi-agent execution after crashes.
-- Block-level diff review wired to approvals. The Rust engine now emits minimal
-  line-based replacement hunks and can apply selected hunks, but the approval
-  contract still accepts or rejects a whole tool call.
+- Default file mutation tools do not yet forward mutation records into the
+  recovery journal, so verifier rollback is not complete end to end.
+- Arbitrary command, Git, and external side effects cannot be rolled back.
+- Exact resumption of an in-flight arbitrary shell process; cancellable model
+  calls restart from the last durable boundary.
+- Parallel read-only pipeline stages.
+- The final IDE dashboard/workbench that renders persisted traces and clickable
+  file references.
 - Git merge tooling.
-- Full observability dashboard with per-agent token and timing metrics.
+- Complete model/tool trace correlation and a dashboard with per-agent token and
+  timing metrics.
 - A write/save path from the GUI editor (currently read-only by design — see
   below — since there's no approval-gating wired to GUI-initiated edits yet).
-- Clickable file/line tags and `/bytheway` (Phase 7).
+- Clickable file/line tags in the browser workbench.
 - Populating `MODEL_PARAMETER_CATALOG` with real figures beyond the 2 seed
   entries, an Ollama RAM/VRAM soft-check, and surfacing the `unverified`
   model flag anywhere in the UI (80B/free-tier hard-blocking itself is
@@ -324,4 +335,7 @@ status bar shows real state (workspace name and `gui-server` connectivity,
 live cursor position and detected language from Monaco's own events) rather
 than placeholder text. The AI chat panel accepts input and appends real user
 messages but is explicitly labeled preview-only; it is not wired to
-`MultiAgentOrchestrator`. `packages/gui/src-tauri` has been removed in favor of `gui-server`, but the high-performance Rust engine in `rust/` has been retained and acts as a specialized backend for AST slicing and structural diff generation. The project uses a Hybrid Architecture, blending TypeScript for orchestration and UI, and Rust for heavy IDE lifting.
+`HeadlessRuntimeService`. `packages/gui/src-tauri` has been removed in favor of
+`gui-server`. The Rust sidecar remains available for syntax slicing, signature
+pruning, advisory line diffs, and experimental state primitives. It is not the
+authoritative HITL diff engine.
