@@ -48,7 +48,10 @@ Verified by direct code inspection, not just docs:
   until HITL approval-gating is wired to it — Phase 6), clickable file/line
   tags and `/bytheway` (Phase 7), and the observability dashboard (Phase 8).
 - The `packages/gui/src-tauri` Tauri backend has been removed, but the `rust/` crate at the repo root is strictly retained for our Hybrid Architecture, providing high-performance AST slicing and block-level diffing to the TS orchestrator.
-- No context compaction exists anywhere in `packages/core/src`.
+- `AgentRunner` now has a compaction prototype: at a fixed 20,000-character
+  threshold it prunes structured `read_file` payloads through the Rust sidecar
+  and, if needed, summarizes older messages. It is not token-budget-aware,
+  context-limit-error-aware, or durably structured yet.
 - Retrieval is ripgrep/keyword only (`packages/search`, `find_files`,
   `search_text`) — no index, no ranking, no structural understanding.
 - `TaskOrchestrator` (retry/budget/checkpoint engine) exists in
@@ -232,7 +235,8 @@ steps.
 
 ## Phase 3 — Automatic context compaction
 
-**PS requirement:** 4. **Eval weight:** 5%. **Current state:** none.
+**PS requirement:** 4. **Eval weight:** 5%. **Current state:** prototype only;
+fixed character threshold plus Rust signature pruning and model summarization.
 
 - [ ] Add token accounting to `AgentRunner` (`packages/core/src/agent.ts`):
       track cumulative input/output tokens per run using each model's
@@ -342,7 +346,8 @@ identical failed edit.
 
 ## Phase 6 — Block-level HITL review
 
-**PS requirement:** 10. **Eval weight:** 3%. **Current state:** whole-diff
+**PS requirement:** 10. **Eval weight:** 3%. **Current state:** Rust can produce
+and partially apply minimal line hunks, but runtime approval remains whole-tool
 approve/deny only.
 
 - [ ] Extend `packages/workspace`'s diff generation to produce addressable

@@ -13,5 +13,5 @@ tmp/
 gen/
 *.rs.bk
 *.pdb
-Cargo.lock
 references/
+.agentic/data/

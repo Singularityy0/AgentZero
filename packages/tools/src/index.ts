@@ -227,19 +227,22 @@ function createSearchTextTool(): Tool {
     name: "search_text",
     description: "Search workspace text using a regular expression.",
     approval: "auto",
-    parameters: objectSchema({
-      pattern: {
-        type: "string",
-        description: "Regular expression to search for.",
+    parameters: objectSchema(
+      {
+        pattern: {
+          type: "string",
+          description: "Regular expression to search for.",
+        },
+        glob: { type: "string", description: "Optional file glob filter." },
       },
-      glob: { type: "string", description: "Optional file glob filter." },
-    }),
+      ["pattern"],
+    ),
     execute: async (arguments_, context) => ({
       output: JSON.stringify(
         await searchText({
           root: context.cwd,
           pattern: requireString(arguments_, "pattern"),
-          glob: requireString(arguments_, "glob"),
+          glob: optionalString(arguments_, "glob"),
         }),
       ),
     }),
@@ -271,11 +274,12 @@ function workspace(
 
 function objectSchema(
   properties: Record<string, unknown>,
+  required = Object.keys(properties),
 ): Record<string, unknown> {
   return {
     type: "object",
     properties,
-    required: Object.keys(properties),
+    required,
     additionalProperties: false,
   };
 }
@@ -285,6 +289,18 @@ function requireString(
   name: string,
 ): string {
   const value = arguments_[name];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`The ${name} argument must be a non-empty string.`);
+  }
+  return value;
+}
+
+function optionalString(
+  arguments_: Record<string, unknown>,
+  name: string,
+): string | undefined {
+  const value = arguments_[name];
+  if (value === undefined) return undefined;
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`The ${name} argument must be a non-empty string.`);
   }

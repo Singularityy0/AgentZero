@@ -3,15 +3,25 @@ import type { Tool, ToolDefinition } from "./tools.js";
 
 export class ToolRegistry {
   private readonly tools = new Map<string, Tool>();
+  private readonly exposedToolNames = new Set<string>();
   private readonly validators = new Map<string, ValidateFunction>();
   private readonly validator = new Ajv({ allErrors: true, strict: false });
 
   register(tool: Tool): this {
+    return this.registerTool(tool, true);
+  }
+
+  registerHidden(tool: Tool): this {
+    return this.registerTool(tool, false);
+  }
+
+  private registerTool(tool: Tool, exposed: boolean): this {
     if (this.tools.has(tool.name)) {
       throw new Error(`A tool named "${tool.name}" is already registered.`);
     }
 
     this.tools.set(tool.name, tool);
+    if (exposed) this.exposedToolNames.add(tool.name);
     this.validators.set(tool.name, this.validator.compile(tool.parameters));
     return this;
   }
@@ -39,13 +49,11 @@ export class ToolRegistry {
   }
 
   list(): ToolDefinition[] {
-    return [...this.tools.values()].map(
-      ({ name, description, parameters, approval }) => ({
-        name,
-        description,
-        parameters,
-        approval,
-      }),
-    );
+    return [...this.exposedToolNames].flatMap((name) => {
+      const tool = this.tools.get(name);
+      if (!tool) return [];
+      const { description, parameters, approval } = tool;
+      return [{ name, description, parameters, approval }];
+    });
   }
 }

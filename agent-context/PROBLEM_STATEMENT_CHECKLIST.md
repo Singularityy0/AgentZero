@@ -51,9 +51,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## 4. Automatic Context Compaction
 
-- [ ] Automatic context-size monitoring.
-- [ ] Compaction trigger policy.
-- [ ] Context summarization with important-fact retention.
+- [~] Automatic context-size monitoring uses character count, not model tokens.
+- [~] A fixed 20,000-character trigger exists; model-window-aware policy remains.
+- [~] Older messages are summarized, but retention guarantees are not tested.
 - [ ] Repeated compaction support.
 - [ ] Recovery from provider context-limit errors.
 
@@ -117,14 +117,15 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Mutation previews before approval.
 - [x] Whole-operation approval/denial.
 - [~] Conflict detection prevents stale writes.
-- [ ] Block-level accept/reject.
+- [~] Rust emits addressable line hunks and can apply selected hunks; approval UI
+  and runtime contracts are not wired to per-hunk decisions.
 - [ ] Accept-all and reject-all review actions.
 - [ ] Correct continuation after partial approval or rejection.
 
 ## 11. Observability Dashboard
 
 - [~] Runtime event structures are being introduced.
-- [~] Session events are persisted.
+- [x] TUI agent, tool, approval, and task lifecycle events are persisted.
 - [ ] Full agent/tool call hierarchy.
 - [ ] Drill-down into exact inputs and outputs.
 - [ ] Thought/process visibility or suitable progress trace.

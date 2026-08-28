@@ -136,6 +136,40 @@
 - End-to-End TUI testing revealed prompt/JSON-parsing limits of 7B models for large diff tool arguments.
 - Re-routed General Agent via `OPENAI_COMPATIBLE_MODEL` to `qwen/qwen3.6-27b` on Groq to respect the <=80B and "Free API" constraint, successfully completing the autonomous demo loop.
 
+## 2026-08-28
+
+- Stabilized the Rust child-process bridge with typed RPC payloads, spawn/exit
+  handling, bounded request timeouts, compatible binary-path configuration, and
+  correct source-extension forwarding for tree-sitter slicing.
+- Corrected compaction to prune the actual `read_file` content while preserving
+  structured path/hash metadata and task-scoped persisted summaries.
+- Replaced whole-file Rust diff output with minimal line-based hunks plus partial
+  merge tests for separate edits, insertions, and deletions.
+- Made the hybrid build reproducible: `pnpm build` now compiles the Rust sidecar
+  before the TypeScript workspace, and `Cargo.lock` is no longer ignored.
+- Fixed optional tool schemas so search, browse, crawl, and Git checkout defaults
+  work without model-supplied optional arguments.
+- Persisted TUI task outcomes, agent/tool events, approval events, and failure
+  details; fixed fallback transcript persistence so it retains the user prompt.
+- Added `.agentic/data/` to `.gitignore` and made formatter behavior robust to
+  the repository's existing mixed line endings.
+- Fixed alternating duplicate tool loops (`A -> B -> A -> B`) by caching calls
+  across an unchanged workspace revision and returning concise skip results
+  instead of duplicating large tool output in model context.
+- Added hidden tool registrations so blocked-operation delegation proxies remain
+  enforceable without advertising all proxy schemas to restricted agents; the
+  Architect now receives 5 schemas instead of the full 26-tool catalog.
+- Added one global model-request budget shared by parent and child agents,
+  checked before ordinary and compaction model calls, so nested agents cannot
+  each consume an independent 24-step allowance.
+- Added a per-direction handoff cap that rejects reworded repetitions such as
+  repeated `coding-agent -> reviewer` requests after two attempts.
+- Added default wall-clock enforcement before every nested model request; the
+  TUI uses a 32-model-step, 8-handoff, 4-depth, 10-minute run budget.
+- Updated the TUI progress denominator to show the global 32-step budget instead
+  of a misleading per-agent 24-step limit.
+- Verified 30 TypeScript tests, 8 Rust tests, the hybrid build, and ESLint.
+
 ## Next Steps
 
 - Refine the IDE Observability Dashboard to show full call hierarchy traces per the PS requirements.

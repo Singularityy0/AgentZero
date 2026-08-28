@@ -1,4 +1,4 @@
-import { generateOpenAIResponse } from "@agentic-runtime/openai";
+import { generateOpenAIResponse } from "../packages/openai/dist/index.js";
 
 const apiKey = process.env.OPENAI_API_KEY;
 const prompt = process.argv.slice(2).join(" ") || "Say hello in one sentence.";

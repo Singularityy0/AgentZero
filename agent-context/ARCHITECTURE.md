@@ -3,9 +3,10 @@
 ## Design Direction
 
 The runtime should be developed as independent TypeScript packages under
-`packages/`. Runtime orchestration, provider routing, retrieval, compaction,
-persistence, review, and UI-facing services should all live behind TypeScript
-package boundaries.
+`packages/`. Runtime orchestration, provider routing, persistence, and UI-facing services
+live behind TypeScript package boundaries. Performance-sensitive AST slicing,
+diff generation, and future index/state primitives may run in the isolated Rust
+sidecar through the typed `RustClient` boundary.
 
 ## Planned Boundaries
 
@@ -65,13 +66,13 @@ were available.
 
 ## Explicitly Not Implemented
 
-- Advanced scheduling
-- Additional provider adapters
-- Prompt management
-- Tool execution
-- Terminal or filesystem agent access
-- Memory, planning, or retrieval systems
-- Native bindings or non-TypeScript runtime components
+- Complexity/cost/rate-limit-aware routing and automatic provider failover
+- A persistent project-wide semantic code index and ranked retrieval pipeline
+- Full structured context compaction tied to model token budgets
+- Backtracking and replanning in the live TUI execution path
+- Block-level approval wired through the workspace mutation flow
+- Exact crash resume for active multi-agent runs
+- Complete hierarchical tracing with token, timing, and context-slice metrics
 
 The core `LanguageModel` interface is provider-neutral. `OpenAIModel` and
 `OllamaModel` implement it independently. The TUI selects one from
@@ -130,15 +131,15 @@ follow-through stages such as mutation, reread, and build/verification. If the
 model returns text before those stages, it receives an internal continuation
 request instead of ending the run early.
 
-Language-specific services, LSP-backed indexing, structural retrieval, and image
-analysis are intentionally deferred.
+Project-wide language indexing, LSP-backed retrieval, and image analysis remain
+deferred. Per-input tree-sitter AST slicing exists in the Rust sidecar but is not
+yet a persistent semantic retrieval pipeline.
 
 ## Target Design Reference
 
-This section preserves the still-relevant target design that previously lived
-in a standalone `coreplan.md` at the repo root (deleted — it duplicated this
-file's package boundaries and was outside the `AGENTS.md` read chain). Treat
-it as the design to build toward, not a description of what exists today;
+This section preserves the still-relevant target design also described in the
+root `coreplan.md`. Treat both as designs to build toward, not descriptions of
+what exists today;
 current state lives in [CURRENT_IMPLEMENTATION.md](CURRENT_IMPLEMENTATION.md)
 and the phase-by-phase steps to get there live in
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).

@@ -339,7 +339,6 @@ class MyTarget {
 }
 "#;
         let pruned = prune_to_signatures(code, "ts");
-        let pruned = prune_to_signatures(code, "ts");
         assert!(pruned.contains("class MyTarget"));
         assert!(pruned.contains("constructor()  { ... }"));
         assert!(pruned.contains("do_something()  { ... }"));

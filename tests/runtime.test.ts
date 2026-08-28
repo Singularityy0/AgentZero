@@ -81,11 +81,18 @@ function echoTool(): Tool {
   };
 }
 
-test("ToolRegistry rejects duplicate names and lists definitions", () => {
-  const registry = new ToolRegistry().register(echoTool());
+test("ToolRegistry rejects duplicates and hides internal tools from model schemas", () => {
+  const registry = new ToolRegistry().register(echoTool()).registerHidden({
+    ...echoTool(),
+    name: "hidden_echo",
+  });
 
   assert.equal(registry.has("echo"), true);
-  assert.equal(registry.list()[0]?.name, "echo");
+  assert.equal(registry.has("hidden_echo"), true);
+  assert.deepEqual(
+    registry.list().map((tool) => tool.name),
+    ["echo"],
+  );
   assert.throws(() => registry.register(echoTool()), /already registered/);
 });
 
@@ -286,12 +293,20 @@ test("AgentRunner reports the tool step limit without throwing", async () => {
   assert.match(result.text, /1-step safety limit/);
 });
 
-test("AgentRunner stops a repeated identical tool call", async () => {
+test("AgentRunner skips a repeated identical tool call and lets the model finish", async () => {
+  let executions = 0;
   const call = { id: "call-4", name: "echo", arguments: { value: "repeat" } };
-  const registry = new ToolRegistry().register(echoTool());
+  const registry = new ToolRegistry().register({
+    ...echoTool(),
+    execute: async () => {
+      executions += 1;
+      return { output: "repeat" };
+    },
+  });
   const model = new FakeModel([
     assistantResponse("", [call]),
     assistantResponse("", [{ ...call, id: "call-5" }]),
+    assistantResponse("Used the earlier result without reading again."),
   ]);
 
   const result = await new AgentRunner(model, registry, {
@@ -299,8 +314,53 @@ test("AgentRunner stops a repeated identical tool call", async () => {
     requestApproval: async () => true,
   }).run([{ role: "user", content: "Repeat." }]);
 
-  assert.match(result.text, /same tool call again/);
-  assert.match(result.text, /repeat/);
+  assert.equal(executions, 1);
+  assert.equal(result.text, "Used the earlier result without reading again.");
+  assert.ok(
+    result.messages.some(
+      (message) =>
+        message.role === "tool" &&
+        message.content.includes("Duplicate echo call skipped"),
+    ),
+  );
+});
+
+test("AgentRunner detects alternating duplicate calls without duplicating large results", async () => {
+  let executions = 0;
+  const registry = new ToolRegistry().register({
+    ...echoTool(),
+    execute: async (arguments_) => {
+      executions += 1;
+      return { output: `${String(arguments_.value)}:${"x".repeat(3_000)}` };
+    },
+  });
+  const firstCalls = [
+    { id: "a-1", name: "echo", arguments: { value: "a" } },
+    { id: "b-1", name: "echo", arguments: { value: "b" } },
+  ];
+  const model = new FakeModel([
+    assistantResponse("", firstCalls),
+    assistantResponse(
+      "",
+      firstCalls.map((call) => ({ ...call, id: `${call.id}-duplicate` })),
+    ),
+    assistantResponse("Finished from the original results."),
+  ]);
+
+  const result = await new AgentRunner(model, registry, {
+    cwd: process.cwd(),
+    requestApproval: async () => true,
+  }).run([{ role: "user", content: "Inspect A and B once." }]);
+
+  assert.equal(executions, 2);
+  assert.equal(result.text, "Finished from the original results.");
+  const duplicateMessages = result.messages.filter(
+    (message) =>
+      message.role === "tool" &&
+      message.content.includes("Duplicate echo call skipped"),
+  );
+  assert.equal(duplicateMessages.length, 2);
+  assert.ok(duplicateMessages.every((message) => message.content.length < 300));
 });
 
 test("AgentRunner continues an interrupted edit and verification workflow", async () => {
@@ -310,7 +370,10 @@ test("AgentRunner continues an interrupted edit and verification workflow", asyn
       name,
       description: name,
       parameters: { type: "object", additionalProperties: true },
-      execute: async () => ({ output: `${name} completed` }),
+      execute: async () => ({
+        output: `${name} completed`,
+        changed: name === "apply_patch" ? true : undefined,
+      }),
     });
   }
   const model = new FakeModel([
@@ -524,6 +587,144 @@ test("MultiAgentOrchestrator hands work to a registered specialist", async () =>
   assert.ok(events.includes("handoff_completed:lead"));
 });
 
+test("MultiAgentOrchestrator enforces a global model-step budget across handoffs", async () => {
+  const agents = [
+    {
+      id: "lead",
+      name: "Lead",
+      description: "Coordinates work.",
+      systemPrompt: "Delegate once, then finish.",
+      capabilities: ["delegation"],
+      enabled: true,
+    },
+    {
+      id: "worker",
+      name: "Worker",
+      description: "Does focused work.",
+      systemPrompt: "Complete the task.",
+      capabilities: ["work"],
+      enabled: true,
+    },
+  ];
+  const models = new Map([
+    [
+      "lead",
+      new FakeModel([
+        assistantResponse("", [
+          {
+            id: "budget-handoff",
+            name: "handoff_agent",
+            arguments: { targetAgentId: "worker", task: "Do the work." },
+          },
+        ]),
+        assistantResponse("Lead finished."),
+      ]),
+    ],
+    ["worker", new FakeModel([assistantResponse("Worker finished.")])],
+  ]);
+  const runtime = new MultiAgentOrchestrator(
+    {
+      getAgent: (id) => agents.find((agent) => agent.id === id),
+      listAgents: () => agents,
+    },
+    (agent) => models.get(agent.id)!,
+    () => new ToolRegistry(),
+    {
+      cwd: process.cwd(),
+      maxModelSteps: 2,
+      requestApproval: async () => true,
+    },
+  );
+
+  await assert.rejects(
+    runtime.run("lead", "Complete the task."),
+    /global 2-model-step budget/,
+  );
+});
+
+test("MultiAgentOrchestrator rejects reworded handoff loops between the same pair", async () => {
+  const agents = [
+    {
+      id: "coder",
+      name: "Coder",
+      description: "Implements work.",
+      systemPrompt: "Ask the reviewer to verify.",
+      capabilities: ["coding"],
+      enabled: true,
+    },
+    {
+      id: "reviewer",
+      name: "Reviewer",
+      description: "Verifies work.",
+      systemPrompt: "Return a verification result.",
+      capabilities: ["review"],
+      enabled: true,
+    },
+  ];
+  const models = new Map([
+    [
+      "coder",
+      new FakeModel([
+        assistantResponse("", [
+          {
+            id: "review-1",
+            name: "handoff_agent",
+            arguments: { targetAgentId: "reviewer", task: "Review pass one." },
+          },
+        ]),
+        assistantResponse("", [
+          {
+            id: "review-2",
+            name: "handoff_agent",
+            arguments: { targetAgentId: "reviewer", task: "Review pass two." },
+          },
+        ]),
+        assistantResponse("", [
+          {
+            id: "review-3",
+            name: "handoff_agent",
+            arguments: {
+              targetAgentId: "reviewer",
+              task: "Review pass three.",
+            },
+          },
+        ]),
+        assistantResponse("Stopped retrying verification."),
+      ]),
+    ],
+    [
+      "reviewer",
+      new FakeModel([
+        assistantResponse("First review complete."),
+        assistantResponse("Second review complete."),
+      ]),
+    ],
+  ]);
+  const result = await new MultiAgentOrchestrator(
+    {
+      getAgent: (id) => agents.find((agent) => agent.id === id),
+      listAgents: () => agents,
+    },
+    (agent) => models.get(agent.id)!,
+    () => new ToolRegistry(),
+    {
+      cwd: process.cwd(),
+      maxHandoffsPerPair: 2,
+      requestApproval: async () => true,
+    },
+  ).run("coder", "Coordinate the review cycle.");
+
+  assert.equal(result.handoffs, 2);
+  assert.equal(result.text, "Stopped retrying verification.");
+  assert.ok(
+    result.messages?.some(
+      (message) =>
+        message.role === "tool" &&
+        message.content.includes("handoff limit has been reached"),
+    ),
+  );
+});
+
 test("MultiAgentOrchestrator proxies blocked tools to the configured delegate", async () => {
   const agents = [
     {
@@ -577,6 +778,7 @@ test("MultiAgentOrchestrator proxies blocked tools to the configured delegate", 
     execute: async () => ({ output: "File written." }),
   });
 
+  let generalToolCount: number | undefined;
   const result = await new MultiAgentOrchestrator(
     {
       getAgent: (id) => agents.find((agent) => agent.id === id),
@@ -589,9 +791,19 @@ test("MultiAgentOrchestrator proxies blocked tools to the configured delegate", 
       requestApproval: async () => {
         throw new Error("The delegation proxy should not request approval.");
       },
+      onEvent: (event) => {
+        if (
+          event.type === "agent_event" &&
+          event.agentId === "general" &&
+          event.agentEvent?.type === "model_request"
+        ) {
+          generalToolCount = event.agentEvent.toolCount;
+        }
+      },
     },
   ).run("general", "Create the file.");
 
+  assert.equal(generalToolCount, 1);
   assert.equal(result.status, "completed");
   assert.equal(result.handoffs, 1);
   assert.match(result.text, /coding agent completed/);
@@ -625,6 +837,28 @@ test("createIdeTools exposes the separate IDE tool catalog", () => {
       "format_code",
       "syntax_check",
     ],
+  );
+});
+
+test("optional tool arguments are not rejected by schema validation", () => {
+  const registry = new ToolRegistry();
+  for (const tool of createIdeTools()) registry.register(tool);
+
+  assert.deepEqual(
+    registry.validateArguments("search_text", { pattern: "AgentRunner" }),
+    [],
+  );
+  assert.deepEqual(
+    registry.validateArguments("browse_url", { url: "https://example.com" }),
+    [],
+  );
+  assert.deepEqual(
+    registry.validateArguments("crawl_site", { url: "https://example.com" }),
+    [],
+  );
+  assert.deepEqual(
+    registry.validateArguments("git_checkout", { branch: "feature/test" }),
+    [],
   );
 });
 

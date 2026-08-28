@@ -76,6 +76,8 @@ export interface MultiAgentOptions {
   >[2]["requestApproval"];
   maxDepth?: number;
   maxHandoffs?: number;
+  maxHandoffsPerPair?: number;
+  maxModelSteps?: number;
   maxDurationMs?: number;
   signal?: AbortSignal;
   onEvent?: (event: MultiAgentEvent) => void | Promise<void>;
@@ -84,13 +86,18 @@ export interface MultiAgentOptions {
 interface RunState {
   runId: string;
   handoffs: number;
+  modelSteps: number;
   startedAt: number;
   activeSignatures: Set<string>;
+  handoffPairCounts: Map<string, number>;
 }
 
 export class MultiAgentOrchestrator {
   private readonly maxDepth: number;
   private readonly maxHandoffs: number;
+  private readonly maxHandoffsPerPair: number;
+  private readonly maxModelSteps: number;
+  private readonly maxDurationMs: number;
 
   constructor(
     private readonly registry: AgentRegistry,
@@ -99,10 +106,19 @@ export class MultiAgentOrchestrator {
     private readonly options: MultiAgentOptions,
   ) {
     this.maxDepth = options.maxDepth ?? 6;
-    this.maxHandoffs = options.maxHandoffs ?? 20;
+    this.maxHandoffs = options.maxHandoffs ?? 8;
+    this.maxHandoffsPerPair = options.maxHandoffsPerPair ?? 2;
+    this.maxModelSteps = options.maxModelSteps ?? 36;
+    this.maxDurationMs = options.maxDurationMs ?? 15 * 60_000;
     if (this.maxDepth < 0) throw new Error("maxDepth cannot be negative.");
     if (this.maxHandoffs < 1)
       throw new Error("maxHandoffs must be at least 1.");
+    if (this.maxHandoffsPerPair < 1)
+      throw new Error("maxHandoffsPerPair must be at least 1.");
+    if (this.maxModelSteps < 1)
+      throw new Error("maxModelSteps must be at least 1.");
+    if (this.maxDurationMs < 1)
+      throw new Error("maxDurationMs must be at least 1.");
   }
 
   async run(
@@ -115,8 +131,10 @@ export class MultiAgentOrchestrator {
     const state: RunState = {
       runId: randomUUID(),
       handoffs: 0,
+      modelSteps: 0,
       startedAt: Date.now(),
       activeSignatures: new Set(),
+      handoffPairCounts: new Map(),
     };
     return this.runAgent(state, agentId, task, context, undefined, 0, history);
   }
@@ -184,6 +202,7 @@ export class MultiAgentOrchestrator {
       maxSteps: agent.maxSteps,
       requestApproval: this.options.requestApproval,
       signal: this.options.signal,
+      beforeModelRequest: () => this.consumeModelStep(state),
       onEvent: async (event) => {
         await this.options.onEvent?.({
           type: "agent_event",
@@ -235,7 +254,7 @@ export class MultiAgentOrchestrator {
       ) {
         scoped.register(tool);
       } else if (agent.delegatesTo) {
-        scoped.register(
+        scoped.registerHidden(
           this.createDelegationProxy(
             tool,
             state,
@@ -333,12 +352,22 @@ export class MultiAgentOrchestrator {
     handoff: AgentHandoff,
   ): Promise<MultiAgentResult> {
     const signature = `${parentAgentId}:${handoff.targetAgentId}:${handoff.task}`;
+    const pair = `${parentAgentId}:${handoff.targetAgentId}`;
+    const pairCount = state.handoffPairCounts.get(pair) ?? 0;
     if (state.handoffs >= this.maxHandoffs) {
       return this.failedResult(
         state,
         handoff.targetAgentId,
         parentDepth + 1,
         "The maximum handoff budget has been reached.",
+      );
+    }
+    if (pairCount >= this.maxHandoffsPerPair) {
+      return this.failedResult(
+        state,
+        handoff.targetAgentId,
+        parentDepth + 1,
+        `The ${parentAgentId} -> ${handoff.targetAgentId} handoff limit has been reached. Do not retry verification with reworded tasks.`,
       );
     }
     if (state.activeSignatures.has(signature)) {
@@ -351,6 +380,7 @@ export class MultiAgentOrchestrator {
     }
 
     state.handoffs += 1;
+    state.handoffPairCounts.set(pair, pairCount + 1);
     state.activeSignatures.add(signature);
     await this.emit({
       type: "handoff_requested",
@@ -403,19 +433,32 @@ export class MultiAgentOrchestrator {
     return { output: reason, isError: true };
   }
 
+  private consumeModelStep(state: RunState): void {
+    this.checkRunBudget(state);
+    if (state.modelSteps >= this.maxModelSteps) {
+      throw new Error(
+        `Multi-agent run exceeded its global ${this.maxModelSteps}-model-step budget.`,
+      );
+    }
+    state.modelSteps += 1;
+  }
+
   private checkLimits(state: RunState, depth: number): void {
-    if (this.options.signal?.aborted)
-      throw new Error("Multi-agent run cancelled.");
+    this.checkRunBudget(state);
     if (depth > this.maxDepth) {
       throw new Error(
         `Maximum agent handoff depth (${this.maxDepth}) exceeded.`,
       );
     }
-    if (
-      this.options.maxDurationMs !== undefined &&
-      Date.now() - state.startedAt >= this.options.maxDurationMs
-    ) {
-      throw new Error("Multi-agent run exceeded its time budget.");
+  }
+
+  private checkRunBudget(state: RunState): void {
+    if (this.options.signal?.aborted)
+      throw new Error("Multi-agent run cancelled.");
+    if (Date.now() - state.startedAt >= this.maxDurationMs) {
+      throw new Error(
+        `Multi-agent run exceeded its ${this.maxDurationMs}-millisecond time budget.`,
+      );
     }
   }
 

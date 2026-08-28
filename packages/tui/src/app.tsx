@@ -32,6 +32,7 @@ import { initialTuiState, reduceTuiState, type TuiState } from "./ui-state.js";
 const DEFAULT_AGENT_ID = "general";
 const CODING_AGENT_ID = "coding-agent";
 const REVIEWER_AGENT_ID = "reviewer";
+const TUI_MAX_MODEL_STEPS = 32;
 const RESERVED_AGENT_IDS = new Set([
   DEFAULT_AGENT_ID,
   CODING_AGENT_ID,
@@ -91,6 +92,7 @@ export function App({
   const approvalResolver = useRef<((approved: boolean) => void) | undefined>(
     undefined,
   );
+  const activeTaskId = useRef<string | undefined>(undefined);
   const running =
     state.status === "thinking" ||
     state.status === "tool" ||
@@ -102,25 +104,44 @@ export function App({
   approvalHandler.current = (call, preview) =>
     new Promise((resolve) => {
       approvalResolver.current = resolve;
+      runtimeContext.store.appendEvent({
+        sessionId: runtimeContext.session.id,
+        taskId: activeTaskId.current,
+        type: "approval_requested",
+        payload: { call, preview },
+      });
       dispatch({ type: "approval_requested", call, preview });
     });
   eventHandler.current = (event) => {
     if (event.type === "agent_event" && event.agentEvent) {
       if (event.agentEvent.type === "context_compacted") {
-         runtimeContext.store.addContextItem({
-           source: "summary",
-           content: event.agentEvent.summary,
-           priority: "critical",
-           pinned: false,
-           tokenEstimate: Math.ceil(event.agentEvent.summary.length / 4),
-         });
+        runtimeContext.store.addContextItem({
+          taskId: activeTaskId.current,
+          source: "summary",
+          content: event.agentEvent.summary,
+          priority: "critical",
+          pinned: false,
+          tokenEstimate: Math.ceil(event.agentEvent.summary.length / 4),
+        });
       }
+      runtimeContext.store.appendEvent({
+        sessionId: runtimeContext.session.id,
+        taskId: activeTaskId.current,
+        type: event.agentEvent.type,
+        payload: { agentId: event.agentId, event: event.agentEvent },
+      });
       dispatch({
         type: "agent_event",
         agentId: event.agentId,
         event: event.agentEvent,
       });
     } else {
+      runtimeContext.store.appendEvent({
+        sessionId: runtimeContext.session.id,
+        taskId: activeTaskId.current,
+        type: event.type,
+        payload: { event },
+      });
       dispatch({ type: "multi_agent_event", event });
     }
   };
@@ -142,6 +163,12 @@ export function App({
         const approved = value.toLowerCase() === "y";
         approvalResolver.current?.(approved);
         approvalResolver.current = undefined;
+        runtimeContext.store.appendEvent({
+          sessionId: runtimeContext.session.id,
+          taskId: activeTaskId.current,
+          type: "approval_resolved",
+          payload: { approved },
+        });
         dispatch({ type: "approval_resolved", approved });
       }
     },
@@ -248,17 +275,26 @@ export function App({
       runtimeContext.session.id,
       prompt,
     );
+    activeTaskId.current = task.id;
+    runtimeContext.store.updateSession(runtimeContext.session.id, {
+      status: "running",
+    });
     runtimeContext.store.updateTask(task.id, {
       status: "running",
       currentStage: "agent",
     });
-    const agent = runtimeContext.store.getAgent(activeAgentId);
+    runtimeContext.store.appendEvent({
+      sessionId: runtimeContext.session.id,
+      taskId: task.id,
+      type: "task_started",
+      payload: { prompt, agentId: activeAgentId },
+    });
     dispatch({
       type: "task_started",
       taskId: task.id,
       sessionId: runtimeContext.session.id,
       agentId: activeAgentId,
-      maxSteps: agent?.maxSteps ?? 24,
+      maxSteps: TUI_MAX_MODEL_STEPS,
     });
     const history = messages.filter((message) => message.role !== "system");
     try {
@@ -269,24 +305,65 @@ export function App({
         contextString,
         history,
       );
-      setMessages(
-        result.messages ?? [
-          ...history,
-          { role: "assistant", content: result.text },
-        ],
-      );
+      const nextMessages = result.messages ?? [
+        ...history,
+        { role: "user" as const, content: prompt },
+        { role: "assistant" as const, content: result.text },
+      ];
+      setMessages(nextMessages);
       runtimeContext.store.saveMessages(
         runtimeContext.session.id,
-        result.messages ?? [],
+        nextMessages,
       );
       if (result.status === "completed") {
+        runtimeContext.store.updateTask(task.id, {
+          status: "completed",
+          currentStage: "completed",
+          state: { ...task.state, result: result.text },
+        });
+        runtimeContext.store.appendEvent({
+          sessionId: runtimeContext.session.id,
+          taskId: task.id,
+          type: "task_completed",
+          payload: { text: result.text },
+        });
         dispatch({ type: "task_completed", text: result.text });
       } else {
+        runtimeContext.store.updateTask(task.id, {
+          status: "failed",
+          currentStage: "failed",
+          state: { ...task.state, errors: [result.text] },
+        });
+        runtimeContext.store.appendEvent({
+          sessionId: runtimeContext.session.id,
+          taskId: task.id,
+          type: "task_failed",
+          payload: { error: result.text },
+        });
         dispatch({ type: "task_failed", error: result.text });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      runtimeContext.store.updateTask(task.id, {
+        status: "failed",
+        currentStage: "failed",
+        state: { ...task.state, errors: [message] },
+      });
+      runtimeContext.store.updateSession(runtimeContext.session.id, {
+        status: "idle",
+      });
+      runtimeContext.store.appendEvent({
+        sessionId: runtimeContext.session.id,
+        taskId: task.id,
+        type: "task_failed",
+        payload: { error: message },
+      });
       dispatch({ type: "task_failed", error: message });
+    } finally {
+      runtimeContext.store.updateSession(runtimeContext.session.id, {
+        status: "idle",
+      });
+      activeTaskId.current = undefined;
     }
   };
 
@@ -643,7 +720,15 @@ Constraints
 - Never mutate files directly unless you are fixing a failure you just verified yourself, and even then keep the fix minimal and re-verify it.
 - Be precise about what was checked; do not claim a check passed unless a tool actually ran it.`,
     capabilities: ["verification", "review"],
-    allowedTools: ["read_file", "find_files", "list_directory", "run_command", "compile_code", "git_diff", "syntax_check"],
+    allowedTools: [
+      "read_file",
+      "find_files",
+      "list_directory",
+      "run_command",
+      "compile_code",
+      "git_diff",
+      "syntax_check",
+    ],
     delegatesTo: CODING_AGENT_ID,
     maxSteps: 24,
     enabled: true,
@@ -664,6 +749,11 @@ Constraints
     {
       cwd: store.project.rootPath,
       requestApproval: approval,
+      maxDepth: 4,
+      maxHandoffs: 8,
+      maxHandoffsPerPair: 2,
+      maxModelSteps: TUI_MAX_MODEL_STEPS,
+      maxDurationMs: 10 * 60_000,
       onEvent,
     },
   );

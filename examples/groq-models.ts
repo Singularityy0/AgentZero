@@ -1,7 +1,7 @@
 import {
   createDefaultProviderGateway,
   EnvironmentCredentialResolver,
-} from "@agentic-runtime/gateway";
+} from "../packages/gateway/dist/index.js";
 
 /**
  * Groq's free-tier catalog rotates without notice - models used in this

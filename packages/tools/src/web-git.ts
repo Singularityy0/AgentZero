@@ -60,10 +60,13 @@ export function createGitTools(): Tool[] {
     createGitMutationTool(
       "git_checkout",
       "Switch to an existing branch or create a new branch.",
-      objectSchema({
-        branch: { type: "string", minLength: 1 },
-        create: { type: "boolean" },
-      }),
+      objectSchema(
+        {
+          branch: { type: "string", minLength: 1 },
+          create: { type: "boolean" },
+        },
+        ["branch"],
+      ),
       async (git, arguments_) => {
         const branch = requireString(arguments_, "branch");
         if (arguments_.create === true) await git.checkoutLocalBranch(branch);
@@ -93,10 +96,13 @@ function createBrowseUrlTool(): Tool {
     description:
       "Fetch an HTTP(S) URL and extract readable article text without executing page scripts.",
     approval: "ask",
-    parameters: objectSchema({
-      url: { type: "string", minLength: 1 },
-      maxCharacters: { type: "integer", minimum: 500, maximum: 50_000 },
-    }),
+    parameters: objectSchema(
+      {
+        url: { type: "string", minLength: 1 },
+        maxCharacters: { type: "integer", minimum: 500, maximum: 50_000 },
+      },
+      ["url"],
+    ),
     execute: async (arguments_, context) => {
       const url = requireUrl(arguments_, "url");
       const maxCharacters = optionalInteger(
@@ -134,15 +140,18 @@ function createCrawlSiteTool(): Tool {
     description:
       "Crawl a bounded set of same-domain pages and return titles and text excerpts.",
     approval: "ask",
-    parameters: objectSchema({
-      url: { type: "string", minLength: 1 },
-      maxPages: { type: "integer", minimum: 1, maximum: 25 },
-      maxCharactersPerPage: {
-        type: "integer",
-        minimum: 500,
-        maximum: 10_000,
+    parameters: objectSchema(
+      {
+        url: { type: "string", minLength: 1 },
+        maxPages: { type: "integer", minimum: 1, maximum: 25 },
+        maxCharactersPerPage: {
+          type: "integer",
+          minimum: 500,
+          maximum: 10_000,
+        },
       },
-    }),
+      ["url"],
+    ),
     execute: async (arguments_, context) => {
       const startUrl = requireUrl(arguments_, "url");
       const maxPages = optionalInteger(arguments_, "maxPages", 10, 25);
@@ -384,11 +393,12 @@ function requireString(
 
 function objectSchema(
   properties: Record<string, unknown>,
+  required = Object.keys(properties),
 ): Record<string, unknown> {
   return {
     type: "object",
     properties,
-    required: Object.keys(properties),
+    required,
     additionalProperties: false,
   };
 }

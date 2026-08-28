@@ -1,4 +1,4 @@
-import { RustClient } from './rust-bridge.js';
+import { RustClient } from "./rust-bridge.js";
 
 async function main() {
   const client = new RustClient();

@@ -1,3 +1,5 @@
+import { extname } from "node:path";
+
 import type { ConversationMessage, ToolCall, ToolMessage } from "./messages.js";
 import type { AgentEvent } from "./events.js";
 import type { LanguageModel } from "./model.js";
@@ -14,6 +16,7 @@ export interface AgentRunnerOptions {
   maxSteps?: number;
   requestApproval: (call: ToolCall, preview?: string) => Promise<boolean>;
   signal?: AbortSignal;
+  beforeModelRequest?: () => void;
   onEvent?: (event: AgentEvent) => void | Promise<void>;
 }
 
@@ -34,16 +37,18 @@ export class AgentRunner {
   }
 
   async run(messages: ConversationMessage[]): Promise<AgentRunResult> {
-    let previousSignature: string | undefined;
-    let previousResult: ToolResult | undefined;
+    const cachedToolResults = new Map<string, CachedToolResult>();
     const executedToolNames: string[] = [];
+    let workspaceRevision = 0;
+    let duplicateCallCount = 0;
     let hadNoOpMutation = false;
     let lastResponseText = "";
     const workflow = createWorkflowState(messages);
 
     for (let step = 0; step < this.maxSteps; step += 1) {
       await this.compactContextIfNecessary(messages);
-      
+
+      this.options.beforeModelRequest?.();
       await this.emit({
         type: "model_request",
         messageCount: messages.length,
@@ -75,12 +80,24 @@ export class AgentRunner {
         executedToolNames.push(call.name);
         await this.emit({ type: "tool_requested", call });
         const signature = JSON.stringify([call.name, call.arguments]);
-        if (signature === previousSignature && previousResult) {
-          const text =
-            "The model requested the same tool call again. The previous result was:\n" +
-            previousResult.output;
-          messages.push({ role: "assistant", content: text });
-          return { text, messages };
+        const cached = cachedToolResults.get(signature);
+        if (cached?.workspaceRevision === workspaceRevision) {
+          duplicateCallCount += 1;
+          const result: ToolResult = {
+            output:
+              `Duplicate ${call.name} call skipped because the workspace has not changed. ` +
+              "Use the earlier tool result already present in the conversation and continue the task without calling it again.",
+          };
+          await this.emit({ type: "tool_completed", call, result });
+          messages.push(this.toToolMessage(call, result));
+          if (duplicateCallCount >= 4) {
+            const text =
+              "The model repeatedly requested cached tool calls without making progress. " +
+              "The run was stopped before it could loop or exceed the provider token limit.";
+            await this.emit({ type: "agent_safety_limit", text });
+            return { text, messages };
+          }
+          continue;
         }
 
         const result = await this.executeTool(call);
@@ -92,8 +109,8 @@ export class AgentRunner {
         ) {
           hadNoOpMutation = true;
         }
-        previousSignature = signature;
-        previousResult = result;
+        if (result.changed === true) workspaceRevision += 1;
+        cachedToolResults.set(signature, { result, workspaceRevision });
         await this.emit({ type: "tool_completed", call, result });
         messages.push(this.toToolMessage(call, result));
       }
@@ -106,64 +123,83 @@ export class AgentRunner {
     return { text, messages };
   }
 
-  private async compactContextIfNecessary(messages: ConversationMessage[]): Promise<void> {
-    const THRESHOLD = 20000;
-    const totalLength = () => messages.reduce((sum, msg) => sum + (msg.content?.length ?? 0), 0);
-    
-    if (totalLength() <= THRESHOLD) return;
+  private async compactContextIfNecessary(
+    messages: ConversationMessage[],
+  ): Promise<void> {
+    const threshold = 20_000;
+    const totalLength = () =>
+      messages.reduce((sum, message) => sum + message.content.length, 0);
 
-    // 1. Semantic Pruning of read_file
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      if (msg.role === 'tool' && msg.toolName === 'read_file' && typeof msg.content === 'string') {
-        if (!msg.content.includes('[Content compacted for token efficiency.')) {
-           const extMatch = msg.content.match(/\.([a-zA-Z0-9]+)/);
-           const ext = extMatch ? extMatch[1] : "ts";
-           
-           try {
-             rustClient.start();
-             const pruned = await rustClient.pruneAst(msg.content, ext);
-             messages[i] = {
-               ...msg,
-               content: `[Content compacted for token efficiency. Showing signatures only.]\n${pruned}`
-             };
-           } catch (e) {
-             // ignore
-           }
-        }
+    if (totalLength() <= threshold) return;
+
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
+      if (
+        message?.role !== "tool" ||
+        message.toolName !== "read_file" ||
+        message.content.includes("[Content compacted for token efficiency.")
+      ) {
+        continue;
+      }
+
+      const file = parseReadFilePayload(message.content);
+      if (!file) continue;
+
+      const extension = extname(file.path).slice(1).toLowerCase() || "ts";
+      try {
+        rustClient.start();
+        const pruned = await rustClient.pruneAst(file.content, extension);
+        messages[index] = {
+          ...message,
+          content: JSON.stringify({
+            ...file,
+            content: `[Content compacted for token efficiency. Showing signatures only.]\n${pruned}`,
+          }),
+        };
+      } catch {
+        // The model-backed compaction below remains available without Rust.
       }
     }
 
-    if (totalLength() <= THRESHOLD) return;
+    if (totalLength() <= threshold) return;
 
-    // 2. Session Summarization
-    const systemPrompts = messages.filter(m => m.role === 'system');
-    const conversation = messages.filter(m => m.role !== 'system');
-    
-    if (conversation.length > 4) {
-      const splitIndex = Math.floor(conversation.length / 2);
-      const toSummarize = conversation.slice(0, splitIndex);
-      const toKeep = conversation.slice(splitIndex);
+    const systemPrompts = messages.filter(
+      (message) => message.role === "system",
+    );
+    const conversation = messages.filter(
+      (message) => message.role !== "system",
+    );
 
-      const summaryRequest: ConversationMessage[] = [
-        { role: 'system', content: 'You are an AI context summarizer. Summarize the following technical analysis, decisions made, and what was done in these messages so that a future session can continue seamlessly. Be concise but do not lose important architectural or codebase insights.' },
-        ...toSummarize
-      ];
+    if (conversation.length <= 4) return;
 
-      try {
-        const response = await this.model.respond({ messages: summaryRequest, tools: [] });
-        const summaryMsg: ConversationMessage = {
-          role: 'system',
-          content: `[Session Summary of earlier context]:\n${response.text}`
-        };
-        
-        await this.emit({ type: 'context_compacted', summary: response.text });
+    const splitIndex = Math.floor(conversation.length / 2);
+    const toSummarize = conversation.slice(0, splitIndex);
+    const toKeep = conversation.slice(splitIndex);
+    const summaryRequest: ConversationMessage[] = [
+      {
+        role: "system",
+        content:
+          "Summarize the technical analysis, decisions, completed work, failures, and remaining work in these messages so another model can continue. Preserve concrete file paths, constraints, and verification results. Be concise.",
+      },
+      ...toSummarize,
+    ];
 
-        messages.length = 0;
-        messages.push(...systemPrompts, summaryMsg, ...toKeep);
-      } catch (e) {
-        // Fallback: proceed without summary
-      }
+    try {
+      this.options.beforeModelRequest?.();
+      const response = await this.model.respond({
+        messages: summaryRequest,
+        tools: [],
+      });
+      const summaryMessage: ConversationMessage = {
+        role: "system",
+        content: `[Session summary of earlier context]\n${response.text}`,
+      };
+
+      await this.emit({ type: "context_compacted", summary: response.text });
+      messages.length = 0;
+      messages.push(...systemPrompts, summaryMessage, ...toKeep);
+    } catch {
+      // Keep the original context when compaction cannot complete safely.
     }
   }
 
@@ -244,6 +280,35 @@ export class AgentRunner {
       toolName: call.name,
       content: `${result.output}${suffix}`,
     };
+  }
+}
+
+interface CachedToolResult {
+  result: ToolResult;
+  workspaceRevision: number;
+}
+
+interface ReadFilePayload extends Record<string, unknown> {
+  path: string;
+  content: string;
+}
+
+function parseReadFilePayload(content: string): ReadFilePayload | undefined {
+  try {
+    const value: unknown = JSON.parse(content);
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("path" in value) ||
+      typeof value.path !== "string" ||
+      !("content" in value) ||
+      typeof value.content !== "string"
+    ) {
+      return undefined;
+    }
+    return value as ReadFilePayload;
+  } catch {
+    return undefined;
   }
 }
 

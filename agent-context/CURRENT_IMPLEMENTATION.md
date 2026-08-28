@@ -290,10 +290,14 @@ The most important remaining gaps against the problem statement are:
 - Parallel orchestration for independent tasks.
 - Complexity-, context-, cost-, and rate-limit-aware provider routing.
 - Provider failover with progress preservation.
-- Automatic context compaction.
+- Production-grade context compaction tied to model token budgets and persisted
+  structured task state. A fixed-character-threshold prototype currently prunes
+  `read_file` payloads through Rust and summarizes older messages.
 - Structural code indexing and semantic retrieval.
 - Full resumable multi-agent execution after crashes.
-- Block-level diff review.
+- Block-level diff review wired to approvals. The Rust engine now emits minimal
+  line-based replacement hunks and can apply selected hunks, but the approval
+  contract still accepts or rejects a whole tool call.
 - Git merge tooling.
 - Full observability dashboard with per-agent token and timing metrics.
 - A write/save path from the GUI editor (currently read-only by design — see

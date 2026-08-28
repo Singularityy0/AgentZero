@@ -5,8 +5,8 @@
 - Project: `agentic-runtime`
 - Purpose: build an agentic AI runtime and coding IDE architecture fully in
   TypeScript
-- Current phase: workspace setup only
-- Repository root: `D:\MediaServer\MEDIA\porno`
+- Current phase: core stabilization and hybrid architecture integration
+- Repository root: `C:\Users\anany\azero`
 
 ## Toolchain
 
@@ -30,20 +30,20 @@ packages/session/src/    SQLite global/project/session persistence
 packages/gateway/src/    Provider registry, routing, credential resolution
 packages/gui/src/        Browser-based settings/chat/diff/dashboard UI (Vite)
 packages/gui-server/src/ Local node:http bridge: settings API + static GUI host
-examples/                Placeholder for runnable examples
+rust/src/                Rust sidecar for AST slicing, diff hunks, and state primitives
+examples/                Runnable provider examples
 agent-context/           Persistent context for coding agents
 ```
 
-## Decision: no Tauri, no Rust, anywhere
+## Decision: hybrid core, no Tauri dependency
 
-`packages/gui` originally scaffolded a Tauri desktop shell
-(`packages/gui/src-tauri`, a full Rust crate with compiled build artifacts).
-That directory has been removed. The GUI is a plain TypeScript/Vite
-browser app; when it needs to read/write local state (provider credentials,
-settings) it talks over HTTP to `packages/gui-server`, a small Node process
-using only `node:http` - no Electron, no Tauri, no native bindings anywhere
-in this repo. If you find Rust code, a `src-tauri` directory, or a `rust/`
-package reappear, that's drift from this decision, not an update to it.
+`packages/gui/src-tauri` was removed. The current UI is a TypeScript/Vite
+browser app backed by `packages/gui-server`, but the core architecture retains
+a separate Rust process under `rust/` for performance-sensitive AST slicing,
+diff hunk generation, and future state/index primitives. TypeScript remains the
+orchestration and package-boundary layer. `pnpm build` compiles the Rust sidecar
+before the TypeScript workspace so a clean build produces the binary expected
+by `RustClient`.
 
 ## Commands
 
@@ -60,11 +60,13 @@ pnpm format
 pnpm format:check
 ```
 
-Build artifacts are emitted to `packages/core/dist/` and are ignored by git.
+Build artifacts are emitted under package `dist/` directories and
+`rust/target/`; they are ignored by git.
 
 ## Current Status
 
-- The workspace installs successfully with pnpm.
+- The workspace installs successfully with pnpm; building the hybrid core also
+  requires a working Rust/Cargo toolchain.
 - `@agentic-runtime/core`, `@agentic-runtime/openai`, and
   `@agentic-runtime/ollama`, `@agentic-runtime/command`,
   `@agentic-runtime/search`, `@agentic-runtime/tools`,
