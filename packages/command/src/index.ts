@@ -5,7 +5,7 @@ import type {
   ToolResult,
 } from "@agentic-runtime/core";
 
-export type CommandShell = "auto" | "cmd" | "posix";
+export type CommandShell = "auto" | "cmd" | "powershell" | "posix";
 
 export interface CommandToolOptions {
   shell?: CommandShell;
@@ -92,6 +92,19 @@ function resolveShell(options: CommandToolOptions): ResolvedShell {
     return {
       executable: options.executable ?? process.env.COMSPEC ?? "cmd.exe",
       args: (command) => ["/d", "/s", "/c", command],
+    };
+  }
+
+  if (resolvedShell === "powershell") {
+    return {
+      executable: options.executable ?? "powershell.exe",
+      args: (command) => [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        command,
+      ],
     };
   }
 

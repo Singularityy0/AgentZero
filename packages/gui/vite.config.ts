@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 // https://vite.dev/config/
 export default defineConfig({
+  plugins: [react()],
   // Vite options for the GUI development server.
   clearScreen: false,
   server: {

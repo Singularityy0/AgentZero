@@ -139,8 +139,11 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [~] Context artifact contracts exist, but tool-message propagation is incomplete.
 - [~] Provider timing, route, and available cost are recorded where supplied;
   per-model usage is incomplete in the hierarchy.
-- [ ] Live IDE dashboard rendering.
-- [~] Partial historical trace inspection is available by API.
+- [~] The React IDE renders persisted task traces as a drill-down hierarchy
+  with recorded input, output, context, usage, provider/model, cost, and timing
+  fields. Live streaming remains pending on the browser runtime transport.
+- [x] Historical trace inspection is available through the GUI server API and
+      the Observability workbench.
 
 ## Deliverables
 
@@ -174,6 +177,7 @@ model/hosting constraints - is mostly done):
 5. Enforce task cost, parameter verification, and local-hardware constraints.
 6. Add task discovery and resume to clients.
 7. Add the IDE runtime transport and connect the browser workbench.
-8. Build the observability dashboard from corrected traces.
+8. Connect live runtime events/approvals to the browser and make the existing
+   historical observability dashboard update while tasks are running.
 9. Verify cross-platform builds and prepare submission materials.
 10. Add the thin Tauri packaging layer last.

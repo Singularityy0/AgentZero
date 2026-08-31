@@ -31,6 +31,7 @@ import {
   createTaskCheckpointStore,
   SessionStore,
   type ContextItem,
+  type SessionEvent,
   type SessionRecord,
   type TaskRecord,
   type TraceSpanRecord,
@@ -61,6 +62,7 @@ import {
 } from "./types.js";
 import {
   CODING_AGENT_ID,
+  CONVERSATION_AGENT_ID,
   DEFAULT_AGENT_ID,
   REVIEWER_AGENT_ID,
   VERIFIER_AGENT_ID,
@@ -600,8 +602,15 @@ export class HeadlessRuntimeService {
         task.id,
         this.limits.contextCharacterBudget,
       );
+      const standaloneCodeAnswer = shouldAnswerWithCode(task.prompt);
       const verificationOnly = shouldUseVerificationOnly(agentId, task.prompt);
-      const result = verificationOnly
+      const conversationOnly = shouldUseConversationAgent(agentId, task.prompt);
+      const directAgentId =
+        (conversationOnly || standaloneCodeAnswer) &&
+        this.store.getAgent(CONVERSATION_AGENT_ID)
+          ? CONVERSATION_AGENT_ID
+          : agentId;
+      const result: MultiAgentResult = verificationOnly
         ? await this.executeAgent(
             session.id,
             task.id,
@@ -614,23 +623,29 @@ export class HeadlessRuntimeService {
             undefined,
             false,
           )
-        : this.retrieval && shouldUsePipeline(agentId, task.prompt)
+        : this.retrieval &&
+            !standaloneCodeAnswer &&
+            shouldUsePipeline(agentId, task.prompt)
           ? await this.executePipeline(session, task, context, history, signal)
           : await this.executeAgent(
               session.id,
               task.id,
-              agentId,
+              directAgentId,
               task.prompt,
-              context,
+              conversationOnly ? "" : context,
               history,
               signal,
-              true,
+              !conversationOnly && !standaloneCodeAnswer,
             );
       runId = result.runId;
+      const thinking = taskThinkingSummary(
+        this.store.listEvents(session.id),
+        task.id,
+      );
       const messages =
         result.status === "paused"
           ? [...history]
-          : transcriptMessages(result.messages, history, task, result.text);
+          : transcriptMessages(history, task, result.text, thinking);
       this.store.saveMessages(session.id, messages);
 
       const runtimeResult: RuntimeTaskResult = {
@@ -870,7 +885,7 @@ export class HeadlessRuntimeService {
           role: "planner",
           title: "Plan",
           prompt:
-            "Create a small, testable implementation plan for the objective.",
+            "Create a small, testable implementation plan. Extract every explicit user requirement into an acceptance checklist; do not weaken, replace, or omit requested behavior. For a new self-contained artifact, do not invent downloads, libraries, models, or assets when native HTML/CSS/JavaScript can satisfy the request.",
         },
         {
           id: "retrieve",
@@ -883,7 +898,8 @@ export class HeadlessRuntimeService {
           id: "code",
           role: "coder",
           title: "Implement",
-          prompt: "Implement the plan using the retrieved evidence.",
+          prompt:
+            "Implement the plan using the retrieved evidence. Satisfy every acceptance item exactly; never substitute an easier artifact or explain what could be built instead of creating it. After mutation, re-read every changed file and compare its actual contents with the original acceptance checklist.",
           dependsOn: ["retrieve"],
         },
         {
@@ -899,7 +915,7 @@ export class HeadlessRuntimeService {
           role: "reviewer",
           title: "Review",
           prompt:
-            "Review the plan, evidence, implementation, diff, and verification result.",
+            "Review the plan, evidence, implementation, diff, and verification result against every explicit requirement in the original objective. Reject downgraded or missing behavior.",
           dependsOn: ["verify"],
         },
       ],
@@ -949,14 +965,32 @@ export class HeadlessRuntimeService {
           consumeModelRequest,
           enforceWorkflowCompletion,
         );
+        const completedMutation = (result.messages ?? []).some(
+          (message) =>
+            message.role === "tool" &&
+            typeof message.toolName === "string" &&
+            [
+              "apply_patch",
+              "write_file",
+              "create_file",
+              "delete_file",
+              "run_command",
+            ].includes(message.toolName),
+        );
+        const success =
+          result.status === "completed" &&
+          (!enforceWorkflowCompletion || completedMutation);
+        const summary =
+          enforceWorkflowCompletion && !completedMutation
+            ? "The coding model did not call a workspace mutation tool. No files were changed."
+            : result.text;
         return {
-          success: result.status === "completed",
-          summary: result.text,
-          output: result.text,
-          progressKey:
-            result.status === "failed"
-              ? `${agentId}:${normalizeFailure(result.text)}`
-              : undefined,
+          success,
+          summary,
+          output: summary,
+          progressKey: !success
+            ? `${agentId}:${normalizeFailure(summary)}`
+            : undefined,
           passed:
             request.step.role === "verifier"
               ? /(?:^|\n)VERIFICATION_PASSED\s*$/u.test(result.text.trim())
@@ -968,6 +1002,16 @@ export class HeadlessRuntimeService {
       retriever: async (
         request: AgentWorkRequest,
       ): Promise<AgentWorkResult> => {
+        if (isGreenfieldArtifactRequest(request.objective)) {
+          const summary =
+            "Greenfield artifact: no existing project code is required. Create the requested file at a clear workspace-relative path using a self-contained implementation and the original acceptance criteria.";
+          return {
+            success: true,
+            summary,
+            output: summary,
+            progressKey: "retrieval:greenfield-artifact",
+          };
+        }
         const plannerOutput = request.previousResults.at(-1)?.summary ?? "";
         const retrieval = await this.retrieval!.query({
           query: `${request.objective}\n${plannerOutput}`,
@@ -1624,21 +1668,124 @@ export class HeadlessRuntimeService {
 }
 
 function transcriptMessages(
-  resultMessages: ConversationMessage[] | undefined,
   history: readonly ConversationMessage[],
   task: TaskRecord,
   text: string,
+  thinking: string[],
 ): ConversationMessage[] {
-  const messages = resultMessages ?? [
-    ...history,
+  return [
+    ...history.filter(isConversationTranscriptMessage),
     { role: "user" as const, content: task.prompt },
-    { role: "assistant" as const, content: text },
+    {
+      role: "assistant" as const,
+      content: text,
+      metadata: {
+        taskId: task.id,
+        ...(thinking.length > 0 ? { thinking } : {}),
+      },
+    },
   ];
-  return messages.filter(isSessionHistoryMessage);
 }
 
 function isSessionHistoryMessage(message: ConversationMessage): boolean {
   return message.role !== "system" || message.kind === "compaction";
+}
+
+function isConversationTranscriptMessage(
+  message: ConversationMessage,
+): boolean {
+  return (
+    message.role === "user" ||
+    message.role === "assistant" ||
+    (message.role === "system" && message.kind === "compaction")
+  );
+}
+
+function taskThinkingSummary(
+  events: readonly SessionEvent[],
+  taskId: string,
+): string[] {
+  const summary: string[] = [];
+  const append = (value: string | undefined): void => {
+    if (!value || summary.includes(value) || summary.length >= 40) return;
+    summary.push(value);
+  };
+  for (const event of events) {
+    if (event.taskId !== taskId) continue;
+    const payloadEvent = recordValue(event.payload.event);
+    if (event.type === "gateway_routing_attempt_started") {
+      const provider = stringValue(payloadEvent?.providerId);
+      const model = stringValue(payloadEvent?.modelId);
+      append(
+        provider && model
+          ? `Selected ${provider} / ${model}`
+          : provider
+            ? `Selected ${provider}`
+            : undefined,
+      );
+    } else if (event.type === "step_started") {
+      append(`${stageLabel(payloadEvent)} started`);
+    } else if (event.type === "step_completed") {
+      append(`${stageLabel(payloadEvent)} completed`);
+    } else if (event.type === "step_retrying") {
+      append(`${stageLabel(payloadEvent)} retrying`);
+    } else if (event.type === "step_recovering") {
+      append(`${stageLabel(payloadEvent)} recovering`);
+    } else if (event.type === "tool_requested") {
+      const call = recordValue(payloadEvent?.call);
+      const tool = stringValue(call?.name);
+      append(tool ? `Using ${tool}` : undefined);
+    } else if (event.type === "tool_completed") {
+      const call = recordValue(payloadEvent?.call);
+      const tool = stringValue(call?.name);
+      append(tool ? `Completed ${tool}` : undefined);
+    } else if (event.type === "agent_started") {
+      append(`${agentLabel(payloadEvent)} started`);
+    } else if (event.type === "handoff_requested") {
+      const target = stringValue(payloadEvent?.targetAgentId);
+      append(target ? `Delegating to ${target}` : "Delegating work");
+    } else if (event.type === "handoff_completed") {
+      const target = stringValue(payloadEvent?.targetAgentId);
+      append(
+        target
+          ? `${target} completed delegated work`
+          : "Delegated work completed",
+      );
+    } else if (event.type === "approval_requested") {
+      append("Waiting for tool approval");
+    } else if (event.type === "approval_resolved") {
+      append(event.payload.approved === true ? "Tool approved" : "Tool denied");
+    } else if (event.type === "context_compacted") {
+      append("Compacted conversation context");
+    }
+  }
+  return summary;
+}
+
+function stageLabel(event: Record<string, unknown> | undefined): string {
+  const role = stringValue(event?.role);
+  const stepId = stringValue(event?.stepId);
+  return titleCase(role ?? stepId ?? "Pipeline stage");
+}
+
+function agentLabel(event: Record<string, unknown> | undefined): string {
+  return titleCase(stringValue(event?.agentId) ?? "Agent");
+}
+
+function titleCase(value: string): string {
+  return value
+    .replaceAll("-", " ")
+    .replace(/\b\w/gu, (character) => character.toLocaleUpperCase());
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function shouldUseVerificationOnly(agentId: string, prompt: string): boolean {
@@ -1660,9 +1807,62 @@ function shouldUseVerificationOnly(agentId: string, prompt: string): boolean {
 
 function shouldUsePipeline(agentId: string, prompt: string): boolean {
   if (agentId !== DEFAULT_AGENT_ID && agentId !== CODING_AGENT_ID) return false;
-  return /\b(add|build|change|create|debug|delete|edit|fix|implement|migrate|modify|patch|refactor|remove|rename|test|update|write)\b/i.test(
-    prompt,
+  return (
+    /\b(add|build|change|create|debug|delete|edit|fix|implement|migrate|modify|patch|refactor|remove|rename|save|test|update|write)\b/i.test(
+      prompt,
+    ) ||
+    /\b(?:make|generate)\b[^.!?\n]{0,100}\b(?:file|page|document|component|website|webpage|app|application)\b/iu.test(
+      prompt,
+    )
   );
+}
+
+function shouldUseConversationAgent(agentId: string, prompt: string): boolean {
+  return agentId === DEFAULT_AGENT_ID && !hasWorkspaceReference(prompt);
+}
+
+function shouldAnswerWithCode(prompt: string): boolean {
+  const requestsCodeOutput =
+    /\b(?:write|show|give|provide|generate)\b[^.!?\n]{0,100}\b(?:code|snippet|example|program)\b/iu.test(
+      prompt,
+    ) ||
+    /\b(?:code|implementation)\b[^.!?\n]{0,80}\b(?:in|using|for)\b[^.!?\n]{0,100}\b(?:languages?|javascript|typescript|python|java|c\+\+|rust|go|ruby|php|swift|kotlin)\b/iu.test(
+      prompt,
+    );
+  if (!requestsCodeOutput) return false;
+  return !hasWorkspaceReference(prompt);
+}
+
+function hasWorkspaceReference(prompt: string): boolean {
+  return (
+    /\b(?:this|the|current|existing|opened)\s+(?:project|workspace|repository|repo|codebase|file|folder|app|application)\b/iu.test(
+      prompt,
+    ) ||
+    /\b(?:create|edit|modify|update|patch|save|add|remove|delete)\b[^.!?\n]{0,80}\b(?:file|folder|project|workspace|repository|repo|codebase)\b/iu.test(
+      prompt,
+    ) ||
+    /\b(?:make|generate|build|write)\b[^.!?\n]{0,100}\b(?:file|page|document|component|website|webpage|app|application)\b/iu.test(
+      prompt,
+    ) ||
+    /(?:^|\s)(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?:\s|$|[:;,])/u.test(
+      prompt,
+    )
+  );
+}
+
+function isGreenfieldArtifactRequest(prompt: string): boolean {
+  const createsArtifact =
+    /\b(?:make|create|generate|build|write)\b[^.!?\n]{0,100}\b(?:file|page|document|component|website|webpage|app|application)\b/iu.test(
+      prompt,
+    );
+  const targetsExistingWork =
+    /\b(?:existing|current|opened|this)\s+(?:file|page|document|component|website|webpage|app|application|project|workspace|repo|repository|codebase)\b/iu.test(
+      prompt,
+    ) ||
+    /(?:^|\s)(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?:\s|$|[:;,])/u.test(
+      prompt,
+    );
+  return createsArtifact && !targetsExistingWork;
 }
 
 function waitForApproval(

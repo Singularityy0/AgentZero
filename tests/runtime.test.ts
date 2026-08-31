@@ -16,7 +16,10 @@ import {
   type Tool,
 } from "../packages/core/dist/index.js";
 import { executeCommand } from "../packages/command/dist/index.js";
-import { parseJsonToolCalls } from "../packages/ollama/dist/index.js";
+import {
+  OllamaModel,
+  parseJsonToolCalls,
+} from "../packages/ollama/dist/index.js";
 import { findFiles, searchText } from "../packages/search/dist/index.js";
 import {
   createTaskCheckpointStore,
@@ -39,6 +42,7 @@ import {
 } from "../packages/gateway/dist/index.js";
 import {
   CODING_AGENT_ID,
+  CONVERSATION_AGENT_ID,
   createDefaultAgents,
   DEFAULT_AGENT_ID,
   HeadlessRuntimeService,
@@ -46,6 +50,8 @@ import {
   VERIFIER_AGENT_ID,
   type RuntimeEvent,
 } from "../packages/runtime/dist/index.js";
+import { startSettingsServer } from "../packages/gui-server/dist/index.js";
+import { hasOllamaModel } from "../packages/gui-server/dist/runtime-transport.js";
 import {
   initialTuiState,
   reduceTuiState,
@@ -381,6 +387,31 @@ test("AgentRunner reports the tool step limit without throwing", async () => {
   }).run([{ role: "user", content: "Loop." }]);
 
   assert.match(result.text, /1-step safety limit/);
+});
+
+test("AgentRunner stops corrective mutation nudges after two retries", async () => {
+  let modelCalls = 0;
+  const model: LanguageModel = {
+    respond: async () => {
+      modelCalls += 1;
+      return assistantResponse("I would create the requested file.");
+    },
+  };
+  const registry = new ToolRegistry().register({
+    name: "create_file",
+    description: "Create a file.",
+    parameters: { type: "object", additionalProperties: true },
+    execute: async () => ({ output: "created", changed: true }),
+  });
+
+  const result = await new AgentRunner(model, registry, {
+    cwd: process.cwd(),
+    maxSteps: 12,
+    requestApproval: async () => true,
+  }).run([{ role: "user", content: "Create calculator.py." }]);
+
+  assert.equal(modelCalls, 3);
+  assert.equal(result.text, "I would create the requested file.");
 });
 
 test("AgentRunner skips a repeated identical tool call and lets the model finish", async () => {
@@ -1115,6 +1146,66 @@ test("Ollama fallback parses embedded assistant JSON tool calls", () => {
   assert.deepEqual(calls[0]?.arguments, { path: "README.md" });
 });
 
+test("Ollama fallback parses common nested and array tool-call formats", () => {
+  const calls = parseJsonToolCalls(`[
+    {"tool":"create_file","parameters":{"path":"calculator.py","content":"print(2 + 2)"}},
+    {"function":{"name":"write_file","arguments":"{\\"path\\":\\"README.md\\",\\"content\\":\\"done\\"}"}}
+  ]`);
+
+  assert.deepEqual(
+    calls.map((call) => ({ name: call.name, arguments: call.arguments })),
+    [
+      {
+        name: "create_file",
+        arguments: { path: "calculator.py", content: "print(2 + 2)" },
+      },
+      {
+        name: "write_file",
+        arguments: { path: "README.md", content: "done" },
+      },
+    ],
+  );
+});
+
+test("Ollama sends its configured context window to the local server", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(
+      JSON.stringify({
+        model: "mistral",
+        message: { role: "assistant", content: "done" },
+        done: true,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+
+  try {
+    const model = new OllamaModel({
+      model: "mistral",
+      contextWindow: 16_384,
+    });
+    await model.respond({
+      messages: [{ role: "user", content: "Create a file." }],
+      tools: [],
+    });
+
+    assert.deepEqual(requestBody?.options, { num_ctx: 16_384 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Ollama installed-model matching treats the latest tag as an alias", () => {
+  const installed = new Set(["mistral:latest", "llama3.2:latest"]);
+
+  assert.equal(hasOllamaModel(installed, "mistral"), true);
+  assert.equal(hasOllamaModel(installed, "MISTRAL:LATEST"), true);
+  assert.equal(hasOllamaModel(installed, "mistral:7b"), false);
+});
+
 test("HeadlessRuntimeService owns task lifecycle and persists IDE-ready events", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-headless-runtime-"));
   const store = new SessionStore({
@@ -1167,6 +1258,245 @@ test("HeadlessRuntimeService owns task lifecycle and persists IDE-ready events",
     );
     assert.ok(events.some((event) => event.type === "task_started"));
     assert.ok(events.some((event) => event.type === "task_completed"));
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GUI server saves edited files, runs terminal commands, and requests the native folder picker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-gui-features-"));
+  await writeFile(join(root, "example.txt"), "before\n");
+  let openFolderRequests = 0;
+  const server = startSettingsServer({
+    projectRoot: root,
+    port: 0,
+    staticDir: false,
+    onOpenFolder: () => {
+      openFolderRequests += 1;
+    },
+  });
+
+  try {
+    await server.ready;
+    const fileResponse = await fetch(
+      `${server.url}/api/files/content?path=example.txt`,
+    );
+    const original = (await fileResponse.json()) as {
+      content: string;
+      hash: string;
+    };
+    const saveResponse = await fetch(`${server.url}/api/files/content`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        path: "example.txt",
+        content: "after\n",
+        expectedHash: original.hash,
+      }),
+    });
+    const saved = (await saveResponse.json()) as {
+      file: { content: string };
+    };
+    const profilesResponse = await fetch(`${server.url}/api/terminal/profiles`);
+    const profiles = (await profilesResponse.json()) as {
+      profiles: Array<{ id: string; label: string }>;
+    };
+    const terminalProfile =
+      profiles.profiles.find((profile) =>
+        process.platform === "win32"
+          ? profile.id === "cmd"
+          : profile.id === "bash",
+      ) ?? profiles.profiles[0];
+    const terminalResponse = await fetch(`${server.url}/api/terminal/execute`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        profileId: terminalProfile?.id,
+        command:
+          process.platform === "win32"
+            ? "echo terminal-ok"
+            : "printf terminal-ok",
+      }),
+    });
+    const terminal = (await terminalResponse.json()) as {
+      output: string;
+      exitCode: number;
+    };
+    const openResponse = await fetch(`${server.url}/api/desktop/open-folder`, {
+      method: "POST",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(fileResponse.status, 200);
+    assert.equal(saveResponse.status, 200);
+    assert.equal(saved.file.content, "after\n");
+    assert.equal(await readFile(join(root, "example.txt"), "utf8"), "after\n");
+    assert.equal(terminalResponse.status, 200);
+    assert.equal(profilesResponse.status, 200);
+    assert.ok(profiles.profiles.length >= 1);
+    if (process.platform === "win32") {
+      assert.ok(
+        profiles.profiles.some(
+          (profile) => profile.id === "powershell" || profile.id === "pwsh",
+        ),
+      );
+      assert.ok(profiles.profiles.some((profile) => profile.id === "cmd"));
+    }
+    assert.equal(terminal.exitCode, 0);
+    assert.match(terminal.output, /terminal-ok/);
+    assert.equal(openResponse.status, 202);
+    assert.equal(openFolderRequests, 1);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HeadlessRuntimeService routes casual conversation through the neutral chat model", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-direct-greeting-"));
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const requests: ModelRequest[] = [];
+  const resolvedAgents: string[] = [];
+  const model: LanguageModel = {
+    respond: async (request) => {
+      requests.push(request);
+      const prompt = [...request.messages]
+        .reverse()
+        .find((message) => message.role === "user")?.content;
+      return assistantResponse(
+        prompt === "sup" ? "Not much—what's up?" : "Hey!",
+      );
+    },
+  };
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "mistral" },
+    resolveModel: (agent) => {
+      resolvedAgents.push(agent.id);
+      return model;
+    },
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => true,
+  });
+
+  try {
+    const session = service.createSession("Greeting session");
+    const result = await service.runTask({
+      sessionId: session.id,
+      agentId: "general",
+      prompt: "hi",
+    });
+    const persistedSession = service.getSession(session.id);
+    const persistedEvents = store.listEvents(session.id);
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.text, "Hey!");
+    assert.deepEqual(
+      persistedSession?.messages.map((message) => [
+        message.role,
+        message.content,
+      ]),
+      [
+        ["user", "hi"],
+        ["assistant", "Hey!"],
+      ],
+    );
+    assert.equal(
+      persistedEvents.some((event) => event.type === "model_request"),
+      true,
+    );
+
+    const casualSession = service.createSession("Casual greeting session");
+    const casualResult = await service.runTask({
+      sessionId: casualSession.id,
+      agentId: "general",
+      prompt: "sup",
+    });
+    assert.equal(casualResult.text, "Not much—what's up?");
+    assert.deepEqual(
+      service
+        .getSession(casualSession.id)
+        ?.messages.map((message) => [message.role, message.content]),
+      [
+        ["user", "sup"],
+        ["assistant", "Not much—what's up?"],
+      ],
+    );
+    assert.deepEqual(resolvedAgents, [
+      CONVERSATION_AGENT_ID,
+      CONVERSATION_AGENT_ID,
+    ]);
+    assert.equal(requests.length, 2);
+    assert.ok(requests.every((request) => request.tools.length === 0));
+    assert.ok(
+      requests.every((request) =>
+        request.messages.every((message) => message.role !== "system"),
+      ),
+    );
+    assert.ok(
+      requests.every((request) =>
+        request.messages.every(
+          (message) => !message.content.includes("You are ARCHITECT"),
+        ),
+      ),
+    );
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HeadlessRuntimeService answers standalone code requests without the edit pipeline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-direct-code-"));
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+  const events: RuntimeEvent[] = [];
+  const resolvedAgents: string[] = [];
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "mistral" },
+    resolveModel: (agent) => {
+      resolvedAgents.push(agent.id);
+      return new FakeModel([
+        assistantResponse("Here are five complete calculator examples."),
+      ]);
+    },
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => true,
+    retrieval,
+  });
+  service.subscribe((event) => {
+    events.push(event);
+  });
+
+  try {
+    const session = service.createSession("Direct code session");
+    const result = await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "write the code for calculator for me in 5 different languages",
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(result.text, "Here are five complete calculator examples.");
+    assert.deepEqual(resolvedAgents, [CONVERSATION_AGENT_ID]);
+    assert.equal(
+      events.some((event) => event.type === "pipeline_event"),
+      false,
+    );
   } finally {
     await service.close();
     await rm(root, { recursive: true, force: true });
@@ -1535,6 +1865,14 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
           { id: "write", name: "write_file", arguments: {} },
         ]),
         assistantResponse("Implementation complete."),
+        assistantResponse("", [
+          {
+            id: "read-created-file",
+            name: "read_file",
+            arguments: { path: "rotating_cube.html" },
+          },
+        ]),
+        assistantResponse("Implementation re-read and complete."),
       ]),
     ],
     [
@@ -1549,13 +1887,30 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
       ]),
     ],
   ]);
-  const tools = new ToolRegistry().register({
-    name: "write_file",
-    description: "Record a test mutation.",
-    approval: "auto",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: async () => ({ output: "changed", changed: true }),
-  });
+  const tools = new ToolRegistry()
+    .register({
+      name: "write_file",
+      description: "Record a test mutation.",
+      approval: "auto",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+      execute: async () => ({ output: "changed", changed: true }),
+    })
+    .register({
+      name: "read_file",
+      description: "Read the created test artifact.",
+      approval: "auto",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      execute: async () => ({ output: "<html>cube</html>" }),
+    });
   const events: RuntimeEvent[] = [];
   const service = new HeadlessRuntimeService({
     store,
@@ -1573,7 +1928,8 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
     const result = await service.runTask({
       sessionId: session.id,
       agentId: DEFAULT_AGENT_ID,
-      prompt: "Implement a pipeline change.",
+      prompt:
+        "make a html file with a 3d rotating cube, we must have 3 sliders of x,y,z axis",
     });
     const roles = events
       .filter((event) => event.type === "pipeline_event")
@@ -1597,7 +1953,31 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
         .completedStepIds,
       ["plan", "retrieve", "code", "verify", "review"],
     );
+    assert.match(
+      (
+        persisted?.state.orchestration as {
+          results?: { retrieve?: { summary?: string } };
+        }
+      ).results?.retrieve?.summary ?? "",
+      /Greenfield artifact/,
+    );
     assert.equal(persisted?.state.result, "Review complete.");
+    const completedSession = store.getSession(session.id);
+    const assistantMessages = completedSession?.messages.filter(
+      (message) => message.role === "assistant",
+    );
+    assert.deepEqual(
+      assistantMessages?.map((message) => message.content),
+      ["Review complete."],
+    );
+    assert.ok(
+      assistantMessages?.[0]?.metadata?.thinking?.includes("Planner started"),
+    );
+    assert.ok(
+      assistantMessages?.[0]?.metadata?.thinking?.includes(
+        "Reviewer completed",
+      ),
+    );
 
     const resumedTask = store.createTask(
       session.id,

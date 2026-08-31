@@ -192,7 +192,11 @@ export class MultiAgentOrchestrator {
       tools.register(this.createHandoffTool(state, agentId, depth));
     }
     const messages: ConversationMessage[] = [
-      { role: "system", content: agent.systemPrompt },
+      ...(agent.systemPrompt.trim()
+        ? ([
+            { role: "system", content: agent.systemPrompt },
+          ] satisfies ConversationMessage[])
+        : []),
       ...history,
       {
         role: "user",

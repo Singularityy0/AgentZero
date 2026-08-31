@@ -1,6 +1,9 @@
 node_modules/
+.pnpm-store/
 dist/
 dist-tests/
+release/
+packages/desktop/runtime-assets/
 *.tsbuildinfo
 .env
 .env.*

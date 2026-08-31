@@ -1,5 +1,31 @@
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { execa } from "execa";
-import { rgPath } from "@vscode/ripgrep";
+
+const require = createRequire(import.meta.url);
+
+function resolveRipgrepPath(): string {
+  const configuredPath = process.env.AGENTIC_RIPGREP_PATH?.trim();
+  if (configuredPath) {
+    if (existsSync(configuredPath)) return configuredPath;
+    throw new Error(
+      `Configured ripgrep binary was not found: ${configuredPath}`,
+    );
+  }
+
+  const arch = process.env.npm_config_arch || process.arch;
+  const binaryName = process.platform === "win32" ? "rg.exe" : "rg";
+  const platformPackage = `@vscode/ripgrep-${process.platform}-${arch}`;
+  try {
+    const wrapperEntry = require.resolve("@vscode/ripgrep");
+    const packageRequire = createRequire(wrapperEntry);
+    return packageRequire.resolve(`${platformPackage}/bin/${binaryName}`);
+  } catch {
+    throw new Error(
+      `Could not find ${platformPackage}. Ensure optional dependencies are installed for this platform (${process.platform}-${arch}).`,
+    );
+  }
+}
 
 export interface SearchOptions {
   root: string;
@@ -22,7 +48,7 @@ export async function searchText(
   if (options.glob) {
     args.splice(1, 0, "--glob", options.glob);
   }
-  const result = await execa(rgPath, args, {
+  const result = await execa(resolveRipgrepPath(), args, {
     cwd: options.root,
     reject: false,
     maxBuffer: 2_000_000,
@@ -59,11 +85,15 @@ export async function findFiles(
   pattern = "*",
   maxResults = 500,
 ): Promise<string[]> {
-  const result = await execa(rgPath, ["--files", "--glob", pattern], {
-    cwd: root,
-    reject: false,
-    maxBuffer: 2_000_000,
-  });
+  const result = await execa(
+    resolveRipgrepPath(),
+    ["--files", "--glob", pattern],
+    {
+      cwd: root,
+      reject: false,
+      maxBuffer: 2_000_000,
+    },
+  );
   if (result.exitCode !== 0 && result.exitCode !== 1) {
     throw new Error(result.stderr || "ripgrep failed.");
   }

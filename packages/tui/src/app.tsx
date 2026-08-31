@@ -917,7 +917,11 @@ function formatProviderDetail(
       ? `  baseUrl: ${store.getProviderSetting(spec.id, "baseUrl") ?? "not set"}`
       : undefined,
     spec.fields.includes("manualModelId")
-      ? `  model: ${store.getProviderSetting(spec.id, "manualModelId") ?? "not set"}`
+      ? `  model: ${store.getProviderSetting(spec.id, "manualModelId") ?? spec.defaultModelId ?? "not set"}`
+      : undefined,
+    spec.description ? `  ${spec.description}` : undefined,
+    spec.modelOptions?.length
+      ? `  recommended: ${spec.modelOptions.join(", ")}`
       : undefined,
     lastValidation
       ? `  last validation: ${lastValidation.ok ? "ok" : `failed - ${lastValidation.message ?? ""}`}`

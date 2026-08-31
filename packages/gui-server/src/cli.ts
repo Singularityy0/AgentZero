@@ -6,7 +6,14 @@ const port = process.env.AGENTIC_GUI_PORT
   : undefined;
 
 const server = startSettingsServer({ projectRoot, port });
-console.log(`Settings/GUI server listening on ${server.url}`);
+try {
+  await server.ready;
+  console.log(`Settings/GUI server listening on ${server.url}`);
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Could not start the GUI server: ${message}`);
+  process.exitCode = 1;
+}
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {

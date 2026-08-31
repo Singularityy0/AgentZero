@@ -1,0 +1,65 @@
+{
+  "name": "@agentic-runtime/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native desktop host for the Agentic IDE workbench",
+  "author": "Takneek Team",
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "electron .",
+    "prepare:runtime": "node ./scripts/prepare-runtime-assets.mjs",
+    "pack": "pnpm prepare:runtime && electron-builder --dir",
+    "dist": "pnpm prepare:runtime && electron-builder"
+  },
+  "dependencies": {
+    "@agentic-runtime/gui-server": "workspace:*"
+  },
+  "devDependencies": {
+    "@vscode/ripgrep": "^1.15.9",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "dev.agentic.runtime",
+    "productName": "Agentic IDE",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../gui/dist",
+        "to": "gui"
+      },
+      {
+        "from": "runtime-assets",
+        "to": "runtime"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    }
+  }
+}

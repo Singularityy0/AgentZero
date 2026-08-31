@@ -37,6 +37,31 @@ this service now, and future IDE/Tauri hosts should expose the same service over
 HTTP, SSE/WebSocket, or Tauri commands/events. Browser or webview code must not
 import Node-only runtime packages directly.
 
+`@agentic-runtime/gui` is a React/Tailwind workbench with Monaco, project
+exploration/search, provider settings, durable session selection, manual file
+context, and historical trace inspection. `@agentic-runtime/gui-server` keeps
+the browser boundary free of Node imports and exposes workspace, session,
+context, provider, task, event, and trace data over a loopback-only HTTP API.
+The server owns a `RuntimeTransport` adapter that initializes the headless
+runtime before the first workbench read, accepts tasks and cancellation over
+HTTP, streams correlated runtime events over SSE, and resolves approval
+decisions back into the waiting tool call. Chat therefore uses the same durable
+session, orchestration, provider routing, and safety policy as the TUI. A
+bounded command terminal and conflict-safe explicit editor saves use separate
+workspace-scoped HTTP endpoints; they represent direct user actions rather than
+model-initiated tool calls.
+
+`@agentic-runtime/desktop` is a deliberately thin Electron host. Electron is
+used here because its Node main process can reuse `@agentic-runtime/gui-server`
+and the built-in SQLite backend without duplicating them in Rust. The renderer
+keeps `nodeIntegration` disabled, context isolation and Chromium sandboxing
+enabled, and communicates only with the loopback HTTP boundary. The host asks
+the operating system for a free port, owns server startup/shutdown, and packages
+the already-built GUI as a read-only application resource. Platform-native
+runtime tools such as ripgrep are staged as explicit Electron resources and
+passed to shared services through validated paths; packaging does not rely on
+transitive optional dependencies being discovered inside the application ASAR.
+
 `TaskOrchestrator` is the provider-neutral multi-agent workflow boundary. It
 executes a dependency-checked plan sequentially through role-specific workers
 (`planner`, `retriever`, `coder`, `verifier`, and `reviewer`; `researcher`
@@ -59,6 +84,20 @@ role or contain a fixed agent. `MultiAgentOrchestrator` loads agent definitions
 by ID from an injected registry, resolves each agent's model and tools, and
 injects the generic `handoff_agent` tool. Agent definitions are data, so adding
 or changing an agent does not require changing orchestration code.
+
+Ordinary conversation and standalone answers route to a neutral, tool-free
+`conversation` agent using the selected provider/model. Responses are not
+hardcoded, and Chat adds no system prompt. Architect and the multi-stage
+pipeline are reserved for prompts that reference or mutate the opened
+workspace, preventing planning instructions and tool schemas from contaminating
+normal model behavior.
+
+High-confidence artifact language (for example, making or generating a file,
+page, component, website, or application) is treated as workspace mutation even
+when the user does not say “current project.” Pipeline planning extracts an
+acceptance checklist from the original objective; implementation and review
+must preserve every requested behavior rather than substituting an easier
+artifact.
 
 A handoff contains a target agent ID, focused task, optional context, and
 reason. The child result is returned to the parent as a tool result. Unknown or
@@ -145,7 +184,17 @@ instead of throwing an opaque request failure.
 For explicit multi-step coding requests, `AgentRunner` tracks required
 follow-through stages such as mutation, reread, and build/verification. If the
 model returns text before those stages, it receives an internal continuation
-request instead of ending the run early.
+request instead of ending the run early. Corrective prompts are bounded to two
+attempts per stalled phase so a model that repeatedly refuses to call a tool
+cannot consume the full task budget. Standalone requests to display code are
+routed directly to the lead assistant and do not enter this mutation workflow.
+
+Ollama tool-call compatibility includes the native API structure plus
+constrained JSON fallbacks for flat, array, wrapped, nested-function, and
+`tool`/`parameters` response shapes. GUI-created Ollama routes currently use a
+8K context window, which is sent to Ollama as `num_ctx` rather than used only
+as a routing estimate. Greenfield artifacts skip irrelevant semantic retrieval
+so local prompts remain compact.
 
 After verifier failure, the runtime persists pending recovery state and can roll
 back journaled file mutations in reverse order when current hashes match, then

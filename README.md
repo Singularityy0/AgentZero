@@ -14,6 +14,43 @@ pnpm install
 pnpm build
 ```
 
+## Desktop application
+
+Start the complete workbench as a native desktop window from the repository
+root:
+
+```sh
+pnpm start
+```
+
+The desktop host builds the required TypeScript and GUI packages, starts its
+own loopback server on an available port, opens the React/Monaco workbench, and
+stops the server when the application exits. It therefore does not require a
+separate browser tab or server terminal. Startup is intentionally folderless;
+use **Open Folder** or **File → Open Folder** to select a codebase. A recent
+folder is used only as the native picker's starting location and is never
+opened automatically. The workbench includes editable Monaco tabs with
+conflict-safe `Ctrl+S` saves and a workspace command terminal with discovered
+PowerShell, Command Prompt, Git Bash, and Bash profiles.
+The assistant panel is connected to the headless runtime: it streams task
+progress, persists messages, supports cancellation, and surfaces tool approval
+requests. A usable model provider is still required. Configure and validate
+Ollama, Groq, OpenRouter, Mistral AI, Cerebras, Hugging Face, or an
+OpenAI-compatible endpoint from **Settings**. Keys and model choices are saved
+once on the machine. For Ollama, install the Windows application once and pull
+the selected model once; the desktop runtime starts the service automatically
+when a task needs it.
+
+After a successful build, `pnpm desktop:quick` skips compilation and opens the
+application immediately. Create an installer for the current operating system
+with:
+
+```sh
+pnpm desktop:package
+```
+
+Installer artifacts are written under `packages/desktop/release/`.
+
 The workspace contains framework-neutral runtime contracts in
 `@agentic-runtime/core`, an `@agentic-runtime/openai` provider, a guarded
 cross-platform command backend in `@agentic-runtime/command`, separate IDE
@@ -101,9 +138,9 @@ isolated questions, recovery journals, and persisted trace spans behind
 `HeadlessRuntimeService`. `listTraceSpans(taskId)` returns the currently persisted
 trace hierarchy for IDE transport and dashboard clients. Model and tool span
 correlation is still incomplete, as documented in the architecture status. The
-TUI uses this service instead of owning runtime behavior. Future IDE and Tauri integrations should host the same
-service in a Node process or sidecar and expose transport-friendly runtime
-events and approval requests to the webview.
+TUI uses this service instead of owning runtime behavior. The desktop GUI hosts
+the same service behind a loopback HTTP/SSE adapter, including task start,
+cancellation, live events, and approval decisions.
 
 ## Interactive TUI
 
@@ -148,6 +185,10 @@ OLLAMA_MODEL=your-local-model
 `@agentic-runtime/gateway` separates provider configuration, discovered models,
 and execution routes. Credentials are read by reference from environment
 variables and are never included in task/session state or gateway events.
+The desktop settings screen persists credentials in the machine-local global
+SQLite database, so normal users do not need to create or repeatedly edit an
+`.env` file. The default provider presets are explicit models with published
+total parameter counts at or below the problem statement's 80B limit.
 
 OpenRouter can be configured with:
 
@@ -183,6 +224,9 @@ remain supported as fallback configuration.
 - `pnpm typecheck` runs the TypeScript build in checking mode
 - `pnpm test` runs the core agent and tool contract tests
 - `pnpm tui` builds the workspace and starts the interactive agentic TUI
+- `pnpm start` builds and opens the desktop IDE
+- `pnpm desktop:quick` opens an already-built desktop IDE
+- `pnpm desktop:package` creates desktop installers for the current platform
 - `pnpm lint` runs ESLint
 - `pnpm format` formats supported files with Prettier
 - `pnpm format:check` checks formatting without changing files

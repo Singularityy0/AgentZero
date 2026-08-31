@@ -11,7 +11,13 @@ import type { GatewayEvent } from "@agentic-runtime/gateway";
 import type { SessionRecord, TraceSpanRecord } from "@agentic-runtime/session";
 
 export type RuntimeProviderId =
-  "ollama" | "groq" | "openrouter" | "openai-compatible";
+  | "ollama"
+  | "groq"
+  | "openrouter"
+  | "mistral"
+  | "cerebras"
+  | "huggingface"
+  | "openai-compatible";
 
 export interface RuntimeModelRouteSelection {
   providerId: RuntimeProviderId;

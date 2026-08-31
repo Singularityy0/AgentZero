@@ -89,9 +89,11 @@ excessive handoffs are rejected.
 
 ## 4. Built-In and Project Agents
 
-The runtime defines five built-in agents in
+The runtime defines six built-in agents in
 `packages/runtime/src/default-agents.ts`:
 
+- `conversation`: a neutral, tool-free Chat role for normal model-driven
+  conversation, general questions, and standalone code output.
 - `general`: the read-only Architect and planner.
 - `retriever`: a registered retrieval specialist. The fixed pipeline currently
   uses deterministic retrieval directly instead of invoking this agent.
@@ -252,16 +254,18 @@ The core uses a provider-neutral `LanguageModel` interface. The current
 providers are:
 
 - Ollama `/api/chat` through `@agentic-runtime/ollama`.
-- Groq, OpenRouter, and OpenAI-compatible/local endpoints through
-  `@agentic-runtime/gateway`.
+- Groq, OpenRouter, Mistral AI, Cerebras, Hugging Face Inference Providers,
+  and OpenAI-compatible/local endpoints through `@agentic-runtime/gateway`.
 
 `@agentic-runtime/openai` also contains a direct OpenAI Responses adapter, but
 the default runtime gateway does not register it as a selectable provider.
 
-The Ollama adapter supports native structured tool calls and a constrained JSON
-fallback for models that emit tool calls as text. Gateway-created requests use
-the adapter's current 300-second timeout; `OLLAMA_TIMEOUT_MS` is not wired. The
-TUI supplies an ordered primary/fallback route list. The gateway ranks
+The Ollama adapter supports native structured tool calls and constrained JSON
+fallbacks for flat, array, wrapped, nested-function, and `tool`/`parameters`
+text formats. Desktop Ollama routes use an 8K context window and send it to the
+server as `num_ctx`. Gateway-created
+requests use the adapter's current 300-second timeout; `OLLAMA_TIMEOUT_MS` is not
+wired. The TUI supplies an ordered primary/fallback route list. The gateway ranks
 configured routes using preference, tools, context fit, estimated cost, and
 cooldown state, emits visible routing reasons, and fails over on rate limits,
 context errors, timeouts, connections, and transient server failures without
@@ -279,6 +283,20 @@ in `@agentic-runtime/gateway` is the single source of truth for which fields
 (API key, base URL, manual model ID) each provider needs; the settings UI and
 `/settings` command both derive their forms from it instead of hardcoding
 provider names.
+
+The desktop runtime uses explicit <=80B presets rather than unrestricted
+"auto" routers: Qwen 3.6 27B / GPT-OSS 20B on Groq, Nemotron 3.5 Lightning 30B
+on OpenRouter, Ministral 3B/8B/14B, Gemma 4 31B on Cerebras, Qwen Coder
+30B/32B on Hugging Face, and Qwen 2.5 Coder 7B on Ollama. When the selected
+route is local Ollama, the server probes it and launches `ollama serve` in the
+background if the installed service is not already available. Model downloads
+remain an explicit one-time action because they are multi-gigabyte artifacts.
+
+The runtime distinguishes requests to display standalone code from requests to
+change the opened workspace. Standalone code goes directly to the Architect in
+one response; workspace changes use the checkpointed coding pipeline and only
+complete the Coder stage after an actual mutation tool call. Corrective prompts
+are limited to two retries per stalled workflow phase.
 
 ## 10. Verification and Known Gaps
 
@@ -314,8 +332,8 @@ The most important remaining gaps against the problem statement are:
 - A write/save path from the GUI editor (currently read-only by design — see
   below — since there's no approval-gating wired to GUI-initiated edits yet).
 - Clickable file/line tags in the browser workbench.
-- Populating `MODEL_PARAMETER_CATALOG` with real figures beyond the 2 seed
-  entries, an Ollama RAM/VRAM soft-check, and surfacing the `unverified`
+- Completing `MODEL_PARAMETER_CATALOG` for arbitrary manually entered models,
+  an Ollama RAM/VRAM soft-check, and surfacing the `unverified`
   model flag anywhere in the UI (80B/free-tier hard-blocking itself is
   enforced — see `IMPLEMENTATION_PLAN.md` Phase 1).
 - Encryption-at-rest for stored provider credentials (the settings screen

@@ -32,6 +32,7 @@ packages/gateway/src/    Provider registry, routing, credential resolution
 packages/runtime/src/    Headless application service shared by TUI and future IDE hosts
 packages/gui/src/        Browser-based settings/chat/diff/dashboard UI (Vite)
 packages/gui-server/src/ Local node:http bridge: settings API + static GUI host
+packages/desktop/src/    Electron desktop host owning GUI server/window lifecycle
 rust/src/                Rust sidecar for AST slicing, diff hunks, and state primitives
 examples/                Runnable provider examples
 agent-context/           Persistent context for coding agents
@@ -39,8 +40,8 @@ agent-context/           Persistent context for coding agents
 
 ## Decision: hybrid core, no Tauri dependency
 
-`packages/gui/src-tauri` was removed. The current UI is a TypeScript/Vite
-browser app backed by `packages/gui-server`, but the core architecture retains
+`packages/gui/src-tauri` was removed. The current UI is a React/Tailwind/Vite
+browser workbench backed by `packages/gui-server`, but the core architecture retains
 a separate Rust process under `rust/` for performance-sensitive AST slicing,
 diff hunk generation, and future state/index primitives. TypeScript remains the
 orchestration and package-boundary layer. `pnpm build` compiles the Rust sidecar
@@ -56,6 +57,9 @@ pnpm typecheck
 pnpm test
 pnpm tui
 pnpm settings
+pnpm start
+pnpm desktop:quick
+pnpm desktop:package
 pnpm lint
 pnpm format
 pnpm format:check
@@ -81,6 +85,22 @@ Build artifacts are emitted under package `dist/` directories and
   `@agentic-runtime/gateway`'s `StoredCredentialResolver` - a key saved once
   works in either client. The TUI also has an equivalent `/settings` command
   for the same records.
+- The GUI provides Monaco file inspection, project search, durable sessions,
+  bounded manual file context, provider configuration, historical trace
+  drill-down, live agent chat, conflict-safe file editing, and a bounded
+  workspace command terminal. Its loopback runtime transport supports SSE
+  task/routing/pipeline events, cancellation, and approval resolution while
+  preserving the headless runtime's safety policy.
+- The terminal discovers installed shell profiles (PowerShell, CMD, Git Bash,
+  and Bash where available), executes each command through the selected native
+  shell with bounded output, and exposes a VS Code-style `Ctrl+\`` focus entry.
+- `@agentic-runtime/desktop` hosts the same GUI in a sandboxed Electron window,
+  chooses an available loopback port, owns server shutdown, starts without an
+  implicit workspace, and provides native open/switch/close-folder workflows.
+  The last folder is only the picker's default location. `pnpm start` is the
+  single-command source launch path; `pnpm desktop:package` builds the current
+  platform's installer formats. Packaging explicitly stages the platform
+  ripgrep executable under the application's runtime resources.
 - `@agentic-runtime/core` exports framework-neutral conversation, tool, and
   tool-registry contracts.
 - `@agentic-runtime/openai` exposes `generateOpenAIResponse` using the OpenAI
@@ -157,13 +177,23 @@ Build artifacts are emitted under package `dist/` directories and
   frontmatter plus a Markdown system prompt; these are imported at TUI startup.
 - The agent runner continues explicit multi-step coding requests when a model
   stops after an intermediate tool result, requiring requested mutation,
-  reread, and verification stages.
+  reread, and verification stages. Corrective prompts stop after two retries
+  per stalled phase instead of consuming the entire model-step budget.
+- Standalone requests to show or generate code bypass the repository-edit
+  pipeline and receive a direct answer; Coder pipeline success requires a real
+  mutation tool result.
 - No-op mutations are detected and do not count as a changed file when deciding
   whether a reread is required.
 - The default agent safety budget is 24 model steps to allow read, edit,
   approval, verification, and final-response workflows.
 - Gateway-created Ollama requests currently use the adapter's 300-second timeout;
   `OLLAMA_TIMEOUT_MS` is not wired into runtime composition.
+- Ollama availability checks normalize the implicit `:latest` tag and confirm
+  configured aliases through `/api/show`, preventing installed models such as
+  `mistral:latest` from being reported missing when configured as `mistral`.
+- Desktop Ollama routes use an 8K context window sent as `num_ctx`, and the fallback parser
+  accepts common flat, array, wrapped, nested-function, and
+  `tool`/`parameters` JSON call formats.
 - An isolated Ollama IDE test successfully created and read a TypeScript file
   through `create_file` and `read_file`.
 - The multi-step edit workflow has been tested through inspection, patching,

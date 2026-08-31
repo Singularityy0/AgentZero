@@ -230,9 +230,122 @@
   describe those paths as complete refer to intended behavior, not current
   end-to-end wiring. The current TypeScript suite contains 47 tests.
 
+## 2026-08-31
+
+- Rebuilt the browser GUI as a React/Tailwind, Cursor-style IDE workbench using
+  `Design-Idea.md`: activity rail, explorer/search/agents, Monaco tabs, bottom
+  output panel, assistant/context rail, provider settings, and observability.
+- Added loopback GUI APIs for durable session creation, task discovery,
+  session events, trace spans, and bounded manual file/line context.
+- Added a historical trace hierarchy with exact recorded input/output/context
+  payloads and timing/provider/model/cost metadata. Live task streaming and
+  browser approval resolution remain the next transport boundary.
+- Kept unsupported browser chat and terminal actions explicitly disabled so
+  the UI does not imply that local-only echoes or unapproved commands are real
+  runtime operations.
+- Verified TypeScript compilation, ESLint, a production Vite build, 47 runtime
+  tests, browser rendering with no console errors, settings navigation, Monaco
+  file opening, durable session creation, and manual context pinning.
+- Added `@agentic-runtime/desktop`, a sandboxed Electron host that launches the
+  existing GUI/server on an automatically assigned loopback port and shuts it
+  down with the application. It supports native workspace selection and
+  remembers the most recent packaged workspace.
+- Added `pnpm start`, `pnpm desktop:quick`, and `pnpm desktop:package` so normal
+  desktop use no longer requires separate server and browser commands.
+- Made GUI-server startup observable through a `ready` promise and converted
+  port-binding failures into a clean CLI error instead of an unhandled event.
+- Re-ran TypeScript compilation, source linting, targeted formatting checks,
+  the 47-test runtime suite, and a production Vite build; generated and
+  inspected the Windows unpacked desktop artifact under
+  `packages/desktop/release/win-unpacked/`.
+- Fixed packaged desktop startup failing when Electron omitted ripgrep's
+  platform optional dependency. Desktop builds now stage the resolved binary
+  as an explicit runtime resource, and search accepts that validated packaged
+  path without resolving the optional module during application startup. The
+  rebuilt Windows bundle contains and executes `resources/runtime/rg.exe`;
+  source lint, formatting, compilation, and all 47 tests pass.
+- Fixed the desktop process starting without a window by completing main-module
+  evaluation before Electron readiness and showing the dark application shell
+  immediately instead of waiting indefinitely for `ready-to-show`. Verified
+  source and packaged renderer process creation, loopback server startup, and a
+  live responding Windows window; regenerated the installer and portable build.
+- Connected the desktop assistant to `HeadlessRuntimeService` through a
+  loopback `RuntimeTransport`: task submission and cancellation use HTTP, while
+  task/routing/pipeline events and approval requests stream over SSE. Approval
+  decisions resume the waiting tool call and completed transcripts remain
+  SQLite-backed.
+- Fixed fresh desktop installs having no selectable agent by initializing the
+  runtime before serving `/api/workbench`, which seeds the reserved agent
+  definitions before the first render. Added runtime provider/model selection
+  and model-ID settings for Groq, OpenRouter, and Ollama.
+- Verified the transport end to end with a persisted session: task acceptance,
+  correlated live events, routing through Ollama, trace updates, and clean task
+  failure propagation when the local Ollama service is unavailable.
+- Added one-time provider setup for Mistral AI, Cerebras, and Hugging Face
+  alongside Groq, OpenRouter, Ollama, and custom OpenAI-compatible endpoints.
+  Provider cards now explain each route, offer explicit <=80B model presets,
+  link to the official key page, and persist the selected key/model locally.
+- Replaced OpenRouter's unrestricted auto-router default with an explicit 30B
+  free model. The desktop runtime now probes and starts an installed local
+  Ollama service automatically before a task, then reports a precise one-time
+  model-pull instruction if the configured model is absent.
+- Initially added a deterministic conversational fast path for greetings and
+  thanks; this was subsequently replaced by the model-driven Chat route below.
+  Persisted chat contains only the user message and final assistant answer;
+  internal agent/tool transcript entries stay out of the visible conversation.
+- Added a collapsed Thinking disclosure to the desktop assistant. It contains
+  only safe execution summaries such as routing, pipeline stages, tool use, and
+  approvals; private model chain-of-thought is neither requested nor displayed.
+- Replaced implicit current/last-project startup with a folderless desktop
+  welcome screen and native open/switch/close-folder workflow. The File menu,
+  Explorer, workspace title, and welcome view all reach the same picker; recent
+  state is used only to seed the picker location.
+- Made Monaco tabs editable with dirty-state indicators and hash-conflict-safe
+  `Ctrl+S` persistence, and replaced the terminal placeholder with a bounded
+  workspace command console. Added loopback integration coverage for folder
+  requests, file saves, and command execution.
+- Fixed first-message submission when a newly opened project has no saved chat
+  session: Send/Enter now creates the session before starting the task. Context
+  pinning follows the same path. Replaced the composer's bright focus outline
+  with a subtle container focus state and surfaced explicit disabled-action
+  reasons instead of silent dim controls.
+- Fixed Ollama installed-model detection by normalizing implicit `:latest` tags
+  and falling back to the authoritative `/api/show` endpoint; locally installed
+  `mistral:latest` now satisfies a configured `mistral` route.
+- Made the desktop application menu permanently visible and expanded it with
+  File, Edit, View, Terminal, and Help actions. Redesigned the bottom terminal
+  as a larger, focus-outline-free console with native prompt styling, clear and
+  profile controls, plus discovered PowerShell, CMD, Git Bash, and Bash shells.
+- Separated standalone code-generation answers from workspace mutations. A
+  request such as “write calculator code in five languages” now makes one
+  direct assistant call instead of entering the five-stage edit pipeline.
+- Hardened local-model execution: Ollama routes advertise an 8K context window,
+  fallback parsing accepts common array, wrapped, nested-function, and
+  `tool`/`parameters` call shapes, and corrective workflow prompts stop after
+  two retries per stalled phase. Coding pipeline steps now count as successful
+  only after an actual mutation tool completes, while repeated Thinking events
+  are collapsed. The full 54-test suite passes.
+- Replaced hardcoded greeting replies with a neutral, tool-free Chat agent.
+  Normal conversation, general questions, and standalone code now use the
+  selected model directly with no system prompt; Architect and the coding
+  pipeline are reserved for workspace work. Regression coverage confirms `sup`
+  invokes the Chat model without Architect instructions or tool schemas.
+- Fixed explicit artifact requests such as “make a HTML file” being mistaken
+  for chat. File/page/component/application creation language now enters the
+  workspace pipeline, and the exact 3D-cube prompt is the pipeline regression
+  objective. Planner, Coder, and Reviewer prompts now preserve an explicit
+  acceptance checklist and reject easier substitutions such as 3D to 2D.
+- Diagnosed the subsequent real Mistral Coder failure from persisted events:
+  Ollama evaluated only 4,096 tokens of a 10,025-token request and returned
+  `[TOOL_CALLS]` prose instead of a mutation call. Greenfield artifacts now skip
+  irrelevant retrieval, Ollama receives a practical 8K `num_ctx`, the Coder has
+  an exact JSON tool fallback, changed files must be re-read, and Verifier
+  performs requirement-level static behavior checks. A live local-Mistral probe
+  produced a native `create_file` call; all 55 tests and lint pass.
+
 ## Next Steps
 
 - Refine the IDE Observability Dashboard to show full call hierarchy traces per the PS requirements.
 - Finalize the codebase semantic index (beyond ripgrep) for complex code retrieval.
 - Document the entire system architecture, routing decisions, and API setup process in `README.md` for the final submission.
-- Package cross-platform builds and ensure zero-friction setup.
+- Verify generated installers on Windows, macOS, and Linux release hosts.

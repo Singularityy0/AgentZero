@@ -7,6 +7,8 @@ import {
   type ModelResponse,
 } from "../packages/core/dist/index.js";
 import {
+  createDefaultProviderGateway,
+  PROVIDER_FIELD_SPECS,
   ProviderGateway,
   ProviderRegistry,
   rankModelRoutes,
@@ -15,6 +17,33 @@ import {
   type ModelRoute,
   type ProviderAdapter,
 } from "../packages/gateway/dist/index.js";
+
+test("default provider catalog exposes only explicit competition-safe presets", () => {
+  const gateway = createDefaultProviderGateway();
+  assert.deepEqual(
+    gateway.providers.list().map((provider) => provider.id),
+    [
+      "groq",
+      "openrouter",
+      "mistral",
+      "cerebras",
+      "huggingface",
+      "openai-compatible",
+      "ollama",
+    ],
+  );
+  assert.equal(
+    PROVIDER_FIELD_SPECS.find((provider) => provider.id === "openrouter")
+      ?.defaultModelId,
+    "nvidia/nemotron-3.5-lightning:free",
+  );
+  assert.equal(
+    gateway.registerModel(
+      model("openrouter", "nvidia/nemotron-3.5-lightning:free"),
+    ).totalParameters,
+    30_000_000_000,
+  );
+});
 
 const response: ModelResponse = {
   message: { role: "assistant", content: "ok", toolCalls: [] },

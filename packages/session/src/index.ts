@@ -320,6 +320,27 @@ export class SessionStore {
     return row ? deserializeTask(row) : undefined;
   }
 
+  listTasks(sessionId?: string): TaskRecord[] {
+    const rows = sessionId
+      ? (this.projectDb
+          .prepare(
+            `SELECT tasks.* FROM tasks
+             JOIN sessions ON sessions.id = tasks.session_id
+             WHERE sessions.project_id = ? AND tasks.session_id = ?
+             ORDER BY tasks.updated_at DESC`,
+          )
+          .all(this.project.id, sessionId) as unknown as SqliteTask[])
+      : (this.projectDb
+          .prepare(
+            `SELECT tasks.* FROM tasks
+             JOIN sessions ON sessions.id = tasks.session_id
+             WHERE sessions.project_id = ?
+             ORDER BY tasks.updated_at DESC`,
+          )
+          .all(this.project.id) as unknown as SqliteTask[]);
+    return rows.map(deserializeTask);
+  }
+
   updateTask(
     taskId: string,
     update: Partial<Pick<TaskRecord, "status" | "currentStage" | "state">>,

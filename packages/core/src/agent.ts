@@ -854,6 +854,17 @@ function createWorkflowState(
     return { followUp: () => undefined };
   }
 
+  const followUpCounts = new Map<string, number>();
+  const boundedFollowUp = (
+    phase: string,
+    message: string,
+  ): string | undefined => {
+    const count = followUpCounts.get(phase) ?? 0;
+    if (count >= 2) return undefined;
+    followUpCounts.set(phase, count + 1);
+    return message;
+  };
+
   return {
     followUp: (executedTools, hadNoOpMutation) => {
       const mutationIndex = executedTools.findIndex((tool) =>
@@ -872,20 +883,32 @@ function createWorkflowState(
       );
 
       if (requestsPatch && !hasPatch) {
-        return `The original user request is: ${request}\n\nYou have only read the file. The required next action is to call apply_patch, not to describe a command and not to ask for details. Respond with exactly one apply_patch tool call using the previous file content and the requested change. Do not call compile_code until apply_patch has been approved and executed.`;
+        return boundedFollowUp(
+          "patch",
+          `The original user request is: ${request}\n\nYou have only read the file. The required next action is to call apply_patch, not to describe a command and not to ask for details. Respond with exactly one apply_patch tool call using the previous file content and the requested change. Do not call compile_code until apply_patch has been approved and executed.`,
+        );
       }
       if (requestsMutation && mutationIndex < 0) {
-        return `The original user request is: ${request}\n\nThe requested file mutation has not happened. Do not answer with prose or ask for details. Call the appropriate file mutation tool now, then continue with the remaining requested steps.`;
+        return boundedFollowUp(
+          "mutation",
+          `The original user request is: ${request}\n\nThe requested file mutation has not happened. Do not answer with prose, Markdown code fences, [TOOL_CALLS], or questions. Call the appropriate file mutation tool now. If native tool calling is unavailable, output only this JSON shape with real values: {"name":"create_file","arguments":{"path":"workspace-relative-name.ext","content":"complete file content"}}`,
+        );
       }
       if (
         requestsReadAfterMutation &&
         !hasReadAfterMutation &&
         !hadNoOpMutation
       ) {
-        return `The patch has already been approved and applied. Do not ask for approval again and do not answer with a diff. Call read_file now for the changed file to verify the edit, then continue with the remaining requested steps from the original request: ${request}`;
+        return boundedFollowUp(
+          "read-after-mutation",
+          `The patch has already been approved and applied. Do not ask for approval again and do not answer with a diff. Call read_file now for the changed file to verify the edit, then continue with the remaining requested steps from the original request: ${request}`,
+        );
       }
       if (requestsVerification && !hasVerification) {
-        return `The requested edit and verification are not complete. Do not answer with prose or ask the user to run a command. Call the appropriate verification tool now, then report its actual result: ${request}`;
+        return boundedFollowUp(
+          "verification",
+          `The requested edit and verification are not complete. Do not answer with prose or ask the user to run a command. Call the appropriate verification tool now, then report its actual result: ${request}`,
+        );
       }
       return undefined;
     },

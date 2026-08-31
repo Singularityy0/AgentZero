@@ -20,10 +20,28 @@ import { OpenAICompatibleChatModel } from "@agentic-runtime/openai";
 const MODEL_PARAMETER_CATALOG: Record<string, Record<string, number>> = {
   groq: {
     "mixtral-8x7b-32768": 46_700_000_000, // Mistral AI, published total param count
+    "qwen/qwen3.6-27b": 27_000_000_000,
+    "qwen/qwen3.8-27b": 27_000_000_000,
+    "openai/gpt-oss-20b": 20_000_000_000,
   },
-  openrouter: {},
+  openrouter: {
+    "nvidia/nemotron-3.5-lightning:free": 30_000_000_000,
+  },
   ollama: {
     "llama2:7b": 7_000_000_000,
+    "qwen2.5-coder:7b": 7_620_000_000,
+  },
+  mistral: {
+    "ministral-3b-latest": 3_000_000_000,
+    "ministral-8b-latest": 8_000_000_000,
+    "ministral-14b-latest": 14_000_000_000,
+  },
+  cerebras: {
+    "gemma-4-31b": 31_000_000_000,
+  },
+  huggingface: {
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct": 30_500_000_000,
+    "Qwen/Qwen2.5-Coder-32B-Instruct": 32_500_000_000,
   },
 };
 function lookupTotalParameters(
@@ -225,6 +243,9 @@ export interface CredentialStore {
 export const DEFAULT_CREDENTIAL_ENV_FALLBACK: Record<string, string> = {
   groq: "GROQ_API_KEY",
   openrouter: "OPENROUTER_API_KEY",
+  mistral: "MISTRAL_API_KEY",
+  cerebras: "CEREBRAS_API_KEY",
+  huggingface: "HF_TOKEN",
   "openai-compatible": "OPENAI_COMPATIBLE_API_KEY",
 };
 
@@ -250,17 +271,20 @@ export class StoredCredentialResolver implements CredentialResolver {
 
 export class ProviderRegistry {
   private readonly providers = new Map<string, ProviderAdapter>();
-  /** Allowed free-tier provider IDs. */
-  private static readonly FREE_PROVIDERS = new Set([
+  /** Allowed free-tier, pay-as-you-go, and local provider IDs. */
+  private static readonly ELIGIBLE_PROVIDERS = new Set([
     "groq",
     "openrouter",
+    "mistral",
+    "cerebras",
+    "huggingface",
     "ollama",
     "openai-compatible",
   ]);
   register(provider: ProviderAdapter): this {
     if (this.providers.has(provider.id))
       throw new Error(`Provider already registered: ${provider.id}`);
-    if (!ProviderRegistry.FREE_PROVIDERS.has(provider.id)) {
+    if (!ProviderRegistry.ELIGIBLE_PROVIDERS.has(provider.id)) {
       throw new Error(
         `Provider ${provider.id} is not on the free-tier/pay-as-you-go/local allowlist.`,
       );
@@ -441,11 +465,17 @@ export class ProviderGateway implements LanguageModel {
   }
 
   registerModel(model: ModelInfo): ModelInfo {
+    const registered = {
+      ...model,
+      totalParameters:
+        model.totalParameters ??
+        lookupTotalParameters(model.providerId, model.id),
+    };
     this.models.replace(model.providerId, [
       ...this.models.list(model.providerId),
-      model,
+      registered,
     ]);
-    return model;
+    return registered;
   }
 
   getSelected(): ModelInfo | undefined {
@@ -741,6 +771,125 @@ export class GroqProvider extends HttpProvider {
   }
 }
 
+interface HostedOpenAIProviderDefinition {
+  id: string;
+  baseUrl: string;
+  models: Array<{
+    id: string;
+    contextWindow?: number;
+    reasoning?: boolean;
+  }>;
+}
+
+/** OpenAI-chat-compatible hosted providers with a deliberately small model
+ * allowlist. Keeping that list explicit lets the application uphold the
+ * problem statement's <=80B total-parameter rule even when a provider's
+ * general catalog contains much larger models. */
+class HostedOpenAIProvider extends HttpProvider {
+  constructor(
+    private readonly definition: HostedOpenAIProviderDefinition,
+    credentials: CredentialResolver,
+    fetcher?: typeof fetch,
+  ) {
+    super(definition.id, credentials, fetcher);
+  }
+
+  async validateCredentials(): Promise<void> {
+    const response = await this.fetcher(`${this.definition.baseUrl}/models`, {
+      headers: { Authorization: this.authorization() ?? "" },
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(`${this.id} credentials were rejected.`);
+    }
+    if (!response.ok)
+      throw new Error(`${this.id} unavailable (${response.status}).`);
+  }
+
+  async discoverModels(
+    options: { refresh?: boolean } = {},
+  ): Promise<ModelInfo[]> {
+    if (!options.refresh && this.cache) return this.cache.models;
+    const response = await this.fetcher(`${this.definition.baseUrl}/models`, {
+      headers: { Authorization: this.authorization() ?? "" },
+    });
+    if (!response.ok) {
+      throw new Error(
+        `${this.id} model discovery failed (${response.status}).`,
+      );
+    }
+    const body = (await response.json()) as { data?: Array<{ id?: string }> };
+    if (!Array.isArray(body.data)) {
+      throw new Error(`${this.id} returned a malformed model catalog.`);
+    }
+    const available = new Set(
+      body.data
+        .map((model) => model.id)
+        .filter((id): id is string => typeof id === "string"),
+    );
+    const models = this.definition.models
+      .filter((model) => available.has(model.id))
+      .map((model) => hostedModel(this.id, model));
+    this.cache = { fetchedAt: Date.now(), models };
+    return models;
+  }
+
+  async createRoute(model: ModelInfo): Promise<ModelRoute> {
+    if (
+      !this.definition.models.some((candidate) => candidate.id === model.id)
+    ) {
+      throw new Error(
+        `${model.id} is not in the verified <=80B allowlist for ${this.id}.`,
+      );
+    }
+    const config = this.getConfig();
+    const key = this.credentials.get(config.credentialRef ?? "");
+    if (!key)
+      throw new Error(`Credential unavailable for provider ${this.id}.`);
+    const client = new OpenAICompatibleChatModel({
+      apiKey: key,
+      model: model.id,
+      baseURL: this.definition.baseUrl,
+    });
+    return {
+      providerId: this.id,
+      modelId: model.id,
+      baseUrl: this.definition.baseUrl,
+      protocol: "openai-chat",
+      credentialRef: config.credentialRef,
+      execute: (request) => client.respond(request),
+    };
+  }
+}
+
+const MISTRAL_PROVIDER: HostedOpenAIProviderDefinition = {
+  id: "mistral",
+  baseUrl: "https://api.mistral.ai/v1",
+  models: [
+    { id: "ministral-14b-latest", contextWindow: 262_144 },
+    { id: "ministral-8b-latest", contextWindow: 262_144 },
+    { id: "ministral-3b-latest", contextWindow: 262_144 },
+  ],
+};
+
+const CEREBRAS_PROVIDER: HostedOpenAIProviderDefinition = {
+  id: "cerebras",
+  baseUrl: "https://api.cerebras.ai/v1",
+  models: [{ id: "gemma-4-31b", contextWindow: 131_072, reasoning: true }],
+};
+
+const HUGGINGFACE_PROVIDER: HostedOpenAIProviderDefinition = {
+  id: "huggingface",
+  baseUrl: "https://router.huggingface.co/v1",
+  models: [
+    {
+      id: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      contextWindow: 262_144,
+      reasoning: true,
+    },
+    { id: "Qwen/Qwen2.5-Coder-32B-Instruct", contextWindow: 131_072 },
+  ],
+};
+
 export class OllamaProvider extends HttpProvider {
   constructor(credentials: CredentialResolver, fetcher?: typeof fetch) {
     super("ollama", credentials, fetcher);
@@ -794,7 +943,11 @@ export class OllamaProvider extends HttpProvider {
     const config = this.getConfig();
     const baseUrl = ollamaBase(config);
     const endpoint = `${baseUrl}/api/chat`;
-    const client = new OllamaModel({ model: model.id, endpoint });
+    const client = new OllamaModel({
+      model: model.id,
+      endpoint,
+      contextWindow: model.contextWindow,
+    });
     return {
       providerId: this.id,
       modelId: model.id,
@@ -882,6 +1035,9 @@ export interface ProviderFieldSpec {
   fields: Array<"apiKey" | "baseUrl" | "manualModelId">;
   credentialRequired: boolean;
   helpUrl?: string;
+  description?: string;
+  defaultModelId?: string;
+  modelOptions?: string[];
 }
 
 /** Single source of truth for what a settings screen needs to collect per
@@ -891,28 +1047,83 @@ export const PROVIDER_FIELD_SPECS: ProviderFieldSpec[] = [
   {
     id: "groq",
     label: "Groq",
-    fields: ["apiKey"],
+    fields: ["apiKey", "manualModelId"],
     credentialRequired: true,
     helpUrl: "https://console.groq.com/keys",
+    description: "Fast hosted inference with a permanent free-plan allowance.",
+    defaultModelId: "qwen/qwen3.6-27b",
+    modelOptions: [
+      "qwen/qwen3.6-27b",
+      "qwen/qwen3.8-27b",
+      "openai/gpt-oss-20b",
+    ],
   },
   {
     id: "openrouter",
     label: "OpenRouter",
-    fields: ["apiKey"],
+    fields: ["apiKey", "manualModelId"],
     credentialRequired: true,
     helpUrl: "https://openrouter.ai/keys",
+    description: "Free-model access using an explicit <=80B route.",
+    defaultModelId: "nvidia/nemotron-3.5-lightning:free",
+    modelOptions: ["nvidia/nemotron-3.5-lightning:free"],
+  },
+  {
+    id: "mistral",
+    label: "Mistral AI",
+    fields: ["apiKey", "manualModelId"],
+    credentialRequired: true,
+    helpUrl: "https://console.mistral.ai/api-keys/",
+    description: "Free Studio mode with compact tool-capable models.",
+    defaultModelId: "ministral-14b-latest",
+    modelOptions: [
+      "ministral-14b-latest",
+      "ministral-8b-latest",
+      "ministral-3b-latest",
+    ],
+  },
+  {
+    id: "cerebras",
+    label: "Cerebras",
+    fields: ["apiKey", "manualModelId"],
+    credentialRequired: true,
+    helpUrl: "https://cloud.cerebras.ai/platform/",
+    description:
+      "Very fast inference; the current trial requires account verification.",
+    defaultModelId: "gemma-4-31b",
+    modelOptions: ["gemma-4-31b"],
+  },
+  {
+    id: "huggingface",
+    label: "Hugging Face",
+    fields: ["apiKey", "manualModelId"],
+    credentialRequired: true,
+    helpUrl: "https://huggingface.co/settings/tokens",
+    description:
+      "Inference Providers routing with a small monthly free credit.",
+    defaultModelId: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    modelOptions: [
+      "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "Qwen/Qwen2.5-Coder-32B-Instruct",
+    ],
   },
   {
     id: "ollama",
     label: "Ollama (local)",
-    fields: ["baseUrl"],
+    fields: ["baseUrl", "manualModelId"],
     credentialRequired: false,
+    helpUrl: "https://ollama.com/download/windows",
+    description:
+      "Private local inference; the app starts the installed service automatically.",
+    defaultModelId: "qwen2.5-coder:7b",
+    modelOptions: ["qwen2.5-coder:7b"],
   },
   {
     id: "openai-compatible",
     label: "OpenAI-compatible / local endpoint",
     fields: ["baseUrl", "apiKey", "manualModelId"],
     credentialRequired: false,
+    description: "Advanced route for a self-hosted compatible endpoint.",
   },
 ];
 
@@ -962,8 +1173,21 @@ export function createDefaultProviderGateway(
   const registry = new ProviderRegistry()
     .register(new GroqProvider(credentials, options.fetcher))
     .register(new OpenRouterProvider(credentials, options.fetcher))
+    .register(
+      new HostedOpenAIProvider(MISTRAL_PROVIDER, credentials, options.fetcher),
+    )
+    .register(
+      new HostedOpenAIProvider(CEREBRAS_PROVIDER, credentials, options.fetcher),
+    )
+    .register(
+      new HostedOpenAIProvider(
+        HUGGINGFACE_PROVIDER,
+        credentials,
+        options.fetcher,
+      ),
+    )
     .register(new OpenAICompatibleProvider(credentials, options.fetcher))
-    .register(new OllamaProvider(credentials, options.fetcher)); // All are free-tier providers
+    .register(new OllamaProvider(credentials, options.fetcher));
   return new ProviderGateway(registry, options.onEvent, options);
 }
 
@@ -1042,6 +1266,28 @@ function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
     },
   };
 }
+
+function hostedModel(
+  providerId: string,
+  model: HostedOpenAIProviderDefinition["models"][number],
+): ModelInfo {
+  return {
+    id: model.id,
+    name: model.id,
+    providerId,
+    contextWindow: model.contextWindow,
+    totalParameters: lookupTotalParameters(providerId, model.id),
+    capabilities: {
+      tools: true,
+      vision: false,
+      reasoning: model.reasoning ?? false,
+      streaming: true,
+      structuredOutput: true,
+    },
+    metadata: { verifiedParameterLimit: true },
+  };
+}
+
 function manualModel(providerId: string, id: string): ModelInfo {
   return {
     id,

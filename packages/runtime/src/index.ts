@@ -1,5 +1,6 @@
 export {
   CODING_AGENT_ID,
+  CONVERSATION_AGENT_ID,
   createDefaultAgents,
   DEFAULT_AGENT_ID,
   RESERVED_AGENT_IDS,

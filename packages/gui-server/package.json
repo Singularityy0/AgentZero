@@ -19,8 +19,10 @@
     }
   },
   "dependencies": {
+    "@agentic-runtime/command": "workspace:*",
     "@agentic-runtime/core": "workspace:*",
     "@agentic-runtime/gateway": "workspace:*",
+    "@agentic-runtime/runtime": "workspace:*",
     "@agentic-runtime/search": "workspace:*",
     "@agentic-runtime/session": "workspace:*",
     "@agentic-runtime/workspace": "workspace:*"

@@ -20,6 +20,7 @@ export interface OllamaModelOptions {
   endpoint?: string;
   apiKey?: string;
   timeoutMs?: number;
+  contextWindow?: number;
 }
 
 interface OllamaMessage {
@@ -102,6 +103,9 @@ export class OllamaModel implements LanguageModel {
           model: this.options.model,
           messages: request.messages.map(toOllamaMessage),
           tools: request.tools.map(toOllamaTool),
+          ...(this.options.contextWindow
+            ? { options: { num_ctx: this.options.contextWindow } }
+            : {}),
           stream: false,
         }),
         signal: controller.signal,
@@ -288,45 +292,68 @@ export function parseJsonToolCalls(content: string): ToolCall[] {
   for (const candidateText of candidates) {
     try {
       const parsed: unknown = JSON.parse(candidateText);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        continue;
-      }
+      for (const candidate of collectJsonToolCandidates(parsed)) {
+        const functionCall = asRecord(candidate.function);
+        const name = firstString(
+          candidate.name,
+          candidate.tool_name,
+          candidate.tool,
+          functionCall?.name,
+        );
+        let arguments_: unknown =
+          candidate.arguments ??
+          candidate.parameters ??
+          candidate.input ??
+          functionCall?.arguments ??
+          functionCall?.parameters;
+        if (typeof arguments_ === "string") {
+          arguments_ = JSON.parse(arguments_);
+        }
+        const toolArguments = asRecord(arguments_);
+        if (!name || !toolArguments) continue;
 
-      const candidate = parsed as Record<string, unknown>;
-      const name =
-        typeof candidate.name === "string"
-          ? candidate.name
-          : typeof candidate.tool_name === "string"
-            ? candidate.tool_name
-            : undefined;
-      let arguments_: unknown = candidate.arguments;
-      if (typeof arguments_ === "string") {
-        arguments_ = JSON.parse(arguments_);
-      }
-      if (
-        !name ||
-        !arguments_ ||
-        typeof arguments_ !== "object" ||
-        Array.isArray(arguments_)
-      ) {
-        continue;
-      }
+        const signature = JSON.stringify([name, toolArguments]);
+        if (signatures.has(signature)) continue;
+        signatures.add(signature);
 
-      const signature = JSON.stringify([name, arguments_]);
-      if (signatures.has(signature)) continue;
-      signatures.add(signature);
-
-      calls.push({
-        id: randomUUID(),
-        name,
-        arguments: arguments_ as Record<string, unknown>,
-      });
+        calls.push({
+          id: randomUUID(),
+          name,
+          arguments: toolArguments,
+        });
+      }
     } catch {
       // Continue when the model response contains non-tool text.
     }
   }
 
   return calls;
+}
+
+function collectJsonToolCandidates(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) {
+    return value.flatMap(collectJsonToolCandidates);
+  }
+  const candidate = asRecord(value);
+  if (!candidate) return [];
+
+  const wrappedCalls = candidate.tool_calls ?? candidate.calls;
+  if (Array.isArray(wrappedCalls)) {
+    return wrappedCalls.flatMap(collectJsonToolCandidates);
+  }
+  return [candidate];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  return values.find(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
 }
 
 function extractJsonObjects(content: string): string[] {

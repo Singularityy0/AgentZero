@@ -37,6 +37,11 @@ export interface AssistantMessage {
   role: "assistant";
   content: string;
   toolCalls?: readonly ToolCall[];
+  metadata?: {
+    taskId?: string;
+    /** Safe execution summary for UI disclosure, never private chain-of-thought. */
+    thinking?: string[];
+  };
 }
 
 export interface ToolMessage {

@@ -9,15 +9,19 @@
   "scripts": {
     "build": "pnpm build:rust && pnpm build:ts",
     "build:rust": "cargo build --manifest-path rust/Cargo.toml",
-    "build:ts": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/gateway/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/retrieval/tsconfig.json packages/runtime/tsconfig.json packages/gui-server/tsconfig.json packages/tui/tsconfig.json",
-    "clean": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/gateway/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/retrieval/tsconfig.json packages/runtime/tsconfig.json packages/gui-server/tsconfig.json packages/tui/tsconfig.json --clean",
+    "build:ts": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/gateway/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/retrieval/tsconfig.json packages/runtime/tsconfig.json packages/gui-server/tsconfig.json packages/tui/tsconfig.json packages/desktop/tsconfig.json",
+    "clean": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/gateway/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/retrieval/tsconfig.json packages/runtime/tsconfig.json packages/gui-server/tsconfig.json packages/tui/tsconfig.json packages/desktop/tsconfig.json --clean",
     "test": "pnpm build && tsc -p tests/tsconfig.json && node --test dist-tests/runtime.test.js dist-tests/routing.test.js dist-tests/retrieval.test.js",
     "tui": "pnpm build && node packages/tui/dist/index.js",
     "settings": "pnpm build && pnpm --filter @agentic-runtime/gui build && node packages/gui-server/dist/cli.js",
+    "start": "pnpm desktop",
+    "desktop": "pnpm build:ts && pnpm --filter @agentic-runtime/gui build && pnpm --filter @agentic-runtime/desktop start",
+    "desktop:quick": "pnpm --filter @agentic-runtime/desktop start",
+    "desktop:package": "pnpm build && pnpm --filter @agentic-runtime/gui build && pnpm --filter @agentic-runtime/desktop dist",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "typecheck": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/gateway/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/retrieval/tsconfig.json packages/runtime/tsconfig.json packages/gui-server/tsconfig.json packages/tui/tsconfig.json --pretty"
+    "typecheck": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/gateway/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/retrieval/tsconfig.json packages/runtime/tsconfig.json packages/gui-server/tsconfig.json packages/tui/tsconfig.json packages/desktop/tsconfig.json --pretty"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
