@@ -99,6 +99,7 @@ export function estimateModelRequestTokens(request: ModelRequest): number {
 
 export type ModelErrorCode =
   | "rate_limit"
+  | "quota"
   | "context_length"
   | "timeout"
   | "cancelled"
@@ -152,6 +153,23 @@ export function classifyModelError(error: unknown): ModelErrorClassification {
 
   if (status === 429 || includesAny(searchable, ["rate_limit", "rate limit"])) {
     return { code: "rate_limit", retryable: true, status };
+  }
+  if (
+    status === 402 ||
+    includesAny(searchable, [
+      "insufficient quota",
+      "insufficient_quota",
+      "payment required",
+      "quota exceeded",
+      "quota exhausted",
+      "out of credits",
+      "credit balance",
+    ])
+  ) {
+    // Billing/quota exhaustion is terminal for this provider account but not
+    // for the user's task. Mark it retryable so the gateway cools down this
+    // route and immediately tries another configured provider.
+    return { code: "quota", retryable: true, status };
   }
   if (
     status === 413 ||

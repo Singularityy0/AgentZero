@@ -2254,6 +2254,7 @@ test("HeadlessRuntimeService keeps a focused single-file edit local and stops af
   await retrieval.indexProject();
   const coderRequests: ModelRequest[] = [];
   let plannerCalls = 0;
+  let reviewerCalls = 0;
   const insertionSort = `pub fn insertion_sort(values: &mut [i32]) {
     for index in 1..values.len() {
         let mut current = index;
@@ -2312,7 +2313,17 @@ test("HeadlessRuntimeService keeps a focused single-file edit local and stops af
         ),
       ]),
     ],
-    [REVIEWER_AGENT_ID, new FakeModel([assistantResponse("Edit reviewed.")])],
+    [
+      REVIEWER_AGENT_ID,
+      {
+        respond: async () => {
+          reviewerCalls += 1;
+          throw new Error(
+            "Focused single-file tasks must not invoke a second review model.",
+          );
+        },
+      },
+    ],
   ]);
   const tools = new ToolRegistry();
   for (const tool of createIdeTools()) tools.register(tool);
@@ -2335,7 +2346,9 @@ test("HeadlessRuntimeService keeps a focused single-file edit local and stops af
     });
 
     assert.equal(result.status, "completed");
+    assert.equal(result.text, "Saved `singu.rs`.");
     assert.equal(plannerCalls, 0);
+    assert.equal(reviewerCalls, 0);
     assert.equal(coderRequests.length, 2);
     assert.deepEqual(
       coderRequests[0]?.tools.map((tool) => tool.name),
@@ -3031,10 +3044,7 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
     ],
     [
       REVIEWER_AGENT_ID,
-      new FakeModel([
-        assistantResponse("Review complete."),
-        assistantResponse("Resumed review complete."),
-      ]),
+      new FakeModel([assistantResponse("Resumed review complete.")]),
     ],
   ]);
   const tools = new ToolRegistry()
@@ -3050,7 +3060,11 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
       },
       execute: async () => {
         mutationExecutions += 1;
-        return { output: "changed", changed: true };
+        return {
+          output: "changed",
+          changed: true,
+          changedFiles: [{ path: "rotating_cube.html" }],
+        };
       },
     })
     .register({
@@ -3130,14 +3144,14 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
       ).results?.retrieve?.summary ?? "",
       /Greenfield artifact/,
     );
-    assert.equal(persisted?.state.result, "Review complete.");
+    assert.equal(persisted?.state.result, "Saved `rotating_cube.html`.");
     const completedSession = store.getSession(session.id);
     const assistantMessages = completedSession?.messages.filter(
       (message) => message.role === "assistant",
     );
     assert.deepEqual(
       assistantMessages?.map((message) => message.content),
-      ["Review complete."],
+      ["Saved `rotating_cube.html`."],
     );
     assert.ok(
       assistantMessages?.[0]?.metadata?.thinking?.includes("Planner started"),

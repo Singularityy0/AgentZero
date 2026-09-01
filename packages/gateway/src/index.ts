@@ -354,11 +354,13 @@ export class ModelRegistry {
 /** One bounded attempt for every eligible provider in the safe catalog. */
 export const DEFAULT_MAX_ROUTE_ATTEMPTS = 7;
 export const DEFAULT_ROUTE_COOLDOWN_MS = 30_000;
+export const DEFAULT_QUOTA_ROUTE_COOLDOWN_MS = 30 * 60_000;
 export const DEFAULT_ESTIMATED_OUTPUT_TOKENS = 1_024;
 
 export interface ProviderGatewayOptions {
   maxAttempts?: number;
   cooldownMs?: number;
+  quotaCooldownMs?: number;
   estimatedOutputTokens?: number;
   now?: () => number;
 }
@@ -370,6 +372,7 @@ export class ProviderGateway implements LanguageModel {
   private readonly cooldowns = new Map<string, number>();
   private readonly maxAttempts: number;
   private readonly cooldownMs: number;
+  private readonly quotaCooldownMs: number;
   private readonly estimatedOutputTokens: number;
   private readonly now: () => number;
 
@@ -387,6 +390,11 @@ export class ProviderGateway implements LanguageModel {
       options.cooldownMs,
       DEFAULT_ROUTE_COOLDOWN_MS,
       "cooldownMs",
+    );
+    this.quotaCooldownMs = nonNegativeNumber(
+      options.quotaCooldownMs,
+      DEFAULT_QUOTA_ROUTE_COOLDOWN_MS,
+      "quotaCooldownMs",
     );
     this.estimatedOutputTokens = nonNegativeNumber(
       options.estimatedOutputTokens,
@@ -703,7 +711,10 @@ export class ProviderGateway implements LanguageModel {
         if (modelError.retryable && modelError.code !== "context_length") {
           this.cooldowns.set(
             keyFor(candidate.model.providerId, candidate.model.id),
-            this.now() + this.cooldownMs,
+            this.now() +
+              (modelError.code === "quota"
+                ? this.quotaCooldownMs
+                : this.cooldownMs),
           );
         }
         if (!modelError.retryable || attempt === ranked.length) {

@@ -688,6 +688,32 @@ Relative Path` yields the workspace-relative one. Clipboard writes fall back
   Regression coverage reproduces the hosted model's exact marker style; all 75
   tests and ESLint pass.
 
+- Traced task `mtip2ptv-2eqfp1wiel` for `vishu.cpp`: deterministic planning and
+  retrieval completed, but both Coder attempts sent the same request only to
+  `cerebras/gemma-4-31b` and received `402 status code (no body)`. Global settings
+  confirmed Groq, OpenRouter/Nemotron, and Mistral were configured fallbacks;
+  none ran because every unrecognized 4xx response was classified as a terminal
+  invalid request.
+- Added a distinct retryable `quota` model error for HTTP 402 and common
+  quota/credit exhaustion messages. This means retryable at the gateway route
+  level: Cerebras is cooled down and the identical request moves to the next
+  configured provider. Bad credentials and malformed requests remain terminal.
+  Regression coverage verifies one Cerebras attempt followed by OpenRouter.
+
+- Traced successful task `mtiudvm4-x3gvzai9cc` (26 s). It used four logical
+  model turns, not seven successful coding models: the Coder's one gateway call
+  rejected Cerebras (402 quota, 946 ms), Groq (413/rate limit, 214 ms), and
+  OpenRouter (429, 470 ms), then Mistral generated `vishu.cpp` in 8.9 s. Verifier
+  used two Mistral turns because the first invoked `read_file`; Reviewer spent a
+  redundant 3.5 s repeating the passed checklist and its prose became the chat
+  response.
+- Quota routes now stay cooled down for 30 minutes (transient rate limits remain
+  30 seconds), so a dead paid/quota route is not probed on every nearby task.
+  Bounded one-file create/edit flows keep the Verifier but complete Reviewer
+  deterministically, removing that extra model call. Successful workspace tasks
+  now persist only a concise `Saved <path>.` assistant message; full review and
+  routing evidence remains available in Thinking/Trace.
+
 ## Next Steps
 
 - Refine the IDE Observability Dashboard to show full call hierarchy traces per the PS requirements.

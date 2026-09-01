@@ -989,6 +989,8 @@ export class HeadlessRuntimeService {
           10,
         )
       : 1;
+    const fastSingleFilePath =
+      focusedFileEdit || (greenfieldArtifact && artifactCount === 1);
     // A 7B model cannot reliably emit five mutation calls from one prompt: asked
     // for all of them at once it answers with prose and changes nothing. Each
     // artifact therefore gets its own coding step with a single-file objective,
@@ -1329,7 +1331,13 @@ export class HeadlessRuntimeService {
               },
         );
       },
-      reviewer: runAgentWorker(REVIEWER_AGENT_ID),
+      reviewer: fastSingleFilePath
+        ? async (): Promise<AgentWorkResult> => {
+            const summary =
+              "Independent verification already passed for this bounded single-file task; a second model review is unnecessary.";
+            return { success: true, summary, output: summary };
+          }
+        : runAgentWorker(REVIEWER_AGENT_ID),
     };
     const orchestrator = new TaskOrchestrator(workers, {
       maxAttemptsPerStep: 2,
@@ -1375,6 +1383,8 @@ export class HeadlessRuntimeService {
     // surfaced as paused for a human decision, with the artifacts named.
     const unverifiedArtifacts =
       state.stage !== "completed" && producedFiles.size > 0;
+    const completedArtifacts =
+      state.stage === "completed" && producedFiles.size > 0;
     const text = unverifiedArtifacts
       ? [
           `Implementation finished, but verification did not pass. ${producedFiles.size} file(s) were written and kept:`,
@@ -1388,7 +1398,9 @@ export class HeadlessRuntimeService {
           "",
           "Review the files above, then either accept them or ask for the specific fix.",
         ].join("\n")
-      : (final?.summary ?? state.failure ?? "Pipeline produced no result.");
+      : completedArtifacts
+        ? formatSavedFiles(producedFiles)
+        : (final?.summary ?? state.failure ?? "Pipeline produced no result.");
     return {
       runId: state.runId,
       agentId: REVIEWER_AGENT_ID,
@@ -2183,6 +2195,15 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function formatSavedFiles(paths: ReadonlySet<string>): string {
+  const files = [...paths];
+  if (files.length === 1) return `Saved \`${files[0]}\`.`;
+  return [
+    `Saved ${files.length} files:`,
+    ...files.map((path) => `- \`${path}\``),
+  ].join("\n");
 }
 
 /**

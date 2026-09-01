@@ -133,6 +133,11 @@ test("model errors classify retryable and terminal provider failures", () => {
     retryable: true,
     status: 429,
   });
+  assert.deepEqual(classifyModelError({ status: 402 }), {
+    code: "quota",
+    retryable: true,
+    status: 402,
+  });
   assert.equal(classifyModelError({ status: 413 }).code, "context_length");
   assert.equal(
     classifyModelError(new Error("request timed out")).code,
@@ -330,6 +335,87 @@ test("gateway tolerates throwing observers and normalizes raw transient failures
   assert.equal(received.length, 2);
   assert.equal(received[0], original);
   assert.equal(received[1], original);
+});
+
+test("gateway fails over when the selected provider account has no quota", async () => {
+  const events: GatewayEvent[] = [];
+  let now = 1_000;
+  let cerebrasAttempts = 0;
+  let fallbackAttempts = 0;
+  const primary = model("cerebras", "gemma-4-31b", {
+    contextWindow: 131_072,
+  });
+  const fallback = model("openrouter", "nemotron", {
+    contextWindow: 131_072,
+  });
+  const gateway = new ProviderGateway(
+    new ProviderRegistry()
+      .register(
+        new StubProvider("cerebras", [primary], async () => {
+          cerebrasAttempts += 1;
+          throw { status: 402, message: "402 status code (no body)" };
+        }),
+      )
+      .register(
+        new StubProvider("openrouter", [fallback], async () => {
+          fallbackAttempts += 1;
+          return structuredClone(response);
+        }),
+      ),
+    (event) => events.push(event),
+    {
+      maxAttempts: 2,
+      cooldownMs: 5,
+      quotaCooldownMs: 500,
+      now: () => now,
+    },
+  );
+  registerModels(gateway, [primary, fallback]);
+  gateway.setRoutePreferences([
+    { providerId: "cerebras", modelId: "gemma-4-31b" },
+    { providerId: "openrouter", modelId: "nemotron" },
+  ]);
+
+  assert.equal((await gateway.respond(request("create vishu.cpp"))).text, "ok");
+  assert.equal(cerebrasAttempts, 1);
+  assert.equal(fallbackAttempts, 1);
+  const failure = events.find(
+    (event) => event.type === "routing_attempt_failed",
+  );
+  assert.deepEqual(failure?.failure, {
+    code: "quota",
+    retryable: true,
+    status: 402,
+  });
+  const decisions = events.filter((event) => event.type === "routing_decision");
+  assert.deepEqual(
+    decisions.map((event) => [event.providerId, event.attempt]),
+    [
+      ["cerebras", 1],
+      ["openrouter", 2],
+    ],
+  );
+  assert.match(decisions[1]?.reason ?? "", /failover after quota/);
+
+  // A billing/quota failure cannot recover on the ordinary short rate-limit
+  // cooldown. Subsequent tasks should use the healthy route directly.
+  now = 1_010;
+  assert.equal(
+    (await gateway.respond(request("create another file"))).text,
+    "ok",
+  );
+  assert.equal(cerebrasAttempts, 1);
+  assert.equal(fallbackAttempts, 2);
+
+  // The selected route is probed again eventually, allowing an account whose
+  // quota was replenished to recover without restarting the application.
+  now = 1_500;
+  assert.equal(
+    (await gateway.respond(request("probe restored quota"))).text,
+    "ok",
+  );
+  assert.equal(cerebrasAttempts, 2);
+  assert.equal(fallbackAttempts, 3);
 });
 
 test("gateway restores a primary route at cooldown expiry", async () => {

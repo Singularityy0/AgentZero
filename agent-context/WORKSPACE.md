@@ -197,6 +197,13 @@ Build artifacts are emitted under package `dist/` directories and
 - With Groq selected, configured fallbacks are ordered OpenRouter/Nemotron,
   Cerebras, Hugging Face, hosted Mistral, custom OpenAI-compatible, then local
   Ollama. The gateway can attempt all seven eligible provider families.
+- HTTP 402 and explicit quota/credit exhaustion are route-level failures: the
+  unavailable provider is cooled down and the same request immediately moves to
+  the next configured provider instead of repeating the pipeline step.
+- Quota failures use a 30-minute circuit-breaker cooldown instead of the normal
+  30-second transient cooldown. Simple one-file creation/edit tasks skip a
+  redundant Reviewer model call after independent verification, and successful
+  file work is summarized in chat as only `Saved <path>.`.
 - Gateway-created Ollama requests currently use the adapter's 300-second timeout;
   `OLLAMA_TIMEOUT_MS` is not wired into runtime composition.
 - Ollama availability checks normalize the implicit `:latest` tag and confirm

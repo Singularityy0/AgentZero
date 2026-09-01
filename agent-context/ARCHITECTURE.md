@@ -100,10 +100,23 @@ its full step budget on a change whose authoritative context is already the
 named file. An explicit approval denial pauses the durable orchestration state
 without another model call.
 
+Bounded single-file creation/edit tasks use the independent Verifier as their
+final semantic check and complete the Reviewer stage deterministically instead
+of paying for a second model to repeat the same checklist. Detailed verifier and
+provider evidence remains in the trace, while the chat transcript receives only
+a compact saved-file confirmation rather than internal review prose.
+
 The desktop preserves an explicitly selected primary provider. When Groq is the
 primary, its failover preference is OpenRouter/Nemotron first, then the other
 configured hosted providers, with Ollama last. Cooldowns and capability/context
 eligibility still apply inside that stable preference order.
+
+Provider quota and billing exhaustion (including HTTP 402) is terminal for the
+affected account but not for the user's task. The gateway classifies it as a
+route-level quota failure, cools down that route, and continues through the
+configured fallback chain with the identical request. Authentication and
+malformed-request failures remain terminal so invalid credentials or prompts
+are not silently hidden by another provider.
 
 High-confidence artifact language (for example, making or generating a file,
 page, component, website, or application) is treated as workspace mutation even
