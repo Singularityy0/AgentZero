@@ -714,6 +714,16 @@ Relative Path` yields the workspace-relative one. Clipboard writes fall back
   now persist only a concise `Saved <path>.` assistant message; full review and
   routing evidence remains available in Thinking/Trace.
 
+- Fixed renderer focus becoming unusable after an explorer deletion. The delete
+  flow used synchronous `window.confirm()`, which blocks Electron web contents
+  and could leave no usable focus owner after the selected row disappeared. It
+  now uses a non-blocking in-app confirmation dialog with explicit autofocus,
+  Escape/backdrop cancellation, safe focus restoration, and a busy state while
+  the request runs. Explorer selection is cleared when its entry disappears so
+  global file shortcuts cannot keep targeting a deleted path. Live browser
+  verification confirmed both chat and terminal inputs accept text after the
+  dialog closes.
+
 ## Next Steps
 
 - Refine the IDE Observability Dashboard to show full call hierarchy traces per the PS requirements.

@@ -640,6 +640,8 @@ export function App() {
     path: string;
     mode: "copy" | "cut";
   }>();
+  const [deleteCandidate, setDeleteCandidate] = useState<FileEntry>();
+  const [deletingPath, setDeletingPath] = useState<string>();
   const submissionInFlight = useRef(false);
   const openFilesRef = useRef<OpenFileView[]>([]);
   const folderPathRef = useRef(".");
@@ -812,12 +814,7 @@ export function App() {
   };
 
   const deleteEntry = async (entry: FileEntry) => {
-    const confirmed = window.confirm(
-      entry.type === "directory"
-        ? `Delete the folder ${entry.name} and everything inside it? This cannot be undone.`
-        : `Delete ${entry.name}? This cannot be undone.`,
-    );
-    if (!confirmed) return;
+    setDeletingPath(entry.path);
     try {
       await requestJson(
         `/api/files/entry?path=${encodeURIComponent(entry.path)}`,
@@ -838,6 +835,9 @@ export function App() {
       setNotice(`Deleted ${entry.path}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeleteCandidate(undefined);
+      setDeletingPath(undefined);
     }
   };
 
@@ -1531,7 +1531,7 @@ export function App() {
               onOpenFolder={() => void openFolder()}
               onCreate={(type) => void createEntry(type)}
               onRename={(entry) => void renameEntry(entry)}
-              onDelete={(entry) => void deleteEntry(entry)}
+              onDelete={setDeleteCandidate}
               onRefresh={() => void loadFolder(folderPath)}
               projectRootPath={workbench?.project.rootPath ?? ""}
               clipboard={fileClipboard}
@@ -1719,6 +1719,14 @@ export function App() {
           <span>{language}</span>
         </div>
       </footer>
+      {deleteCandidate && (
+        <DeleteConfirmation
+          entry={deleteCandidate}
+          busy={deletingPath === deleteCandidate.path}
+          onCancel={() => setDeleteCandidate(undefined)}
+          onConfirm={() => void deleteEntry(deleteCandidate)}
+        />
+      )}
     </div>
   );
 }
@@ -1789,6 +1797,14 @@ function ExplorerPanel({
     y: number;
   }>();
   const [selected, setSelected] = useState<FileEntry>();
+
+  // A removed entry must not remain the target of global explorer shortcuts.
+  // This also gives focus restoration a stable fallback after deletion.
+  useEffect(() => {
+    if (selected && !entries.some((entry) => entry.path === selected.path)) {
+      setSelected(undefined);
+    }
+  }, [entries, selected]);
 
   // Keyboard parity with the editor: the shortcuts shown in the menu have to
   // work, and they must not fire while the user is typing somewhere else.
@@ -2165,6 +2181,107 @@ function MenuItem({
         </span>
       )}
     </button>
+  );
+}
+
+/**
+ * Non-blocking destructive-action confirmation for the desktop renderer.
+ * Native `window.confirm()` blocks Electron's web contents and can leave the
+ * renderer without a usable focus owner after the selected row is removed.
+ */
+function DeleteConfirmation({
+  entry,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  entry: FileEntry;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    previousFocus.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    cancelButton.current?.focus();
+    return () => {
+      const target = previousFocus.current;
+      if (target?.isConnected) target.focus();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || busy) return;
+      event.preventDefault();
+      onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] grid place-items-center bg-black/65 p-4 backdrop-blur-[1px]"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-confirmation-title"
+        aria-describedby="delete-confirmation-description"
+        className="w-full max-w-sm rounded-md border border-white/10 bg-[#141414] p-4 shadow-2xl shadow-black/70"
+      >
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 rounded-md bg-rose-500/10 p-2 text-rose-300">
+            <Trash2 size={16} />
+          </div>
+          <div className="min-w-0">
+            <h2
+              id="delete-confirmation-title"
+              className="text-sm font-medium text-neutral-200"
+            >
+              Delete {entry.type === "directory" ? "folder" : "file"}?
+            </h2>
+            <p
+              id="delete-confirmation-description"
+              className="mt-1 break-words text-xs leading-5 text-neutral-500"
+            >
+              {entry.type === "directory"
+                ? `${entry.name} and everything inside it will be permanently deleted.`
+                : `${entry.name} will be permanently deleted.`}
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            ref={cancelButton}
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+            className="rounded border border-white/10 px-3 py-1.5 text-xs text-neutral-400 hover:bg-white/5 hover:text-neutral-200 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onConfirm}
+            className="flex items-center gap-1.5 rounded bg-rose-500/15 px-3 py-1.5 text-xs text-rose-200 hover:bg-rose-500/25 disabled:opacity-50"
+          >
+            {busy && <RefreshCw size={11} className="animate-spin" />}
+            {busy ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
