@@ -154,20 +154,37 @@ flowchart TD
     Eligible -->|No| Direct[Direct registry-driven path]
     Eligible -->|Yes| VerifyOnly{Read-only verification request?}
     VerifyOnly -->|Yes| Verifier[Direct Verifier path]
-    VerifyOnly -->|No| Coding{Coding keyword match?}
-    Coding -->|Yes| Pipeline[Five-stage coding pipeline]
-    Coding -->|No| Direct
+    VerifyOnly -->|No| Work{Workspace work requested?}
+    Work -->|Yes| Pipeline[Coding pipeline]
+    Work -->|No| About{Refers to the opened project?}
+    About -->|Yes| Direct[Architect: read-only tools and context]
+    About -->|No| Chat[Chat agent: no tools, no context]
 
     Verifier --> Finish[Persist transcript, task state, events, and traces]
     Pipeline --> Finish
     Direct --> Finish
+    Chat --> Finish
 ```
 
 Routing precedence matters:
 
 1. Verification-only routing is checked first.
 2. Coding-pipeline routing is checked second.
-3. Everything else uses direct registry-driven execution.
+3. A question about the opened project uses the Architect, which has read-only
+   tools and the session context but cannot mutate anything.
+4. Everything else uses the tool-free chat agent.
+
+The last two steps are one distinction, and getting it wrong is not symmetric.
+"What is a closure" is answerable from the model's own knowledge, so the chat
+agent is both cheap and correct. "What files are in this repo" is not: both are
+explanation requests, so neither is workspace _work_, but routing the second to
+an agent with no tools and no context produces a confident invention. The
+workspace reference is what separates them.
+
+None of these four paths lets a general question reach the Coder. A prompt only
+reaches a mutation-capable agent when `requestsWorkspaceWork` is true, which
+requires an artifact request, a workspace reference, or a bare action verb — and
+which returns false outright for anything shaped as a question.
 
 ### Verification-only routing
 
@@ -246,15 +263,23 @@ use `handoff_agent` to invoke another registered agent.
 
 ```mermaid
 flowchart TD
-    Plan[Planner] --> Retrieve[Deterministic semantic retrieval]
-    Retrieve --> Code[Coder]
+    Plan[Planner] --> Expand{Decomposition returned?}
+    Expand -->|No| Retrieve[Deterministic semantic retrieval]
+    Expand -->|Yes| Rewrite[Plan rewritten: one coding step per sub-task]
+    Rewrite --> Retrieve
+    Retrieve --> Code[Coder, once per coding step]
+    Code --> Code
     Code --> Verify[Verifier]
     Verify --> Passed{VERIFICATION_PASSED?}
     Passed -->|Yes| Review[Reviewer]
-    Passed -->|No| Recover[Recovery attempt]
+    Passed -->|No| Recover[Rollback, replan, corrective coding]
     Recover --> Verify
     Review --> Done[Completed task]
 ```
+
+The pipeline has a fixed _shape_ but not a fixed _length_. The static plan
+carries a single placeholder coding step; the Planner may replace it with two to
+four narrowly scoped ones. See "Planner-driven decomposition" below.
 
 ### 1. Planner
 
@@ -312,6 +337,42 @@ The Reviewer receives the plan, retrieval evidence, implementation result, and
 verification result. It is read-only and produces the final user-facing summary.
 It does not run commands or modify files.
 
+### Planner-driven decomposition
+
+Fixing the number of coding steps in advance was wrong for the tasks this
+system is built for. A five-stage pipeline with exactly one Coder call gives a
+small model one shot at an objective that may span several files, and no amount
+of prompt engineering makes a 7B model emit four correct mutations from one
+turn.
+
+So the Planner decides the shape. Its reply may end with a fenced `subtasks`
+block, and when it does the orchestrator replaces the placeholder `code` step
+with one step per sub-task. Each Coder call then receives only its own slice of
+the objective, plus the shared retrieval evidence.
+
+Dependencies are rewired rather than reassigned by hand: the first inserted step
+inherits the placeholder's dependencies, so it still waits for retrieval, and
+anything that depended on the placeholder — the Verifier — now depends on the
+last inserted step, so verification still runs over the whole change.
+
+Three properties matter more than the mechanism:
+
+- **It degrades to the old behavior.** Missing block, malformed JSON, a
+  single-entry list, entries with no prompt: all yield no expansion and the
+  single generic coding step runs. A small model that cannot produce structured
+  output loses nothing.
+- **It is bounded.** At most four sub-steps. Every extra step is another model
+  call, so an over-eager split is a real cost, and the Planner is told
+  explicitly not to split work that touches one file.
+- **It survives a restart.** Accepted expansions are stored in the
+  orchestration state and replayed against the static plan on resume, so a task
+  interrupted midway through a decomposed run continues on the same step list
+  instead of rejecting `code-2` as an unknown step.
+
+The rewrite is emitted as a `plan_expanded` event and recorded as its own
+`plan_expansion` trace span, so the decomposition is visible in the dashboard
+rather than only in the Planner's prose.
+
 ### Pipeline execution rules
 
 The live pipeline is intentionally sequential. This avoids multiple agents
@@ -321,16 +382,22 @@ Current limits are:
 
 - Two attempts per stage
 - Ten stage attempts in total
-- Thirty-two model requests per task
-- Ten minutes per runtime execution or resume invocation
-- One hundred twenty-eight tool calls per multi-agent run
+- Forty-eight model requests per task
+- Thirty minutes per runtime execution or resume invocation
+- One hundred ninety-two tool calls per multi-agent run
+- $0.50 of real provider spend per task
+
+These are set against the evaluation's scoring formula rather than chosen as
+round numbers. Accuracy is multiplied by ten while time enters a penalty
+denominator, so a run halted just short of a correct answer scores far worse
+than the same run taking longer to finish. The ceilings sit below the 2700 s and
+$0.50 hard limits with margin and exist as runaway protection, not as a target.
 
 Completed stages are checkpointed in project SQLite. `resumeTask()` reloads the
 checkpoint and skips completed stages.
 
-The model-request count survives resume. The ten-minute wall-clock window starts
-again for each resume invocation, so it is not a cumulative task lifetime
-budget.
+The model-request count survives resume. The wall-clock window starts again for
+each resume invocation, so it is not a cumulative task lifetime budget.
 
 ## Registry-driven multi-agent behavior
 
@@ -458,19 +525,39 @@ provider model discovery at startup.
 
 ### Ranking
 
-The gateway ranks routes using:
+Ranking happens in two layers. Eligibility is absolute and is decided first:
 
 1. Tool support
 2. Estimated context fit
-3. Cooldown state
-4. Explicit preference order
-5. Estimated cost
-6. Context-window size
-7. Stable provider and model ordering
+3. A stage-specific context-window floor, when the route policy sets one
+4. Cooldown state
 
-Preference is considered before cost. Current behavior is best described as
-ordered routing with eligibility checks and cost-aware tie breaking, not a full
-cost optimizer.
+Order among eligible routes is then decided by the request's `bias`:
+
+| Bias       | First sort key                      | Used for                                        |
+| ---------- | ----------------------------------- | ----------------------------------------------- |
+| `balanced` | operator preference order           | ordinary coding work (the default)              |
+| `capacity` | largest known total parameter count | planning a complex task, verification, review   |
+| `economy`  | lowest estimated cost               | retrieval summarisation, chat, trivial requests |
+
+Remaining ties fall through preference order, estimated cost, context-window
+size, and finally a stable provider/model ordering.
+
+A bias only reorders routes that are all already eligible, so it can never
+promote a model that cannot serve the request. `capacity` treats an unknown
+parameter count as zero rather than as large: a model is only promoted above the
+operator's configured order on positive evidence that it is bigger. A window
+floor is a preference, not a constraint — if nothing clears it, ranking is
+repeated without it rather than failing a task a smaller window could have
+completed.
+
+Task complexity is a cheap syntactic classification of the prompt (length,
+number of concrete file references, conjunction count, multi-step vocabulary),
+not a model call. The two misclassifications are not symmetric: routing a hard
+task down costs accuracy, which the scoring formula weights ten times; routing
+an easy task up costs a fraction of a cent. `simple` is therefore narrow — a
+short request that names no file — and everything that points at concrete code
+stays on the operator's configured route.
 
 ### Failover
 
@@ -518,11 +605,26 @@ The TUI displays recent route and failover activity.
 
 ### Project isolation
 
-Every canonical project root receives a distinct project ID. Retrieval records
-include that project ID, so two projects cannot see each other's files, symbols,
-or edges even when a database path is shared in tests.
+Every canonical project root receives a distinct project ID — a SHA-256 of the
+real path, so symlinks and case differences on Windows resolve to the same
+project rather than two. Retrieval records include that project ID, so two
+projects cannot see each other's files, symbols, or edges even when a database
+path is shared in tests.
 
 The default runtime stores `retrieval.db` beside the project's session database.
+
+Isolation is enforced on three axes, and all three are covered by a test that
+opens two projects against one shared data root:
+
+| Axis                        | Mechanism                                       |
+| --------------------------- | ----------------------------------------------- |
+| Files, symbols, edges       | Per-project retrieval database plus project ID  |
+| Sessions, tasks, traces     | Per-project session database plus project ID    |
+| Agent definitions and rules | Per-project session database (see Persistence)  |
+| Filesystem access           | Every tool is rooted at the canonical workspace |
+
+Provider credentials and general settings stay global on purpose: an API key
+belongs to the machine, not to a codebase.
 
 ### Index contents
 
@@ -533,8 +635,12 @@ The retrieval database contains:
 - Symbols and line spans
 - Definition, reference, call, import, and export edges
 
-For TypeScript-family files, extraction uses the TypeScript compiler API.
-Supported structural extraction includes:
+For TypeScript **and JavaScript** files, extraction uses the TypeScript compiler
+API. The same parser handles both, so `.js`, `.jsx`, `.mjs`, and `.cjs` sources
+get real structure instead of the regex fallback; `ScriptKind.JSX` is used for
+plain `.js` because a `.js` file may legally contain JSX and that parse is a
+superset for everything the extractor reads. Supported structural extraction
+includes:
 
 - Declarations
 - Exported symbols
@@ -549,12 +655,36 @@ definitions and imports. Ripgrep supplies path and text fallback.
 
 ### Incremental indexing
 
-Before indexing a file, retrieval compares the current workspace hash with the
-stored hash. Unchanged files are reused. Changed files are replaced
-transactionally. Deleted files are removed from the index.
+Indexing is a three-tier check, cheapest first:
+
+1. **`stat` only.** If the file's size and mtime both match what was indexed,
+   the content cannot differ in any way this index would see, and the file is
+   skipped without being read. Agent writes always move mtime, so the agent's
+   own edits are never missed.
+2. **Read and hash.** If the stat differs, the file is read and hashed. A
+   matching hash means it was touched but not changed — a rebuild, a checkout, a
+   formatter writing identical bytes — and the new stat is recorded so the next
+   pass takes tier 1.
+3. **Re-extract.** Only a genuine content change replaces symbols and edges,
+   transactionally.
+
+Deleted files are removed from the index.
+
+This matters because `query()` refreshes the index by default, so the warm pass
+runs on essentially every retrieval. Reading and hashing every file each time
+was the dominant cost: on this repository the warm pass went from roughly 750 ms
+to 131 ms.
 
 Generated, dependency, database, archive, binary, and common build paths are
-ignored.
+ignored. Ignoring them at _discovery_ time rather than after the fact matters
+more than it looks: ripgrep treats a positive `--glob` as an override that takes
+precedence over `.gitignore`, so passing the wildcard `--glob "*"` silently
+disabled every ignore file and turned a 116-file listing into a 40,000-file one,
+mostly `node_modules`. That inflated every retrieval pass, leaked dependency
+paths into agent context through `find_files`, and could trip the index's own
+25,000-file ceiling on an ordinary project. Discovery now passes no positive
+glob in the wildcard case and always pairs a caller-supplied pattern with
+explicit exclusions.
 
 ### Query and ranking
 
@@ -587,10 +717,14 @@ empty.
 - There is no full control-flow or data-flow graph.
 - There is no LSP diagnostic integration.
 - Failing-test locations are not explicit ranking signals.
-- Mixed-language semantics are limited to regex metadata and text search.
-- Graph expansion is shallow.
+- Semantics beyond TypeScript and JavaScript are limited to regex metadata and
+  text search, so those languages have single-line symbol anchors and no call
+  edges.
+- Graph expansion is one hop.
 - There is no background file watcher.
-- Queries re-run an incremental project scan by default.
+- Queries re-run an incremental project scan by default; the scan is now
+  stat-gated, so this is cheap, but it is still demand-driven rather than
+  event-driven.
 - The Rust FlatCPG and PageRank code are not connected to this index.
 
 ## Context compaction
@@ -798,16 +932,24 @@ content.
 
 ### Global database
 
-The global database stores:
+The global database stores only what is genuinely machine-wide:
 
 - General settings
 - Provider credentials
 - Provider base URLs and model IDs
 - Last provider validation result
-- Agent definitions
 
 Provider credentials are stored in plaintext. The database file is the current
 secret boundary.
+
+Agent definitions used to live here, and that was an isolation bug. A project
+can ship its own agents under `.agentic/agents/*.md`, and those were registered
+into the shared table, so opening project A and then project B left A's private
+agents listed and selectable in B — a direct violation of the requirement that
+agent memory must not cross projects. They now live in the project database,
+which makes the isolation structural rather than a matter of query discipline:
+the definitions are in a different file per project. The global table is
+dropped on first open.
 
 ### Project database
 
@@ -821,8 +963,11 @@ The project database stores:
 - Orchestration checkpoints
 - Recovery state
 - Trace spans
+- Agent definitions, including any the project ships itself
 
-All queries are scoped to the current project ID.
+All queries are scoped to the current project ID, and the database file is
+per-project as well, so isolation does not depend on every query remembering to
+filter.
 
 ### Default data paths
 
@@ -993,6 +1138,25 @@ recorded inputs and outputs. It should not expose private chain-of-thought.
 
 ## Rust sidecar
 
+### Binary resolution and packaging
+
+The sidecar path comes from `AGENTIC_RUST_PATH` when the host sets one, and
+otherwise from `rust/target/release` then `rust/target/debug` in a source
+checkout. Both halves were needed: the path used to be hard-coded to
+`target/debug`, so a release build was never found, and a packaged desktop app
+has no `rust/target` tree beside its JavaScript at all — the binary was simply
+absent from the installer, which silently removed `analyze_code_structure`,
+`compute_ast_diff`, and signature pruning from the shipped product.
+`prepare-runtime-assets.mjs` now copies the binary next to ripgrep and the
+desktop main process points `AGENTIC_RUST_PATH` at it.
+
+A missing sidecar is a lost capability, not a failure: the two tools return a
+tool error the model can read and compaction falls back to its
+structured-exchange path, so ripgrep is fatal when absent and Rust is not. The
+child process and all three of its pipes are unreferenced so an idle sidecar
+cannot hold the host's event loop open, and `stopRustEngine()` is called when
+the server closes so it does not outlive the application.
+
 ### Process boundary
 
 `RustClient` lazily starts the Cargo-built executable and communicates through
@@ -1035,7 +1199,6 @@ slicing.
 - The cycle request does not represent a complete workspace Merkle tree.
 - The memory-mapped Rust `Wal` is not instantiated by the server or runtime.
 - The Rust WAL starts at offset zero and does not support durable replay.
-- The global Rust client is not explicitly stopped when the runtime closes.
 
 The current sidecar is useful for syntax slicing, signature pruning, and an
 advisory line diff. The larger Rust systems design remains planned.
@@ -1342,36 +1505,35 @@ Cost:
 
 ## Current status by area
 
-| Area                          | Status                | Notes                                                 |
-| ----------------------------- | --------------------- | ----------------------------------------------------- |
-| Provider-neutral core         | Implemented           | Contracts, runner, tools, and orchestrators exist     |
-| Coding pipeline               | Implemented           | Sequential five-stage path with checkpoints           |
-| Verification-only route       | Implemented           | Read-only checks route directly to Verifier           |
-| Verifier project rules        | Implemented           | Root `AGENTS.md` is included in Verifier prompt       |
-| Registry agents               | Implemented           | Custom agents and bounded handoffs exist              |
-| Smart provider failover       | Implemented with gaps | Context, tools, cost estimate, preference, cooldown   |
-| Model constraint enforcement  | Partial               | Sparse catalog and unverified models remain usable    |
-| Semantic retrieval            | Implemented with gaps | Strong TypeScript path, shallow mixed-language path   |
-| Context compaction            | Implemented           | Threshold, repeated passes, context-error recovery    |
-| File HITL                     | Implemented in TUI    | Stable partial hunks and stale-base checks            |
-| Persistence                   | Implemented           | Global, project, retrieval SQLite                     |
-| Stage resume                  | Implemented           | Completed pipeline stages are skipped                 |
-| Verifier rollback             | Incomplete            | Default mutation records are not forwarded to journal |
-| Hierarchical tracing          | Incomplete            | Model and tool correlation fields are not emitted     |
-| Rust syntax services          | Implemented           | Slicing, pruning, advisory line diff                  |
-| Rust CPG, Merkle runtime, WAL | Planned               | Code fragments exist but are not integrated           |
-| TUI runtime client            | Implemented           | Main usable client                                    |
-| GUI settings and file viewer  | Implemented           | Read-only workbench                                   |
-| GUI runtime client            | Not implemented       | No task, approval, event, or trace transport          |
-| Tauri packaging               | Not implemented       | Intentionally last                                    |
+| Area                          | Status                | Notes                                                  |
+| ----------------------------- | --------------------- | ------------------------------------------------------ |
+| Provider-neutral core         | Implemented           | Contracts, runner, tools, and orchestrators exist      |
+| Coding pipeline               | Implemented           | Sequential five-stage path with checkpoints            |
+| Verification-only route       | Implemented           | Read-only checks route directly to Verifier            |
+| Verifier project rules        | Implemented           | Root `AGENTS.md` is included in Verifier prompt        |
+| Registry agents               | Implemented           | Custom agents and bounded handoffs exist               |
+| Smart provider failover       | Implemented with gaps | Context, tools, cost estimate, preference, cooldown    |
+| Model constraint enforcement  | Partial               | Sparse catalog and unverified models remain usable     |
+| Semantic retrieval            | Implemented with gaps | Strong TypeScript path, shallow mixed-language path    |
+| Context compaction            | Implemented           | Threshold, repeated passes, context-error recovery     |
+| File HITL                     | Implemented in TUI    | Stable partial hunks and stale-base checks             |
+| Persistence                   | Implemented           | Global, project, retrieval SQLite                      |
+| Stage resume                  | Implemented           | Completed pipeline stages are skipped                  |
+| Verifier rollback             | Implemented           | File tools forward mutation records to the journal     |
+| Hierarchical tracing          | Implemented           | Model/tool correlation, usage, cost, and context       |
+| Rust syntax services          | Implemented           | Slicing, pruning, advisory line diff                   |
+| Rust CPG, Merkle runtime, WAL | Planned               | Code fragments exist but are not integrated            |
+| Planner-driven decomposition  | Implemented           | Planner rewrites the plan; expansions are checkpointed |
+| Complexity-aware routing      | Implemented           | Per-stage capacity/economy bias and window floors      |
+| TUI runtime client            | Implemented           | Main usable client                                     |
+| GUI settings and file viewer  | Implemented           | Editable workbench with Monaco and a terminal          |
+| GUI runtime client            | Implemented           | Tasks, approvals, live events, traces over HTTP/SSE    |
+| Desktop packaging             | Windows only          | macOS/Linux configured in CI but not yet produced      |
 
 ## Current limitations
 
 ### Core correctness
 
-- Default workspace mutation records do not reach the recovery journal.
-- Model and tool trace spans lack AgentRunner correlation data.
-- Context artifacts are not fully propagated through tool messages.
 - Recovery cannot reverse arbitrary command, Git, network, or external effects.
 - Verifier command side effects are not fully represented in recovery safety
   checks.
@@ -1379,19 +1541,21 @@ Cost:
 
 ### Routing and budgets
 
-- Task complexity is not a routing input.
-- One gateway is shared across roles.
-- Preference is stronger than cost in route order.
-- Cumulative task tokens are not a route input.
-- Task dollar cost is not bounded.
-- Model parameter and local hardware compliance are incomplete.
+- One gateway is shared across roles; per-stage behavior comes from the route
+  policy attached to each request, not from separate gateways.
+- Cumulative task tokens are not a route input; cumulative task _cost_ is
+  enforced, but it does not yet shift route order before the ceiling is hit.
+- The parameter catalog is hand-maintained, so a model absent from it is
+  flagged `unverified` rather than blocked.
 
 ### Retrieval
 
 - No full control-flow or data-flow analysis.
 - No LSP diagnostics or failing-test ranking.
-- Limited mixed-language semantics.
-- No background index watcher.
+- Semantic extraction covers TypeScript and JavaScript through the compiler
+  API; every other language uses declaration/import regexes, so its symbols are
+  single-line anchors with no call edges.
+- No background index watcher; indexing is incremental but demand-driven.
 
 ### Tools and HITL
 
@@ -1408,252 +1572,61 @@ Cost:
 
 ### Observability
 
-- No complete model/tool call hierarchy.
-- No GUI dashboard.
-- No TUI trace command.
-- Per-agent token and timing data are incomplete in persisted traces.
+- No TUI trace command; the hierarchy is inspected from the IDE dashboard.
+- Provider-attempt spans carry route reasons, but per-attempt token usage is
+  only recorded when the provider reports it.
 
 ### Clients and delivery
 
-- GUI chat is local-only.
-- No IDE transport over the headless runtime.
-- No clickable file and line references.
-- No verified desktop packaging.
-- Cross-platform clean-machine builds have not been documented and verified.
+- Only the Windows installer has been produced; macOS and Linux packaging is
+  configured in CI but unverified, and cross-building is refused on purpose
+  because the bundled ripgrep binary is platform-specific.
+- Credentials are stored plaintext at rest, with no OS keychain integration.
 
-## Prioritized remaining-work plan
+## Remaining work
 
-The order below puts core correctness before GUI work. Later phases assume the
-earlier contracts and data are reliable.
+Priorities 0 through 8 of the original plan are complete: default mutations
+reach the recovery journal, trace correlation and context propagation are
+emitted and persisted, the cost ceiling is enforced from real usage, the
+runtime transport exists, and the browser workbench is a live client with
+approvals, manual context, `/bytheway`, and a trace dashboard. What is left,
+in order:
 
-### Priority 0: Fix default recovery journaling
+### 1. Deepen non-JavaScript retrieval
 
-Goal: make the documented verifier rollback path true for normal file tools.
+TypeScript and JavaScript go through the compiler API and produce symbols,
+imports, exports, references, and call edges. Everything else goes through
+`extractTextMetadata`, which is a per-line regex: single-line symbol anchors,
+import edges, and no call graph. The Rust sidecar already carries tree-sitter
+grammars for Python and Rust, so the natural next step is to route those two
+languages through the sidecar's parser instead of the regex fallback, and to
+measure the result against a labelled multi-file retrieval set rather than
+assuming it helps.
 
-1. Forward `WorkspaceFileService` mutation records as
-   `ToolResult.workspaceMutation` from write, create, patch, partial write, and
-   delete paths.
-2. Preserve mutation records for no-op and partial-approval cases correctly.
-3. Confirm delete and create rollback behavior.
-4. Add an end-to-end runtime test where Coder changes a file, Verifier fails,
-   recovery restores the preimage, Planner revises the plan, Coder receives
-   fresh approval, and Verifier passes.
-5. Add a conflict test where a user edits the file after the agent and rollback
-   preserves the user's content.
-6. Add a test proving external side effects stop automatic rollback.
-7. Track unsafe side effects consistently across Coder, Verifier, and custom
-   agents.
+### 2. Ground the model parameter catalog
 
-Exit condition:
+`MODEL_PARAMETER_CATALOG` is hand-maintained and is the only evidence behind
+the <=80B constraint. Every entry needs a cited published total parameter count,
+and the `unverified` flag that unknown models receive needs to be visible in
+the settings screen so an operator can see what the system could not confirm.
 
-- The default tool catalog populates the journal.
-- Recovery tests exercise the real runtime and real workspace tools.
-- Documentation no longer describes an untested path.
+### 3. Align or retire the unintegrated Rust systems
 
-### Priority 1: Complete trace correlation and context propagation
+`FlatCPG`, the Merkle runtime, and the memory-mapped WAL compile but have no
+runtime caller. Each should either gain one with an integration test, or be
+removed so the architecture does not claim capability it does not exercise.
 
-Goal: produce a trustworthy trace before building any dashboard.
+### 4. Cross-platform delivery
 
-1. Generate a stable model call ID before each model request.
-2. Emit the complete request without the abort signal.
-3. Emit the matching response, duration, usage, provider, model, and cost.
-4. Generate tool span IDs tied to the active model call.
-5. Emit matching IDs on tool completion.
-6. Copy `ToolResult.contextArtifacts` into tool-message metadata.
-7. Attach provider-attempt spans beneath the correct model span.
-8. Close failed and cancelled spans consistently.
-9. Add redaction tests for nested credentials, headers, and tool arguments.
-10. Add a persisted hierarchy test covering task, pipeline, agent, model,
-    provider, tool, and compaction spans.
-11. Verify exact sanitized input and output retrieval after reopening SQLite.
+Only the Windows installer has been produced. macOS and Linux packaging is
+configured per-platform in CI and needs a real run on each native runner,
+because the bundled ripgrep binary is platform-specific and cross-building is
+deliberately refused.
 
-Exit condition:
+### 5. Secure credentials at rest
 
-- Every model and tool node has one stable parent.
-- Usage and timing appear on the right model node.
-- Context files and slices are reconstructable.
-
-### Priority 2: Strengthen routing and hard budgets
-
-Goal: meet provider and model constraints with visible, enforceable decisions.
-
-1. Add task and stage complexity signals.
-2. Add per-role route policies for Planner, Coder, Verifier, Reviewer, and
-   isolated questions.
-3. Include task tokens already used in route selection.
-4. Track actual and estimated task cost.
-5. Stop before the `$0.50` hard ceiling.
-6. Expand the parameter catalog with cited total parameter counts.
-7. Require explicit acknowledgement or block unknown parameter counts.
-8. Surface model verification status in clients.
-9. Add Ollama RAM and VRAM fit warnings.
-10. Wire provider-specific timeouts, including `OLLAMA_TIMEOUT_MS`.
-11. Test route changes by complexity, context, cost, cooldown, and task budget.
-12. Write provider eligibility documentation.
-
-Exit condition:
-
-- Every route is explainable and policy-driven.
-- A task cannot silently exceed model or cost constraints.
-
-### Priority 3: Make long-horizon state consistently durable
-
-Goal: reduce the gap between pipeline resume and direct-task resume.
-
-1. Add task listing and resumable-task discovery to the runtime API.
-2. Add finer direct-path checkpoints for model and tool turns.
-3. Persist cumulative wall-clock and cost budgets across resume.
-4. Preserve pending approvals and represent them safely after restart.
-5. Define restart behavior for a task interrupted during a shell command.
-6. Add TUI `/resume` and task listing.
-7. Add restart tests at every durable pipeline boundary.
-
-Exit condition:
-
-- A client can discover and resume interrupted work without reconstructing IDs
-  manually.
-- Budget enforcement remains consistent across process restarts.
-
-### Priority 4: Improve retrieval quality and efficiency
-
-Goal: improve hard multi-file task accuracy without inflating context.
-
-1. Add diagnostic and failing-test locations as ranking signals.
-2. Add changed-file and recent-task relevance signals.
-3. Evaluate deeper graph traversal against the current one-hop approach.
-4. Add background or file-event-driven incremental indexing.
-5. Avoid a full file discovery scan for every query when the index is known
-   fresh.
-6. Add semantic extraction for the most important non-TypeScript evaluation
-   languages.
-7. Build a retrieval benchmark with real multi-file tasks and relevance labels.
-8. Measure slice precision, recall, token size, and query latency.
-9. Decide with evidence whether embeddings or a fuller CPG add enough value.
-
-Exit condition:
-
-- Retrieval changes are justified by measured quality and token cost.
-
-### Priority 5: Finish tool and HITL coverage
-
-Goal: close problem-statement tool gaps while retaining fail-safe approval.
-
-1. Add a specialized Git merge tool.
-2. Decide whether built-in Coder should receive approval-gated Git mutation
-   tools.
-3. Add a search-engine tool if browsing known URLs is insufficient.
-4. Improve command-side-effect classification.
-5. Add explicit package-install policy and event labeling.
-6. Add syntax validation after partial hunk approval when practical.
-7. Add more cross-platform command and Git tests.
-
-Exit condition:
-
-- Required file, terminal, web, and Git operations are available through
-  specialized approved tools.
-
-### Priority 6: Align and harden the Rust sidecar
-
-Goal: either integrate the native features or narrow the project claims.
-
-1. Stop the Rust process during runtime shutdown.
-2. Decide whether TypeScript or Rust owns authoritative diff hunks.
-3. If Rust owns diffs, implement stable base-bound hunks and integrate them with
-   approval tests.
-4. Connect runtime cycle snapshots only if they improve stuck detection beyond
-   current fingerprints and duplicate-call guards.
-5. Populate FlatCPG from real project files before claiming CPG retrieval.
-6. Benchmark PageRank slicing against the TypeScript retrieval index.
-7. Implement durable WAL framing, recovery, and offsets before claiming Rust WAL
-   resume.
-8. Remove unused native concepts from public architecture if they do not earn
-   their build and maintenance cost.
-
-Exit condition:
-
-- Every documented Rust feature has a runtime caller and an integration test, or
-  it is clearly marked as experimental.
-
-### Priority 7: Add a runtime transport
-
-Goal: expose the stable headless service without copying its logic.
-
-1. Define transport DTOs for sessions, tasks, agents, context, approvals,
-   results, events, and traces.
-2. Add HTTP endpoints for session and task lifecycle.
-3. Add SSE or WebSocket delivery for runtime and trace events.
-4. Add an approval-response endpoint with request correlation.
-5. Add task cancellation and resume endpoints.
-6. Add trace and historical event queries.
-7. Keep the server loopback-only by default.
-8. Add transport authentication or origin protection appropriate for a local
-   privileged service.
-9. Test disconnect, reconnect, duplicate approval, and stalled observer cases.
-
-Exit condition:
-
-- A non-Node client can run and observe tasks using only documented DTOs.
-
-### Priority 8: Connect the browser workbench
-
-Goal: turn the current read-only shell into a real IDE client.
-
-1. Connect chat to runtime task APIs.
-2. Add agent and model selection.
-3. Show live route and pipeline activity.
-4. Add cancellation and task resume.
-5. Add approval prompts and per-hunk diff review.
-6. Add an approval-gated editor save path.
-7. Add manual context actions for files and selected editor lines.
-8. Add `/bytheway` in the same chat surface.
-9. Parse and render clickable file and line references in input and output.
-10. Build one trace view that works for live and completed tasks.
-11. Add drill-down for sanitized I/O, context, usage, cost, and timing.
-12. Add browser integration tests for settings, chat, approval, partial hunks,
-    context, and traces.
-
-Exit condition:
-
-- The GUI can complete a coding task without relying on the TUI.
-
-### Priority 9: Security, documentation, and cross-platform delivery
-
-Goal: make the system safe and reproducible for evaluation.
-
-1. Move credentials to OS keychain-backed storage or encrypt them at rest.
-2. Rewrite setup documentation around the actual provider and runtime flow.
-3. Document Linux setup from a clean machine.
-4. Verify Windows, macOS, and Linux builds.
-5. Restore or remove stale example scripts and commands.
-6. Keep architecture, implementation status, and checklists synchronized.
-7. Document tool-call format and approval semantics.
-8. Document measured tradeoffs and rejected alternatives.
-9. Prepare the required source archive with Git history.
-10. Prepare presentation material that the team can explain from source.
-
-Exit condition:
-
-- A new evaluator can install, configure, run, and understand the system without
-  relying on undocumented local state.
-
-### Priority 10: Package with Tauri last
-
-Goal: add desktop distribution only after the runtime transport and GUI are
-stable.
-
-1. Resolve the current planning contradiction between no Tauri dependency and a
-   future thin wrapper.
-2. If a desktop wrapper is still desired, keep it transport-only.
-3. Do not move orchestration, routing, persistence policy, or tool logic into
-   Tauri commands.
-4. Package the existing browser workbench and local runtime host.
-5. Verify process startup, shutdown, workspace selection, and permissions on all
-   target operating systems.
-6. Produce signed or clearly documented evaluation builds as required.
-
-Exit condition:
-
-- Desktop packaging adds distribution, not a second runtime architecture.
+Provider keys are stored in plaintext in the global SQLite database. OS keychain
+integration is the correct fix.
 
 ## Definition of a complete first release
 

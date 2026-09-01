@@ -17,6 +17,7 @@ import {
   FolderOpen,
   GitBranch,
   KeyRound,
+  Layers,
   LayoutDashboard,
   PanelBottomClose,
   PanelBottomOpen,
@@ -3415,15 +3416,20 @@ function traceDepth(span: TraceSpan, spans: TraceSpan[]): number {
   return depth;
 }
 
+// The runtime emits `pipeline_step`, `model_call`, `provider_attempt`,
+// `plan_expansion`, and `compaction`, so these match on prefix rather than on
+// exact equality — equality silently gave almost every node the fallback icon.
 function TraceIcon({ kind }: { kind: string }) {
-  if (kind === "agent")
+  if (kind.startsWith("agent"))
     return <Bot size={13} className="shrink-0 text-indigo-400" />;
-  if (kind === "tool")
+  if (kind.startsWith("tool"))
     return <TerminalSquare size={13} className="shrink-0 text-amber-400/80" />;
-  if (kind === "provider" || kind === "model")
+  if (kind.startsWith("provider") || kind.startsWith("model"))
     return <Zap size={13} className="shrink-0 text-cyan-400/80" />;
-  if (kind === "pipeline")
+  if (kind.startsWith("pipeline") || kind.startsWith("plan"))
     return <Boxes size={13} className="shrink-0 text-violet-400/80" />;
+  if (kind.startsWith("compaction"))
+    return <Layers size={13} className="shrink-0 text-emerald-400/80" />;
   return <Activity size={13} className="shrink-0 text-neutral-500" />;
 }
 

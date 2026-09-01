@@ -3,6 +3,14 @@ import type { Tool } from "./tools.js";
 
 export const rustClient = new RustClient();
 
+/**
+ * Shut the shared sidecar down. Hosts call this when the runtime closes so the
+ * helper process does not outlive the application that spawned it.
+ */
+export function stopRustEngine(): void {
+  rustClient.stop();
+}
+
 export const analyzeCodeStructureTool: Tool = {
   name: "analyze_code_structure",
   description:

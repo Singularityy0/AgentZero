@@ -362,7 +362,52 @@ export class AgentRunner {
       });
       if (checkpoint.estimatedTokensAfter <= targetTokens) break;
     }
+    // Folding exchanges only helps when there are exchanges. A pipeline
+    // worker's first call has exactly one user message, carrying the task with
+    // all the retrieved evidence appended after it, so there is nothing to fold
+    // and the request cannot be made smaller. Before this, that surfaced as a
+    // provider-side "no route can fit the request context" on every attempt
+    // until the orchestrator declared the step stuck - a hard failure for a
+    // request that only needed less evidence.
+    if (this.trimOversizedMessages(messages, targetTokens)) changed = true;
     return changed;
+  }
+
+  /**
+   * Shrink the largest messages in place until the request fits.
+   *
+   * Truncation keeps the head of a message and cuts the tail, which is the
+   * right shape here: the instruction comes first and the evidence dump is
+   * appended after it, so the agent keeps what it was asked to do and loses the
+   * least relevant end of its context. The agent's own system prompt is only
+   * touched when nothing else is left to cut.
+   */
+  private trimOversizedMessages(
+    messages: ConversationMessage[],
+    targetTokens: number,
+  ): boolean {
+    const currentTokens = (): number =>
+      this.estimateRequest(this.createModelRequest(messages)).inputTokens;
+    let trimmed = false;
+    for (let pass = 0; pass < MAX_TRIM_PASSES; pass += 1) {
+      const tokens = currentTokens();
+      if (tokens <= targetTokens) break;
+      const index = largestTrimmableIndex(messages);
+      if (index === undefined) break;
+      const message = messages[index]!;
+      const overflowCharacters = (tokens - targetTokens) * 4;
+      const keep = Math.max(
+        MIN_TRIMMED_MESSAGE_CHARS,
+        message.content.length - overflowCharacters - TRIM_MARGIN_CHARS,
+      );
+      if (keep >= message.content.length) break;
+      messages[index] = {
+        ...message,
+        content: `${message.content.slice(0, keep)}\n[Context truncated to fit the model's context window.]`,
+      };
+      trimmed = true;
+    }
+    return trimmed;
   }
 
   private compactOldestExchanges(
@@ -848,6 +893,40 @@ function lastUserExchangeIndex(
     }
   }
   return -1;
+}
+
+/** Bounded so a message that refuses to shrink cannot spin. */
+const MAX_TRIM_PASSES = 6;
+/** Never cut a message below this; the instruction lives at its head. */
+const MIN_TRIMMED_MESSAGE_CHARS = 2_000;
+/** Extra slack so one pass usually suffices despite estimation error. */
+const TRIM_MARGIN_CHARS = 1_000;
+
+/**
+ * The longest message worth truncating. Non-system messages are preferred, so
+ * the agent's own instructions survive as long as any evidence remains to cut.
+ */
+function largestTrimmableIndex(
+  messages: readonly ConversationMessage[],
+): number | undefined {
+  const rank = (message: ConversationMessage): number =>
+    message.role === "system" ? 1 : 0;
+  let best: number | undefined;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (message.content.length <= MIN_TRIMMED_MESSAGE_CHARS) continue;
+    if (best === undefined) {
+      best = index;
+      continue;
+    }
+    const candidate = messages[best]!;
+    const betterTier = rank(message) < rank(candidate);
+    const sameTierAndLonger =
+      rank(message) === rank(candidate) &&
+      message.content.length > candidate.content.length;
+    if (betterTier || sameTierAndLonger) best = index;
+  }
+  return best;
 }
 
 function parseCompactedTaskState(

@@ -121,14 +121,34 @@ export class SemanticRetrievalIndex {
           ignored += 1;
           continue;
         }
-        const file = await this.workspace.readText(path);
         const prior = existing.get(path);
+        const modifiedAt = Math.trunc(details.mtimeMs);
+        // Reading and hashing every file on every query dominated retrieval
+        // latency on a real repository. `stat` already tells us whether the
+        // file could have changed: if both size and mtime match what was
+        // indexed, the content cannot differ in any way this index would see,
+        // so the read is skipped entirely. Agent writes always move mtime, so
+        // the agent's own edits are never missed.
+        if (
+          prior &&
+          prior.size === details.size &&
+          prior.modified_at === modifiedAt
+        ) {
+          reused += 1;
+          continue;
+        }
+        const file = await this.workspace.readText(path);
         if (prior?.hash === file.hash) {
+          // Touched but not changed (a rebuild, a checkout, a formatter that
+          // wrote identical bytes). Record the new stat so the next pass takes
+          // the fast path above instead of reading this file forever.
+          this.database.touchFile(path, modifiedAt, details.size);
           reused += 1;
           continue;
         }
         const language = languageForPath(path);
-        const extracted = isTypeScript(path)
+        const compilerParsed = isCompilerParsed(path);
+        const extracted = compilerParsed
           ? extractTypeScript(path, file.content)
           : extractTextMetadata(file.content);
         this.database.replaceFile(
@@ -136,10 +156,10 @@ export class SemanticRetrievalIndex {
             path,
             hash: file.hash,
             language,
-            extractor: isTypeScript(path) ? "typescript" : "ripgrep-text",
+            extractor: compilerParsed ? "typescript" : "ripgrep-text",
             size: details.size,
             line_count: lineCount(file.content),
-            modified_at: Math.trunc(details.mtimeMs),
+            modified_at: modifiedAt,
             indexed_at: Date.now(),
           },
           extracted.symbols,
@@ -638,8 +658,24 @@ function shouldIgnore(path: string): boolean {
   ].includes(extname(path).toLowerCase());
 }
 
-function isTypeScript(path: string): boolean {
-  return [".ts", ".tsx", ".mts", ".cts"].includes(extname(path).toLowerCase());
+/**
+ * Extensions the TypeScript compiler API can parse directly. JavaScript is
+ * included deliberately: the same parser yields real symbols and edges for
+ * `.js`/`.jsx` sources, and the text fallback below is strictly worse.
+ */
+const COMPILER_PARSED_EXTENSIONS: readonly string[] = [
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+];
+
+function isCompilerParsed(path: string): boolean {
+  return COMPILER_PARSED_EXTENSIONS.includes(extname(path).toLowerCase());
 }
 
 function languageForPath(path: string): string {

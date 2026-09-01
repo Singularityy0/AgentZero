@@ -18,6 +18,7 @@ import {
   type ModelUsage,
   type OrchestrationEvent,
   type OrchestrationPlan,
+  type StepResult,
   type OrchestrationStep,
   type ToolApprovalResponse,
   type ToolCall,
@@ -68,6 +69,7 @@ import {
   CODING_AGENT_ID,
   CONVERSATION_AGENT_ID,
   DEFAULT_AGENT_ID,
+  RETRIEVER_AGENT_ID,
   REVIEWER_AGENT_ID,
   VERIFIER_AGENT_ID,
 } from "./default-agents.js";
@@ -968,6 +970,11 @@ export class HeadlessRuntimeService {
       throw new Error("Semantic retrieval is not configured.");
     const greenfieldArtifact = isGreenfieldArtifactRequest(task.prompt);
     const focusedFileEdit = isFocusedFileEditRequest(task.prompt);
+    // A focused single-file edit is a simple task by construction, whatever its
+    // wording suggests; everything else is judged from the prompt itself.
+    const complexity: TaskComplexity = focusedFileEdit
+      ? "simple"
+      : classifyTaskComplexity(task.prompt);
     const producedFiles = new Set<string>();
     let lastVerifierFinding: string | undefined;
     const requestedVariants = requestedVariantLabels(task.prompt);
@@ -1114,7 +1121,7 @@ export class HeadlessRuntimeService {
             : agentId === CODING_AGENT_ID
               ? "mutation"
               : undefined,
-          JUDGEMENT_AGENT_IDS.has(agentId) ? JUDGEMENT_ROUTE_POLICY : undefined,
+          routePolicyForStage(agentId, complexity),
         );
         for (const message of result.messages ?? []) {
           if (message.role !== "tool" || message.metadata?.isError === true) {
@@ -1218,7 +1225,45 @@ export class HeadlessRuntimeService {
                   ].join("\n");
               return { success: true, summary, output: summary };
             }
-          : runAgentWorker(DEFAULT_AGENT_ID, true),
+          : // The general path lets the planner decide the shape of the work.
+            // The static plan carries one placeholder coding step; when the
+            // planner returns a usable decomposition it replaces that
+            // placeholder with one narrowly scoped step per sub-task, so each
+            // coder call sees only the slice of the objective it owns.
+            async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
+              const result = await runAgentWorker(
+                DEFAULT_AGENT_ID,
+                true,
+              )(request);
+              if (!result.success) return result;
+              const subtasks = parsePlannedSubtasks(
+                result.output ?? result.summary,
+              );
+              if (!subtasks) return result;
+              // The block has been turned into steps, and each step carries its
+              // own prompt. Leaving the raw JSON in the planner summary would
+              // repeat every sub-task prompt in the context of every later
+              // stage, for no benefit.
+              const summary = stripSubtaskBlock(result.summary);
+              return {
+                ...result,
+                summary,
+                output: stripSubtaskBlock(result.output ?? result.summary),
+                expandPlan: {
+                  targetId: "code",
+                  steps: subtasks.map((subtask, index) => ({
+                    id: `code-${index + 1}`,
+                    role: "coder" as const,
+                    title: subtask.title,
+                    prompt:
+                      `Implement sub-task ${index + 1} of ${subtasks.length} from the plan, and nothing else. ` +
+                      `Separate steps cover the others; do not implement them here.\n\n${subtask.prompt}\n\n` +
+                      "Use the retrieved evidence, apply the change with a mutation tool, then re-read every file you changed.",
+                    ...(index === 0 ? {} : { dependsOn: [`code-${index}`] }),
+                  })),
+                },
+              };
+            },
       retriever: async (
         request: AgentWorkRequest,
       ): Promise<AgentWorkResult> => {
@@ -1241,10 +1286,16 @@ export class HeadlessRuntimeService {
           limit: 10,
           maxSliceLines: 40,
         });
+        // Every later stage carries this payload in its context, so an
+        // unbounded dump is charged repeatedly and can push the coder's first
+        // request past the model's window before it has done anything. Dropping
+        // the lowest-ranked slices costs the least: they are the ones retrieval
+        // was least confident about.
+        const payload = boundedRetrievalPayload(retrieval);
         return {
           success: true,
-          summary: JSON.stringify(retrieval),
-          output: JSON.stringify(retrieval),
+          summary: payload,
+          output: payload,
           progressKey: `retrieval:${retrieval.results.map((slice) => `${slice.path}:${slice.startLine}-${slice.endLine}`).join("|")}`,
         };
       },
@@ -1305,9 +1356,17 @@ export class HeadlessRuntimeService {
       onEvent: (event) => this.handlePipelineEvent(session.id, task.id, event),
     });
     const state = await orchestrator.run(plan, context);
+    // The planner may have replaced the static coding step with its own
+    // sub-steps, so the last implementation result is found by role rather than
+    // by the id the plan was built with.
+    const lastCodingResult = state.completedStepIds
+      .map((id) => state.results[id])
+      .filter((result): result is StepResult => result?.role === "coder")
+      .at(-1);
     const final =
       state.results.review ??
       state.results.verify ??
+      lastCodingResult ??
       state.results[codingSteps.at(-1)!.id] ??
       state.results.code;
     // A failed verification does not undo the implementation. Reporting the run
@@ -1443,6 +1502,10 @@ export class HeadlessRuntimeService {
           query: `${request.objective}\n${replanned.summary}\n${failure.summary}`,
           limit: 10,
           maxSliceLines: 40,
+          // The rollback above already re-indexed the workspace, and nothing
+          // has written to it since, so this query reuses that pass instead of
+          // walking the project a second time.
+          refresh: false,
         });
     recovery = {
       ...this.getWorkspaceRecovery(task.id),
@@ -1572,6 +1635,25 @@ export class HeadlessRuntimeService {
         });
         this.activeStepSpans.delete(stepKey);
       }
+    } else if (trace && event.type === "plan_expanded") {
+      // Decomposition is a decision the user is entitled to see, so it gets its
+      // own node in the hierarchy rather than living only in the event log.
+      const spanId = randomUUID();
+      this.startTraceSpan({
+        sessionId,
+        taskId,
+        traceId: trace.traceId,
+        spanId,
+        parentSpanId: trace.taskSpanId,
+        kind: "plan_expansion",
+        name: `${event.targetId} -> ${event.steps.length} sub-steps`,
+        stepId: event.stepId,
+        input: event,
+      });
+      this.finishTraceSpan(trace.traceId, spanId, {
+        status: "completed",
+        output: { steps: event.steps },
+      });
     }
     this.store.appendEvent({
       sessionId,
@@ -2117,8 +2199,97 @@ const JUDGEMENT_ROUTE_POLICY: ModelRoutePolicy = {
   excludeProviders: ["ollama"],
   // Provider rate limits clear in seconds. Waiting beats demoting the check.
   maxCooldownWaitMs: 45_000,
+  bias: "capacity",
   reason: "verification and review must not run on a weaker local model",
 };
+
+/**
+ * How hard the task looks before any model has seen it.
+ *
+ * This is deliberately a cheap syntactic estimate rather than a model call: a
+ * classifier that costs a round trip to save a round trip is a bad trade at
+ * this scale, and getting it wrong only changes route order among models that
+ * are all already eligible. The signals are the ones that actually correlate
+ * with multi-step work in this system - how much the user wrote, how many
+ * concrete files or paths they named, and whether the request describes
+ * several operations rather than one.
+ */
+export type TaskComplexity = "simple" | "standard" | "complex";
+
+const MULTI_STEP_PATTERN =
+  /\b(?:refactor|migrat\w*|redesign|architect\w*|across|throughout|each|every|all\s+(?:the\s+)?(?:files?|modules?|tests?|callers?)|then\b.*\bthen|as\s+well\s+as|integrat\w*|end[- ]to[- ]end|backward[- ]compat\w*)\b/iu;
+
+export function classifyTaskComplexity(prompt: string): TaskComplexity {
+  const referencedPaths = new Set(
+    prompt.match(/\b[\w./-]+\.[A-Za-z]{1,5}\b/gu) ?? [],
+  ).size;
+  const conjunctions = (prompt.match(/\b(?:and|also|plus|then)\b/giu) ?? [])
+    .length;
+  let score = 0;
+  if (prompt.length > 280) score += 1;
+  if (prompt.length > 800) score += 1;
+  if (referencedPaths >= 2) score += 1;
+  if (referencedPaths >= 4) score += 1;
+  if (conjunctions >= 3) score += 1;
+  if (MULTI_STEP_PATTERN.test(prompt)) score += 2;
+  if (score >= 3) return "complex";
+  // The two misclassifications are not symmetric. Routing a hard task down to a
+  // weak model costs accuracy, which dominates the score; routing an easy task
+  // up costs a fraction of a cent. So "simple" is deliberately narrow: a short
+  // request that names no file and asks for one thing. Anything that points at
+  // concrete code stays on the operator's configured route.
+  if (score === 0 && prompt.length < 160 && referencedPaths === 0) {
+    return "simple";
+  }
+  return "standard";
+}
+
+/**
+ * Route policy for one pipeline stage at one complexity.
+ *
+ * Planning and judgement decide whether the whole task succeeds, so on a
+ * complex task they ask for the largest eligible model and real context
+ * headroom. Retrieval summarisation is mechanical, so it asks for the cheapest
+ * eligible model at every complexity - that is where the token budget is saved
+ * without touching accuracy.
+ */
+export function routePolicyForStage(
+  agentId: string,
+  complexity: TaskComplexity,
+): ModelRoutePolicy | undefined {
+  if (JUDGEMENT_AGENT_IDS.has(agentId)) {
+    return complexity === "complex"
+      ? { ...JUDGEMENT_ROUTE_POLICY, minContextWindow: 32_000 }
+      : JUDGEMENT_ROUTE_POLICY;
+  }
+  if (agentId === RETRIEVER_AGENT_ID) {
+    return {
+      bias: "economy",
+      reason: "retrieval summarisation does not need the strongest model",
+    };
+  }
+  if (agentId === CONVERSATION_AGENT_ID) {
+    return {
+      bias: "economy",
+      reason: "plain conversation does not need the strongest model",
+    };
+  }
+  if (complexity === "simple") {
+    return {
+      bias: "economy",
+      reason: "short single-file request; cheapest capable route is sufficient",
+    };
+  }
+  if (complexity === "complex" && agentId === DEFAULT_AGENT_ID) {
+    return {
+      bias: "capacity",
+      minContextWindow: 32_000,
+      reason:
+        "multi-step objective; planning quality decides the whole task, so the largest eligible route is used",
+    };
+  }
+  return undefined;
+}
 
 /** Tools whose successful execution counts as real verification evidence. */
 const VERIFICATION_TOOLS: ReadonlySet<string> = new Set([
@@ -2238,12 +2409,35 @@ function requestsCodeArtifact(prompt: string): boolean {
   );
 }
 
-/** True for questions that only want an explanation, never a new artifact. */
+/**
+ * Conversational lead-in that carries no intent of its own.
+ *
+ * The explanation test below is anchored, because an unanchored "what" would
+ * match the middle of "change the parser so it reports what failed". But people
+ * do not open with the keyword: they write "yo can you tell me what this does".
+ * Stripping the preamble keeps the anchor's precision while letting it see the
+ * real question. Every alternative here is a filler, a greeting, or a politeness
+ * wrapper - never a verb that could describe work.
+ */
+const QUESTION_PREAMBLE_PATTERN =
+  /^(?:\s*(?:yo|hey|hi|hello|ok|okay|so|um|uh|well|please|thanks|sorry|btw|quick question|question)\b[\s,.!:;-]*)*(?:\s*(?:can|could|would|will)\s+(?:you|u)\b[\s,]*)?(?:\s*(?:please|kindly)\b[\s,]*)?(?:\s*(?:do\s+you\s+know|any\s+idea|i(?:'d| would)?\s+(?:like|want)\s+to\s+know|let\s+me\s+know|i(?:'m| am)\s+curious)\b[\s,]*(?:about\b[\s,]*)?)?/iu;
+
+/** Openers that ask for information rather than for work to be done. */
+const EXPLANATION_OPENER_PATTERN =
+  /^\s*(?:what|whats|what's|why|who|when|where|which|how\s+(?:do|does|did|is|are|can|could|would|should)|explain|describe|summari[sz]e|clarify|tell\s+me|walk\s+me\s+through|give\s+me\s+(?:a|an|the)?\s*(?:overview|summary|rundown|tour|idea|sense)|compare)\b/iu;
+
+/**
+ * True for questions that only want an explanation, never a new artifact.
+ *
+ * The two guards come first, and they are what make the opener list safe to
+ * broaden: anything that asks for an artifact, or names a mutation of one, is
+ * work no matter how politely it is phrased.
+ */
 function isExplanationRequest(prompt: string): boolean {
   if (requestsCodeArtifact(prompt)) return false;
   if (mutateArtifactPattern.test(prompt)) return false;
-  return /^\s*(?:what|why|who|when|where|which|how\s+(?:do|does|did|can|could|would|should)|explain|describe|tell me|compare)\b/iu.test(
-    prompt,
+  return EXPLANATION_OPENER_PATTERN.test(
+    prompt.replace(QUESTION_PREAMBLE_PATTERN, ""),
   );
 }
 
@@ -2274,6 +2468,102 @@ function requestedArtifactCount(prompt: string): number {
   const token = match[1]!.toLowerCase();
   const value = NUMBER_WORDS[token] ?? Number.parseInt(token, 10);
   return Number.isFinite(value) ? Math.min(Math.max(value, 1), 10) : 1;
+}
+
+/**
+ * Character ceiling on the retrieval payload handed to later pipeline stages.
+ *
+ * Roughly 2,000 tokens. The coder's request also carries its system prompt, the
+ * objective, the planner's output, the manual context budget, and ~1,750 tokens
+ * of tool schemas, so retrieval cannot be allowed to take an open-ended share of
+ * a small model's window.
+ */
+const MAX_RETRIEVAL_PAYLOAD_CHARS = 8_000;
+
+/**
+ * Serialize a retrieval result, dropping the lowest-ranked slices until it fits.
+ *
+ * Slices arrive ranked, so truncating the list removes what retrieval was least
+ * confident about — strictly better than cutting the JSON mid-string, which
+ * would leave the payload unparseable, and better than trimming every slice,
+ * which would damage the ones that matter most. The count is reported so a
+ * reader can tell evidence was withheld rather than never found.
+ */
+function boundedRetrievalPayload(retrieval: RetrievalQueryResult): string {
+  const full = JSON.stringify(retrieval);
+  if (full.length <= MAX_RETRIEVAL_PAYLOAD_CHARS) return full;
+  const results = [...retrieval.results];
+  while (results.length > 1) {
+    results.pop();
+    const candidate = JSON.stringify({
+      ...retrieval,
+      results,
+      omittedResults: retrieval.results.length - results.length,
+    });
+    if (candidate.length <= MAX_RETRIEVAL_PAYLOAD_CHARS) return candidate;
+  }
+  // A single slice can still exceed the ceiling; the compaction trim in
+  // AgentRunner is the backstop for that.
+  return JSON.stringify({
+    ...retrieval,
+    results,
+    omittedResults: retrieval.results.length - results.length,
+  });
+}
+
+/** Upper bound on planner-produced coding steps. */
+const MAX_PLANNED_SUBTASKS = 4;
+
+interface PlannedSubtask {
+  title: string;
+  prompt: string;
+}
+
+/**
+ * Read a planner's decomposition out of its reply.
+ *
+ * Small models are unreliable structured-output producers, so this is written to
+ * fail silently: anything that is not a well-formed, non-trivial subtask list
+ * yields `undefined` and the pipeline keeps its single generic coding step. A
+ * bad parse must never be able to turn one implementation step into a series of
+ * empty ones, because every extra step costs a model call.
+ */
+export function parsePlannedSubtasks(
+  plannerOutput: string,
+): PlannedSubtask[] | undefined {
+  const block =
+    /```(?:subtasks|json)?\s*(\[[\s\S]*?\])\s*```/iu.exec(plannerOutput)?.[1] ??
+    /(?:^|\n)\s*(\[\s*\{[\s\S]*?\}\s*\])\s*(?:\n|$)/u.exec(plannerOutput)?.[1];
+  if (!block) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(block);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) return undefined;
+  const subtasks: PlannedSubtask[] = [];
+  for (const entry of parsed) {
+    const record = recordValue(entry);
+    const prompt = stringValue(record?.prompt)?.trim();
+    if (!prompt) continue;
+    const title = stringValue(record?.title)?.trim();
+    subtasks.push({
+      title: (title || prompt).slice(0, 80),
+      prompt: prompt.slice(0, 2_000),
+    });
+    if (subtasks.length === MAX_PLANNED_SUBTASKS) break;
+  }
+  // One subtask is what the default plan already does, so a single-entry list is
+  // not a decomposition and is not worth rewriting the plan for.
+  return subtasks.length >= 2 ? subtasks : undefined;
+}
+
+/** Remove a consumed `subtasks` block from planner prose. */
+function stripSubtaskBlock(text: string): string {
+  return text
+    .replace(/```(?:subtasks|json)?\s*\[[\s\S]*?\]\s*```/giu, "")
+    .trimEnd();
 }
 
 const bareActionPattern = new RegExp(
@@ -2344,8 +2634,22 @@ function shouldUsePipeline(agentId: string, prompt: string): boolean {
   return requestsWorkspaceWork(prompt);
 }
 
+/**
+ * The tool-free chat agent is only correct when the answer cannot depend on the
+ * opened project.
+ *
+ * "What is a closure" is answerable from the model's own knowledge. "What files
+ * are in this repo" is not, and routing it to an agent with no tools and no
+ * context produces a confident invention. Both are explanation requests, so
+ * `requestsWorkspaceWork` says no to each; the workspace reference is what
+ * separates them. A question about the project therefore falls through to the
+ * Architect agent, which has read-only tools and the session context but still
+ * cannot mutate anything.
+ */
 function shouldUseConversationAgent(agentId: string, prompt: string): boolean {
-  return agentId === DEFAULT_AGENT_ID && !requestsWorkspaceWork(prompt);
+  if (agentId !== DEFAULT_AGENT_ID) return false;
+  if (requestsWorkspaceWork(prompt)) return false;
+  return !hasWorkspaceReference(prompt);
 }
 
 function hasWorkspaceReference(prompt: string): boolean {

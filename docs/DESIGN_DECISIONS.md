@@ -63,7 +63,78 @@ existing checkpoints and resume behaviour are untouched.
 
 ---
 
-## 3. Recovery never deletes work it cannot replace
+## 3. Decomposition for existing codebases: the planner decides the shape
+
+**Decision.** For work on an existing codebase the Planner, not a regex, decides
+how many coding steps there are. Its reply may end with a fenced `subtasks`
+block; when it does, `TaskOrchestrator` replaces the placeholder `code` step
+with one step per sub-task and rewires the dependencies around it
+(`applyExpansion` in `packages/core/src/orchestrator.ts`).
+
+**Alternative we shipped first, and why it was wrong.** Decision 2 above solved
+decomposition for _greenfield_ requests, by counting artifacts out of the prompt
+with `requestedArtifactCount` — "five different languages" gives five steps.
+That works for the phrasing it was written for and does nothing for anything
+else. Every real repository task — fix this bug, add this field, migrate these
+callers — matched none of the patterns and got exactly one Coder step. We had
+built decomposition for the easy case and left the hard case with a single shot,
+which is the opposite of what the problem demands.
+
+**Why the planner and not a better regex.** How a task splits is a property of
+the code, not of the sentence. "Add rate limiting to the API" is one step or
+four depending on how many call sites exist, and only something that has read
+the objective and the retrieved evidence can tell. No amount of prompt-pattern
+work recovers that.
+
+**What we gave up, and the guard rails.** A small model producing structured
+output is unreliable, so an unusable decomposition must cost nothing. Parsing
+fails closed: a missing block, malformed JSON, a single-entry list, or entries
+without prompts all yield no expansion and the original single step runs. The
+orchestrator independently validates the rewrite and drops it silently if it
+would break the plan, rather than failing the task. And the split is capped at
+four, because each extra step is another model call — the Planner is told
+explicitly not to split work that touches one file.
+
+**Boundary.** Expansions are persisted in the orchestration state and replayed
+on resume, so an interrupted decomposed run continues on the same step list
+rather than rejecting `code-2` as an unknown step.
+
+---
+
+## 4. Compaction summarises without calling a model
+
+**Decision.** Compaction is deterministic. `compactOldestExchanges` in
+`packages/core/src/agent.ts` folds the oldest exchanges into a structured
+`CompactedTaskState` — objective, plan, completed work, failures, changed files
+with hashes, verification status, retrieved slices, project rules, open
+questions — by bucketing message content, and never calls a model to do it.
+
+**Alternative we rejected.** The common approach is to ask an LLM to summarise
+the transcript. We rejected it on two grounds. First, cost: compaction fires
+exactly when the context is largest, so an LLM summarisation is the single most
+expensive call in the task, repeated on every compaction event, and cost enters
+the score with the heavier weight. Second, and more important, correctness: a
+summarising model can hallucinate. A summary that says a test passed when it
+failed, or drops the one file hash the verifier needs, poisons everything
+downstream — and the requirement is explicitly that information "must not be
+lost or misremembered". A deterministic fold cannot misremember. It can only
+drop, and what it drops is bounded and known.
+
+**What we gave up.** Prose quality. The compacted state is structured fields of
+bounded, truncated raw text, not a fluent narrative, and a model reading it gets
+less connective tissue than a good summary would give. We accepted that: the
+fields that decide correctness — changed files and their hashes, verification
+outcomes, project rules — are carried exactly, and those are what later stages
+actually consult.
+
+**Boundary.** Compaction runs in bounded passes, stops as soon as a pass fails
+to shrink the request, keeps the most recent exchanges and the last user message
+uncompacted, and is entered a second way — on a provider context-limit error —
+with a tighter target ratio.
+
+---
+
+## 5. Recovery never deletes work it cannot replace
 
 **Decision.** `rollbackMutation` takes `preserveCreatedFiles`
 (`packages/workspace/src/index.ts`), and verifier recovery passes it. Edits to
@@ -86,7 +157,7 @@ loss, particularly when the run may die mid-recovery.
 
 ---
 
-## 4. Verification requires evidence, and never degrades to a weaker model
+## 6. Verification requires evidence, and never degrades to a weaker model
 
 **Two decisions, one principle: a judgement is only worth the evidence and the
 model behind it.**
@@ -116,7 +187,7 @@ downgrade.
 
 ---
 
-## 5. Truncated output is never written
+## 7. Truncated output is never written
 
 **Decision.** Two independent guards, because the authoritative signal is not
 always present.
@@ -146,7 +217,7 @@ We have not hit this; the alternative is writing corrupt files.
 
 ---
 
-## 6. Cost is measured from real usage, and enforced
+## 8. Cost is measured from real usage, and enforced
 
 **Decision.** `recordSpend` sums the actual billed cost of every completed model
 call; `assertWithinBudget` stops a task at `maxTaskCostUsd` (default 0.5,
@@ -170,7 +241,7 @@ regardless of progress, so the system must stop itself first and say why.
 
 ---
 
-## 7. Web search without an API key
+## 9. Web search without an API key
 
 **Decision.** `web_search` queries the DuckDuckGo HTML endpoint and returns
 titles, URLs, and snippets.
@@ -187,7 +258,7 @@ tool. Results are titles and snippets only; the agent follows up with
 
 ---
 
-## 8. Live workspace updates via a watcher, not polling
+## 10. Live workspace updates via a watcher, not polling
 
 **Decision.** A recursive `fs.watch` over the project root
 (`packages/gui-server/src/workspace-watcher.ts`), streamed on its own SSE
@@ -213,7 +284,7 @@ the one outcome worse than a stale tree.
 
 ---
 
-## 9. Explorer operations are not approval-gated
+## 11. Explorer operations are not approval-gated
 
 **Decision.** Agent file mutations require approval. Explorer operations — new,
 rename, delete, copy, paste — do not.
@@ -233,7 +304,7 @@ convention.
 
 ---
 
-## 10. Nested `AGENTS.md`, bounded
+## 12. Nested `AGENTS.md`, bounded
 
 **Decision.** Every `AGENTS.md` in the project is collected nearest-to-root
 first, each labelled with the subtree it governs, skipping generated
@@ -250,18 +321,267 @@ small context windows.
 
 ---
 
+## 13. Route order is a per-stage decision, not one global preference list
+
+**Decision.** Every model request may carry a `ModelRoutePolicy` with a `bias`.
+`capacity` sorts eligible routes by largest known parameter count, `economy` by
+lowest estimated cost, `balanced` keeps the operator's configured order.
+`routePolicyForStage` in `packages/runtime/src/runtime-service.ts` assigns one
+per stage and task complexity.
+
+**Alternative we shipped first, and why it was insufficient.** We had a single
+ordered preference list for the whole system, with one exception bolted on:
+verification and review excluded the local provider (decision 6). That handles
+"never judge with something weaker" but not "don't spend the strongest model on
+mechanical work". Retrieval summarisation and a hard refactor were routed
+identically.
+
+**Why complexity is classified syntactically, not by a model.** A classifier
+that costs a round trip to save a round trip is a bad trade at this scale, and
+the classification only reorders models that are all already eligible, so being
+wrong is cheap. `classifyTaskComplexity` reads prompt length, how many concrete
+file paths are named, conjunction count, and multi-step vocabulary.
+
+**The asymmetry that set the threshold.** Routing a hard task down costs
+accuracy, which the scoring formula multiplies by ten. Routing an easy task up
+costs a fraction of a cent. So `simple` is deliberately narrow — a short request
+naming no file at all. Our first threshold classified "Add a retry to
+src/client.ts when the request times out" as simple; a request pointing at
+concrete code is not trivial, and it now stays on the configured route.
+
+**Boundary.** Bias never overrides eligibility — a route that lacks tool support
+or cannot fit the context is last regardless. A `minContextWindow` floor is a
+preference too: if nothing clears it, ranking repeats without it rather than
+failing a task a smaller window could have completed. And `capacity` treats an
+unknown parameter count as zero, so a model is only promoted above the
+operator's order on evidence that it is bigger.
+
+---
+
+## 14. Ignore rules belong at discovery, not after it
+
+**Decision.** `findFiles` and `searchText` in `packages/search/src/index.ts`
+pass explicit `!**/node_modules/**`-style exclusions to ripgrep, and the
+wildcard case passes no positive `--glob` at all.
+
+**The bug this fixed.** `findFiles` called `rg --files --glob "*"`. In ripgrep a
+positive `--glob` is an _override_, and overrides take precedence over
+`.gitignore`. The wildcard therefore disabled every ignore file. On this
+repository that turned a 116-file listing into a 40,000-file one. The filtering
+still happened — `shouldIgnore` dropped the dependency paths afterwards — so
+nothing looked broken, which is why it survived so long. What it cost was paid
+everywhere else: every retrieval pass walked `node_modules`, the `find_files`
+tool handed dependency paths back to agents as context, and a normal project
+would have tripped the index's own 25,000-file ceiling and failed retrieval
+outright.
+
+**Why exclusions and not just dropping the glob.** Dropping the wildcard glob
+restores `.gitignore`, but a user can open any folder as a codebase, including
+one with no `.gitignore` at all, and a caller-supplied pattern like `*.js`
+reintroduces the same override. Explicit exclusions hold in both cases.
+
+**Measured effect.** Project discovery went from 21,653 paths to 116. A warm
+index pass — which runs on essentially every retrieval query — went from roughly
+750 ms to 131 ms, together with the stat-gated incremental check in decision 15.
+
+---
+
+## 15. Incremental indexing trusts `stat` before it trusts a hash
+
+**Decision.** `indexProject` skips reading a file entirely when its size and
+mtime both match what was indexed. Only a stat mismatch triggers a read and
+hash, and only a hash mismatch triggers re-extraction.
+
+**What it replaced.** The previous pass read and hashed every file on every
+call, using the content hash as the sole change signal. That is the most
+_correct_ possible check, and `query()` refreshes the index by default, so it
+ran on nearly every retrieval.
+
+**Why the weaker check is the right one here.** Size-and-mtime can theoretically
+miss a change; in this system it cannot miss the changes that matter, because
+every write the agent makes moves mtime. The residual risk is an external tool
+rewriting a file to the same byte length while preserving mtime. We took that
+trade for a 5-6x cut in the cost of the most frequent operation in the pipeline.
+
+**Boundary.** The middle tier exists for exactly the case that would otherwise
+churn: a file touched but not changed — a rebuild, a checkout, a formatter
+writing identical bytes — is read once, found identical, and has its new stat
+recorded so the next pass takes the fast path instead of re-reading forever.
+
+---
+
+## 16. Agent definitions are per-project, because they are project memory
+
+**Decision.** The `agents` table lives in the project database, not the global
+one. The global database keeps only what belongs to the machine: settings,
+provider base URLs, and credentials.
+
+**The bug this fixed.** A project can ship its own agents under
+`.agentic/agents/*.md`, and `registerAgents` wrote them into the shared global
+table on open. Opening project A and then project B therefore left A's private
+agents listed and selectable in B. We confirmed it before fixing it: two
+temporary projects against one data root, and `alpha-internal` appeared in
+beta's agent list. That is a direct violation of the requirement that agent
+memory must not cross projects.
+
+**Why the table moved rather than gaining a `project_id` column.** A column
+would have worked, but it makes isolation a property of every query remembering
+to filter — one forgotten `WHERE` reopens the hole. Separate database files make
+it structural: there is no shared table left to leak from. Sessions, tasks, and
+traces were already isolated this way, so agents now match them.
+
+**What we gave up.** An agent created purely through the UI in one project is
+not visible in another, and the pre-existing global table is dropped on first
+open. In practice nothing is lost: built-in agents and `.agentic/agents` files
+are re-registered from source on every open, so both self-heal.
+
+**Boundary.** Credentials stay global on purpose. An API key belongs to the
+machine, not to a codebase, and copying keys per project would multiply the
+plaintext-at-rest surface for no benefit.
+
+---
+
+## 17. The chat agent only answers what the project cannot change
+
+**Decision.** A prompt reaches the tool-free chat agent only when it is neither
+workspace work nor a reference to the opened project. A question _about_ the
+project falls through to the Architect, which has read-only tools and the
+session context but no mutation tools.
+
+**The bug this fixed.** `shouldUseConversationAgent` was the negation of
+`requestsWorkspaceWork`, and `requestsWorkspaceWork` returns false for anything
+shaped as a question. So "what files are in this repo" went to an agent with no
+tools and no context, which can only invent an answer. "What is a closure"
+correctly went to the same place. The two are not the same question.
+
+**Why not send it to the pipeline instead.** It needs no mutation, so planning,
+coding, verification, and review would all be wasted model calls on a question
+that one `list_directory` answers. The Architect path is the middle rung that
+already existed; the classifier just never reached it.
+
+**Boundary.** This is the fourth branch of task routing, after verification-only
+and the pipeline. No branch lets a general question reach the Coder: reaching a
+mutation-capable agent requires an artifact request, a workspace reference, or a
+bare action verb, and a question satisfies none of them.
+
+---
+
+## 18. The Rust sidecar ships with the app, and is optional at runtime
+
+**Decision.** `prepare-runtime-assets.mjs` copies the sidecar binary beside
+ripgrep, the desktop main process points `AGENTIC_RUST_PATH` at it, and
+`RustClient` falls back to `rust/target/release` then `rust/target/debug` in a
+source checkout.
+
+**The bug this fixed.** The binary path was hard-coded to `target/debug`, and
+only ripgrep was bundled. In a source checkout a release build was never found;
+in a packaged app there is no `rust/target` tree at all, so the installer
+shipped without the sidecar entirely. That silently removed
+`analyze_code_structure`, `compute_ast_diff`, and the signature-pruning half of
+compaction from the product we would have handed over — with no error, because
+every caller already degrades quietly.
+
+**Why ripgrep is fatal when missing and Rust is not.** Ripgrep backs all file
+and text discovery; without it retrieval returns nothing and the system is
+broken, so its absence throws at startup. The sidecar accelerates and sharpens
+work that has a working fallback: the two tools return a tool error the model
+can read, and compaction keeps its structured-exchange path. Treating them the
+same would turn a degraded feature into a dead application.
+
+**What the fix also caught.** The child process and its three pipes each hold a
+handle on the Node event loop, so an idle sidecar kept the host alive — a
+finished run hung instead of exiting. All four are now unreferenced, and
+`stopRustEngine()` runs when the server closes so the helper does not outlive
+the application that spawned it.
+
+---
+
+## 19. The explanation test reads past the greeting
+
+**Decision.** `isExplanationRequest` strips a leading conversational preamble -
+greetings, fillers, "can you", "do you know" - before applying its anchored
+opener test, and the opener list covers the forms people actually use
+("summarise", "walk me through", "give me an overview").
+
+**The bug this fixed, reported from a real run.** A user typed _"yo can you tell
+me what this project directory about"_ and the system started the full coding
+pipeline on it, then failed inside the Coder. The opener test is anchored at
+`^`, deliberately - an unanchored "what" would match the middle of "change the
+parser so it reports what failed". But nobody opens with the keyword. With the
+anchor unmatched, the prompt was not an explanation request, so
+`hasWorkspaceReference` saw "this project" and classified a question as
+workspace work.
+
+**Why strip rather than unanchor.** Unanchoring trades one error for a worse
+one: it would pull genuine work requests into the read-only path, and failing to
+edit a file someone asked for is more damaging than reading one they did not.
+Stripping keeps the anchor's precision and only lets it see past text that
+carries no intent - every alternative in the preamble is a greeting, a filler,
+or a politeness wrapper, never a verb that could describe work.
+
+**What makes broadening the opener list safe.** Two guards run first: a request
+for an artifact, or a named mutation of one, is work however politely it is
+phrased. That is why _"can you explain why the build fails and then fix it"_
+still reaches the Coder.
+
+---
+
+## 20. A request that cannot fit is shrunk, not retried
+
+**Decision.** When compaction has no exchanges left to fold, it truncates the
+largest message in place, keeping the head and cutting the tail. The retrieval
+payload handed to later pipeline stages is separately capped, by dropping
+lowest-ranked slices rather than cutting the JSON.
+
+**The bug this fixed.** The same real run then failed with `Step "code" is stuck
+repeating the same failure: No configured route can fit the request context.`
+Compaction folds _conversation exchanges_, and a pipeline worker's first call
+has none: the task and all the retrieved evidence live in a single user message,
+and the most recent user message is deliberately protected from folding. So
+`compactContextIfNecessary` returned false, the runner rethrew, the step retried
+with an identical request, and the orchestrator correctly declared it stuck. The
+stuck detection worked; the thing it was detecting should not have existed.
+
+**Why truncate the tail.** The instruction is written first and the evidence is
+appended after it, so cutting from the end preserves what the agent was asked to
+do and loses the least relevant end of its context. Non-system messages are cut
+before the agent's own prompt, so its role and constraints survive as long as
+any evidence remains to give up.
+
+**Why also cap retrieval at the source.** Truncation is a backstop, and a
+backstop that fires routinely is a design failure. Every later stage carries the
+retrieval payload in its context, so an unbounded dump is charged repeatedly.
+Dropping the lowest-ranked slices costs the least - they are the ones retrieval
+was least confident about - and keeps the JSON parseable, which cutting mid-
+string would not. The count of dropped slices is reported so a reader can tell
+evidence was withheld rather than never found.
+
+**What we gave up.** On a very small window against a very large context the
+agent is left with little evidence, and will likely fail on the merits. That is
+strictly better than failing to make a request at all, and it fails with a
+readable answer instead of a repeated routing error.
+
+---
+
 ## Known gaps
 
 Stated plainly, because an unclaimed gap is cheaper than a claimed feature that
 fails under questioning.
 
-- **Local hardware verification (16 GB / 8 GB).** Not implemented. Model
-  parameter counts are enforced against `MODEL_PARAMETER_CATALOG`, but that
-  catalog has few entries, and models with unknown counts are flagged
-  `unverified` rather than blocked — and that flag is not surfaced in any UI.
-- **Task resume from the IDE.** `resumeTask` works and is tested, but there is
-  no UI affordance to discover and resume an interrupted task.
+- **Model parameter catalog.** `MODEL_PARAMETER_CATALOG` is hand-maintained and
+  is the only evidence behind the <=80B constraint. Models absent from it are
+  flagged `unverified` rather than blocked, and that flag is not surfaced in the
+  settings screen.
+- **Semantic retrieval outside JavaScript/TypeScript.** Python, Go, Rust, Java
+  and the rest use a per-line regex extractor: single-line symbol anchors,
+  import edges, no call graph. The Rust sidecar already carries tree-sitter
+  grammars for Python and Rust; routing those through it is the next step.
+- **Unintegrated Rust systems.** The sidecar's slicing, pruning, and diff RPCs
+  are wired up and shipped, but `FlatCPG`, the Merkle runtime, and the
+  memory-mapped WAL compile with no runtime caller.
 - **Explorer parity.** No drag-and-drop, multi-select, or nested tree; the
   explorer shows one folder at a time.
 - **Cross-platform builds.** Only the Windows build has been produced.
   macOS and Linux packaging is configured but unverified.
+- **Credentials at rest.** Provider keys are stored plaintext in the global
+  SQLite database, with no OS keychain integration.

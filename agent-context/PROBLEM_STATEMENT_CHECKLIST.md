@@ -6,6 +6,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## 1. Multi-Agent Orchestration
 
+- [x] Work is routed to the cheapest sufficient path: read-only verification
+      goes straight to the Verifier, a question about the opened project goes
+      to the read-only Architect, general knowledge goes to a tool-free chat
+      agent, and only workspace work enters the coding pipeline. No path lets
+      a general question reach the Coder.
+
 - [x] Agent loop exists through `AgentRunner`.
 - [x] Tool-call repetition detection.
 - [x] Step-limit safety handling.
@@ -15,6 +21,13 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] The live headless coding path runs a checkpointed planner, retriever,
       coder, verifier, and reviewer pipeline with bounded corrective recovery.
 - [x] Attempt/time budgets and repeated-failure safeguards.
+- [x] Planner-driven decomposition for existing codebases. The planner may
+      return a fenced `subtasks` block; `TaskOrchestrator` then replaces the
+      placeholder coding step with up to four scoped steps and rewires the
+      dependencies around it. Parsing fails closed and the orchestrator drops an
+      invalid rewrite silently, so a model that cannot emit structured output
+      falls back to the single generic step. Expansions are checkpointed and
+      replayed on resume.
 - [~] Verifier failure triggers recovery, fresh retrieval, replanning, corrective
   coding, and reverification. Hash-guarded rollback primitives exist, but
   default file tools do not yet forward mutation records into the journal.
@@ -53,8 +66,13 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 - [~] Provider abstraction exists (Groq, OpenRouter, Ollama, OpenAI-compatible).
 - [x] Ordered provider/model route preferences are configurable.
-- [~] Routing uses tool need, context fit, cost, preference, and cooldown;
-  richer task-complexity classification remains.
+- [x] Routing uses tool need, context fit, cost, preference, cooldown, and a
+      per-stage bias driven by syntactic task-complexity classification
+      (`classifyTaskComplexity`, `routePolicyForStage`): `capacity` for planning
+      a complex task and for verification/review, `economy` for retrieval
+      summarisation and chat, `balanced` otherwise. Bias only reorders routes
+      that are already eligible, and a context-window floor is relaxed rather
+      than allowed to empty the route list.
 - [x] Context-size, rate-limit cooldown, and estimated-cost-aware ranking.
 - [x] Transparent routing explanations are emitted live and persisted.
 - [x] Automatic retryable fallback reuses the exact request and task state.
@@ -79,12 +97,28 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Ripgrep-backed text and file search.
 - [~] Search results are normalized to workspace-relative paths.
 - [x] Per-project persistent SQLite code index.
-- [x] TypeScript/TSX semantic structure plus mixed-language text fallback.
-- [~] Symbols, imports, exports, references, and calls are indexed; full CPG
-  control/data-flow analysis remains deferred.
+- [x] TypeScript/TSX/JS/JSX semantic structure plus mixed-language text fallback.
+- [x] Incremental indexing is stat-gated, so the refresh that runs on every
+      query does not re-read the project. Discovery passes explicit ignore
+      exclusions to ripgrep: a positive `--glob` overrides `.gitignore`, so the
+      previous wildcard glob was enumerating `node_modules` (21,653 paths here
+      against 116 real ones) and could have tripped the index's 25,000-file
+      ceiling on a normal project.
+- [~] Symbols, imports, exports, references, and calls are indexed for both
+  TypeScript and JavaScript through the compiler API; full CPG control/data-flow
+  analysis remains deferred, and non-JS/TS languages still use the regex
+  fallback.
 - [x] Ranked line-scoped context selection.
 - [x] Broadening/narrowing recovery for poor retrieval.
-- [x] Retrieval and memory isolation between canonical project roots.
+- [x] Retrieval and agent memory isolation between canonical project roots.
+      Files/symbols/edges, sessions/tasks/traces, and agent definitions each
+      live in a per-project database keyed by the canonical root, and every
+      tool is rooted at the workspace. Agent definitions were the hole: a
+      project can ship its own agents under `.agentic/agents`, and those were
+      written to the shared global table, so one codebase's private agents
+      appeared in the next. Regression-tested by opening two projects against
+      one data root. Provider credentials stay global on purpose - a key
+      belongs to the machine, not to a codebase.
 
 ## 6. Long-Horizon, Multi-Session Tasks
 
@@ -124,6 +158,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Cross-platform native-shell command execution.
 - [x] Compile, run, format, and syntax-check tools.
 - [x] Approval before mutations and side effects.
+- [x] The Rust sidecar (`analyze_code_structure`, `compute_ast_diff`, and
+      signature pruning during compaction) is registered in the default tool
+      registry, reachable from the IDE, and now bundled into the desktop
+      installer via `AGENTIC_RUST_PATH`; it was previously absent from
+      packaged builds. A missing sidecar degrades to a tool error rather than
+      failing the task.
 - [x] Workspace path restrictions and sanitized command environment.
 - [x] Web search (`web_search`, keyless via the DuckDuckGo HTML endpoint),
       browsing, and bounded same-domain crawling.
@@ -201,7 +241,15 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
       wrong first, plus a stated known-gaps section.
 - [ ] Presentation plan for a maximum 10-minute presentation with at least 2 presenters.
 
-## Highest-Priority Remaining Work
+## Highest-Priority Remaining Work (superseded)
+
+The list below is kept for history. Items 1-8 are done; what actually remains is
+in `docs/ARCHITECTURE_AND_STATUS.md` under "Remaining work": deepen
+non-JavaScript retrieval, ground the model parameter catalog, align or retire
+the unintegrated Rust systems, produce the macOS and Linux builds, and move
+credentials off plaintext at rest.
+
+## Original plan
 
 See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the ordered,
 file-level plan. Summary (Phase 0 - settings screen - is done; Phase 1 -

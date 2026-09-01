@@ -7,6 +7,7 @@ import {
   type ModelErrorCode,
   type ModelRequest,
   type ModelResponse,
+  type ModelRouteBias,
 } from "@agentic-runtime/core";
 import { OllamaModel } from "@agentic-runtime/ollama";
 import { OpenAICompatibleChatModel } from "@agentic-runtime/openai";
@@ -86,7 +87,14 @@ export interface RouteRankingCandidate {
   cooldownUntil?: number;
 }
 
-export interface RouteRankingRequirements {
+export interface RouteRankingBias {
+  /** Ordering preference among eligible routes. */
+  bias?: ModelRouteBias;
+  /** Reject routes whose known context window is below this many tokens. */
+  minContextWindow?: number;
+}
+
+export interface RouteRankingRequirements extends RouteRankingBias {
   requiresTools: boolean;
   contextTokens: number;
   estimatedOutputTokens: number;
@@ -123,6 +131,12 @@ export function rankModelRoutes(
       const contextFits =
         candidate.model.contextWindow === undefined ||
         contextTokens + outputTokens <= candidate.model.contextWindow;
+      // A policy may demand headroom beyond the current request, so a stage
+      // that is about to grow its own context is not routed to a window it
+      // will overflow two tool calls later.
+      const meetsMinimumWindow =
+        requirements.minContextWindow === undefined ||
+        (candidate.model.contextWindow ?? 0) >= requirements.minContextWindow;
       const cooldownUntil = candidate.cooldownUntil;
       const inCooldown =
         cooldownUntil !== undefined && cooldownUntil > requirements.now;
@@ -135,7 +149,9 @@ export function rankModelRoutes(
         ? "tools required but unsupported"
         : !contextFits
           ? `estimated context ${contextTokens + outputTokens} exceeds window ${candidate.model.contextWindow}`
-          : undefined;
+          : !meetsMinimumWindow
+            ? `window ${candidate.model.contextWindow ?? "unknown"} is below the ${requirements.minContextWindow} required for this stage`
+            : undefined;
       const costReason =
         estimatedCost === null
           ? "cost unknown"
@@ -144,9 +160,13 @@ export function rankModelRoutes(
         candidate.model.contextWindow === undefined
           ? `estimated context ${contextTokens}; window unknown`
           : `estimated context ${contextTokens}/${candidate.model.contextWindow}`;
+      const biasReason =
+        requirements.bias && requirements.bias !== "balanced"
+          ? `${requirements.bias} bias (${requirements.bias === "capacity" ? `${candidate.model.totalParameters ?? "unknown"} params` : costReason}); `
+          : "";
       const reason = eligibilityReason
         ? `rejected: ${eligibilityReason}`
-        : `${inCooldown ? "cooldown active; " : ""}preference ${candidate.preference}; ${requirements.requiresTools ? "tools supported" : "tools not required"}; ${contextReason}; ${costReason}`;
+        : `${inCooldown ? "cooldown active; " : ""}${biasReason}preference ${candidate.preference}; ${requirements.requiresTools ? "tools supported" : "tools not required"}; ${contextReason}; ${costReason}`;
 
       return {
         model: candidate.model,
@@ -155,11 +175,11 @@ export function rankModelRoutes(
         estimatedCost,
         cooldownUntil,
         inCooldown,
-        eligible: supportsTools && contextFits,
+        eligible: supportsTools && contextFits && meetsMinimumWindow,
         reason,
       };
     })
-    .sort(compareRankedRoutes);
+    .sort(comparatorFor(requirements.bias));
 }
 
 export interface ProviderConfig {
@@ -579,12 +599,29 @@ export class ProviderGateway implements LanguageModel {
     const allowed = candidates.filter(
       (candidate) => !excluded.has(candidate.model.providerId),
     );
-    return rankModelRoutes(allowed.length > 0 ? allowed : candidates, {
+    const usable = allowed.length > 0 ? allowed : candidates;
+    const requirements = {
       requiresTools: request.tools.length > 0,
       contextTokens,
       estimatedOutputTokens: this.estimatedOutputTokens,
       now,
+      bias: request.routePolicy?.bias,
+    };
+    const minContextWindow = request.routePolicy?.minContextWindow;
+    if (minContextWindow === undefined) {
+      return rankModelRoutes(usable, requirements);
+    }
+    // The window floor is a preference, not a hard constraint. Enforcing it
+    // when nothing clears it would fail a task that a smaller window could
+    // still have completed, so it is dropped rather than allowed to empty the
+    // route list.
+    const preferred = rankModelRoutes(usable, {
+      ...requirements,
+      minContextWindow,
     });
+    return preferred.some((route) => route.eligible)
+      ? preferred
+      : rankModelRoutes(usable, requirements);
   }
 
   async respond(request: ModelRequest): Promise<ModelResponse> {
@@ -1402,24 +1439,41 @@ export function estimateModelCost(
   );
 }
 
-function compareRankedRoutes(
-  left: RankedModelRoute,
-  right: RankedModelRoute,
-): number {
-  if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
-  if (left.inCooldown !== right.inCooldown) return left.inCooldown ? 1 : -1;
-  if (left.preference !== right.preference) {
-    return left.preference - right.preference;
-  }
-  const leftCost = left.estimatedCost ?? Number.POSITIVE_INFINITY;
-  const rightCost = right.estimatedCost ?? Number.POSITIVE_INFINITY;
-  if (leftCost !== rightCost) return leftCost - rightCost;
-  const leftWindow = left.model.contextWindow ?? Number.POSITIVE_INFINITY;
-  const rightWindow = right.model.contextWindow ?? Number.POSITIVE_INFINITY;
-  if (leftWindow !== rightWindow) return leftWindow - rightWindow;
-  return keyFor(left.model.providerId, left.model.id).localeCompare(
-    keyFor(right.model.providerId, right.model.id),
-  );
+/**
+ * Eligibility and cooldown always dominate: an ineligible or cooling route is
+ * worse than any usable one regardless of bias. The bias only decides what
+ * comes first among routes that can all actually serve the request.
+ */
+function comparatorFor(
+  bias: ModelRouteBias | undefined,
+): (left: RankedModelRoute, right: RankedModelRoute) => number {
+  return (left, right) => {
+    if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
+    if (left.inCooldown !== right.inCooldown) return left.inCooldown ? 1 : -1;
+    if (bias === "capacity") {
+      // An unknown parameter count sorts last rather than first: we only
+      // promote a model above the operator's order on evidence it is bigger.
+      const leftSize = left.model.totalParameters ?? 0;
+      const rightSize = right.model.totalParameters ?? 0;
+      if (leftSize !== rightSize) return rightSize - leftSize;
+    } else if (bias === "economy") {
+      const leftCost = left.estimatedCost ?? Number.POSITIVE_INFINITY;
+      const rightCost = right.estimatedCost ?? Number.POSITIVE_INFINITY;
+      if (leftCost !== rightCost) return leftCost - rightCost;
+    }
+    if (left.preference !== right.preference) {
+      return left.preference - right.preference;
+    }
+    const leftCost = left.estimatedCost ?? Number.POSITIVE_INFINITY;
+    const rightCost = right.estimatedCost ?? Number.POSITIVE_INFINITY;
+    if (leftCost !== rightCost) return leftCost - rightCost;
+    const leftWindow = left.model.contextWindow ?? Number.POSITIVE_INFINITY;
+    const rightWindow = right.model.contextWindow ?? Number.POSITIVE_INFINITY;
+    if (leftWindow !== rightWindow) return leftWindow - rightWindow;
+    return keyFor(left.model.providerId, left.model.id).localeCompare(
+      keyFor(right.model.providerId, right.model.id),
+    );
+  };
 }
 
 function serializedLength(value: unknown): number {

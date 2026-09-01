@@ -75,12 +75,27 @@ function staticGuiDirectory(): string {
 
 function configurePackagedRuntime(): void {
   if (!app.isPackaged) return;
-  const binaryName = process.platform === "win32" ? "rg.exe" : "rg";
-  const ripgrepPath = join(process.resourcesPath, "runtime", binaryName);
+  const windows = process.platform === "win32";
+  const ripgrepPath = join(
+    process.resourcesPath,
+    "runtime",
+    windows ? "rg.exe" : "rg",
+  );
   if (!existsSync(ripgrepPath)) {
     throw new Error(`The packaged ripgrep binary is missing: ${ripgrepPath}`);
   }
   process.env.AGENTIC_RIPGREP_PATH = ripgrepPath;
+
+  // The Rust sidecar is optional at runtime - structural slicing, the AST diff
+  // tool, and signature pruning degrade rather than fail without it - so a
+  // missing binary is not fatal the way ripgrep is. It still has to be pointed
+  // at explicitly, because a packaged app has no rust/target tree to search.
+  const rustPath = join(
+    process.resourcesPath,
+    "runtime",
+    windows ? "rust.exe" : "rust",
+  );
+  if (existsSync(rustPath)) process.env.AGENTIC_RUST_PATH = rustPath;
 }
 
 async function startWorkspace(workspaceRoot: string): Promise<void> {

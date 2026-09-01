@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { argv, env, exit, platform, stderr, stdout } from "node:process";
 import { fileURLToPath, URL } from "node:url";
@@ -33,3 +33,34 @@ copyFileSync(rgPath, destination);
 chmodSync(destination, 0o755);
 
 stdout.write(`Prepared ripgrep runtime asset: ${destination}\n`);
+
+// The Rust sidecar backs `analyze_code_structure`, `compute_ast_diff`, and the
+// signature-pruning half of compaction. A packaged app has no `rust/target`
+// tree beside the JavaScript, so the binary has to be copied in and pointed at
+// with AGENTIC_RUST_PATH; without this the shipped app silently lost all three.
+// It is platform-specific too, which the target guard above already enforces.
+const rustBinaryName = platform === "win32" ? "rust.exe" : "rust";
+const rustSource = ["release", "debug"]
+  .map((profile) =>
+    fileURLToPath(
+      new URL(
+        `../../../rust/target/${profile}/${rustBinaryName}`,
+        import.meta.url,
+      ),
+    ),
+  )
+  .find((candidate) => existsSync(candidate));
+
+if (!rustSource) {
+  stderr.write(
+    "The Rust sidecar binary was not found. Run `pnpm build:rust` before " +
+      "packaging, or `cargo build --release --manifest-path rust/Cargo.toml`.\n",
+  );
+  exit(1);
+}
+
+const rustDestination = join(assetDirectory, rustBinaryName);
+copyFileSync(rustSource, rustDestination);
+chmodSync(rustDestination, 0o755);
+
+stdout.write(`Prepared Rust sidecar runtime asset: ${rustDestination}\n`);

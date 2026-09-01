@@ -13,6 +13,19 @@ export const DEFAULT_MAX_TOOL_STEPS = 8;
  * providers must not serve a request, and whether waiting out a cooldown is
  * preferable to degrading.
  */
+/**
+ * How a request wants eligible routes ordered, once tool support and context fit
+ * have been settled.
+ *
+ * `capacity` puts the largest known model first and is for work whose quality
+ * decides whether the task succeeds at all: planning a decomposition, judging
+ * whether an implementation is correct. `economy` puts the cheapest first and is
+ * for work where a small model is genuinely sufficient — summarising retrieval
+ * output, answering a one-line question — so the budget is spent where it moves
+ * accuracy. `balanced` keeps the operator's configured preference order.
+ */
+export type ModelRouteBias = "balanced" | "capacity" | "economy";
+
 export interface ModelRoutePolicy {
   /** Providers that must not serve this request while any alternative exists. */
   excludeProviders?: readonly string[];
@@ -21,6 +34,10 @@ export interface ModelRoutePolicy {
    * before considering the excluded providers. Zero disables waiting.
    */
   maxCooldownWaitMs?: number;
+  /** Ordering preference among eligible routes. Defaults to `balanced`. */
+  bias?: ModelRouteBias;
+  /** Reject routes whose known context window is below this many tokens. */
+  minContextWindow?: number;
   /** Human-readable justification, surfaced in routing events. */
   reason?: string;
 }

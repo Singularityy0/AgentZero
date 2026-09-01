@@ -51,13 +51,22 @@ export interface RuntimeLimits {
   taskCostWarningRatio: number;
 }
 
+/**
+ * Defaults are set against the evaluation's scoring formula, not against a
+ * round number. Accuracy is multiplied by 10 while time enters a penalty
+ * denominator, so a run cut off just short of a correct answer scores far worse
+ * than the same run taking longer to finish: a task killed at 10 minutes scores
+ * zero, while one that finishes at 25 still scores most of its accuracy. The
+ * ceilings therefore sit below the 2700 s / $0.50 hard limits with margin, and
+ * act as runaway protection rather than as a target to aim for.
+ */
 export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
   maxDepth: 4,
   maxHandoffs: 8,
   maxHandoffsPerPair: 2,
-  maxModelSteps: 32,
-  maxToolCalls: 128,
-  maxDurationMs: 10 * 60_000,
+  maxModelSteps: 48,
+  maxToolCalls: 192,
+  maxDurationMs: 30 * 60_000,
   contextCharacterBudget: 20_000,
   maxTaskCostUsd: 0.5,
   taskCostWarningRatio: 0.75,

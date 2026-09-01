@@ -7,6 +7,7 @@ import {
   SemanticRetrievalIndex,
   createProjectIdentity,
 } from "../packages/retrieval/dist/index.js";
+import { findFiles } from "../packages/search/dist/index.js";
 
 const mainSource = `import { helper as importedHelper } from "./helper.js";
 
@@ -221,5 +222,155 @@ test("persistent semantic retrieval indexes, ranks, recovers, and isolates proje
     reopened?.close();
     second?.close();
     await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("JavaScript is indexed by the compiler, not the text fallback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "retrieval-js-"));
+  try {
+    await mkdir(join(root, "src"), { recursive: true });
+    await writeFile(
+      join(root, "src", "cart.js"),
+      [
+        'import { priceOf } from "./pricing.js";',
+        "",
+        "export function totalCart(items) {",
+        "  return items.reduce((sum, item) => sum + priceOf(item), 0);",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(root, "src", "pricing.js"),
+      "export function priceOf(item) {\n  return item.price;\n}\n",
+      "utf8",
+    );
+    const index = new SemanticRetrievalIndex({ root });
+    try {
+      await index.indexProject();
+      // The text fallback would record `ripgrep-text` and no call edges.
+      assert.equal(
+        index.getFileMetadata("src/cart.js")?.extractor,
+        "typescript",
+      );
+
+      const result = await index.query({ query: "totalCart" });
+      const slice = result.results.find((item) => item.path === "src/cart.js");
+      assert.ok(slice, "the defining file should be retrieved");
+      assert.ok(
+        slice.reasons.some((reason) => /symbol match/.test(reason)),
+        `expected a symbol match, got ${JSON.stringify(slice.reasons)}`,
+      );
+      // The import edge should pull the callee in as a graph neighbor.
+      assert.ok(
+        result.results.some((item) => item.path === "src/pricing.js"),
+        "the imported module should be reachable through the graph",
+      );
+    } finally {
+      index.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("re-indexing skips unchanged files and still sees real edits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "retrieval-incremental-"));
+  try {
+    await mkdir(join(root, "src"), { recursive: true });
+    const target = join(root, "src", "widget.ts");
+    await writeFile(
+      target,
+      "export function widget(): number {\n  return 1;\n}\n",
+      "utf8",
+    );
+    for (let index = 0; index < 4; index += 1) {
+      await writeFile(
+        join(root, "src", `filler-${index}.ts`),
+        `export const filler${index} = ${index};\n`,
+        "utf8",
+      );
+    }
+    const index = new SemanticRetrievalIndex({ root });
+    try {
+      const first = await index.indexProject();
+      assert.equal(first.indexed, 5);
+      assert.equal(first.reused, 0);
+
+      // Nothing changed: every file takes the stat fast path, and no file is
+      // read or re-extracted.
+      const second = await index.indexProject();
+      assert.equal(second.indexed, 0);
+      assert.equal(second.reused, 5);
+
+      // A real edit still moves mtime, so it is picked up.
+      await writeFile(
+        target,
+        "export function widget(): number {\n  return 2;\n}\n\nexport function extraWidget(): number {\n  return 3;\n}\n",
+        "utf8",
+      );
+      const third = await index.indexProject();
+      assert.equal(third.indexed, 1);
+      assert.equal(third.reused, 4);
+
+      const result = await index.query({ query: "extraWidget" });
+      assert.ok(
+        result.results.some((slice) => slice.path === "src/widget.ts"),
+        "the newly added symbol should be searchable",
+      );
+    } finally {
+      index.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("file discovery honours ignore rules instead of walking dependencies", async () => {
+  const root = await mkdtemp(join(tmpdir(), "retrieval-ignore-"));
+  try {
+    await mkdir(join(root, "src"), { recursive: true });
+    await mkdir(join(root, "node_modules", "left-pad"), { recursive: true });
+    await mkdir(join(root, "dist"), { recursive: true });
+    await writeFile(
+      join(root, "src", "app.ts"),
+      "export const app = 1;\n",
+      "utf8",
+    );
+    await writeFile(
+      join(root, "node_modules", "left-pad", "index.js"),
+      "module.exports = function app() {};\n",
+      "utf8",
+    );
+    await writeFile(
+      join(root, "dist", "app.js"),
+      "export const app = 1;\n",
+      "utf8",
+    );
+
+    // Deliberately no .gitignore: the exclusions must hold on their own, since
+    // a user can open any folder as a codebase.
+    const found = await findFiles(root, "*", 500);
+    assert.deepEqual(found, ["src/app.ts"]);
+
+    // A caller-supplied pattern must not re-admit dependency files either.
+    const scoped = await findFiles(root, "*.js", 500);
+    assert.deepEqual(scoped, []);
+
+    const index = new SemanticRetrievalIndex({ root });
+    try {
+      const report = await index.indexProject();
+      assert.equal(report.discovered, 1);
+      const matches = await index.query({ query: "app" });
+      assert.deepEqual(
+        [...new Set(matches.results.map((slice) => slice.path))],
+        ["src/app.ts"],
+      );
+    } finally {
+      index.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

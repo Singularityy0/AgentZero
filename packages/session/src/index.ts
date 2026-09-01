@@ -721,7 +721,7 @@ export class SessionStore {
 
   registerAgent(agent: AgentDefinition): AgentDefinition {
     const now = Date.now();
-    this.globalDb
+    this.projectDb
       .prepare(
         `INSERT INTO agents
          (id, name, description, system_prompt, capabilities_json, allowed_tools_json, delegates_to, max_steps, enabled, created_at, updated_at)
@@ -763,21 +763,21 @@ export class SessionStore {
   }
 
   getAgent(id: string): AgentDefinition | undefined {
-    const row = this.globalDb
+    const row = this.projectDb
       .prepare("SELECT * FROM agents WHERE id = ?")
       .get(id) as SqliteAgent | undefined;
     return row ? deserializeAgent(row) : undefined;
   }
 
   listAgents(): AgentDefinition[] {
-    const rows = this.globalDb
+    const rows = this.projectDb
       .prepare("SELECT * FROM agents ORDER BY name, id")
       .all() as unknown as SqliteAgent[];
     return rows.map(deserializeAgent);
   }
 
   removeAgent(id: string): boolean {
-    const result = this.globalDb
+    const result = this.projectDb
       .prepare("DELETE FROM agents WHERE id = ?")
       .run(id);
     return result.changes > 0;
@@ -1222,6 +1222,18 @@ function initializeGlobalDatabase(db: DatabaseSync): void {
       provider_id TEXT PRIMARY KEY,
       secret_reference TEXT NOT NULL
     );
+  `);
+  // Agent definitions used to live here. They are per-project memory - a
+  // project can ship its own agents under .agentic/agents - so a global table
+  // let one codebase's agents appear in another. They now live in the project
+  // database; this drop removes the shared copy on first open.
+  db.exec("DROP TABLE IF EXISTS agents");
+}
+
+function initializeProjectDatabase(db: DatabaseSync): void {
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -1235,16 +1247,6 @@ function initializeGlobalDatabase(db: DatabaseSync): void {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
-  `);
-  if (!tableHasColumn(db, "agents", "delegates_to")) {
-    db.exec("ALTER TABLE agents ADD COLUMN delegates_to TEXT");
-  }
-}
-
-function initializeProjectDatabase(db: DatabaseSync): void {
-  db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA foreign_keys = ON;
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
       root_path TEXT NOT NULL UNIQUE,
@@ -1333,6 +1335,9 @@ function initializeProjectDatabase(db: DatabaseSync): void {
 }
 
 function migrateContextItemSessions(db: DatabaseSync): void {
+  if (!tableHasColumn(db, "agents", "delegates_to")) {
+    db.exec("ALTER TABLE agents ADD COLUMN delegates_to TEXT");
+  }
   if (!tableHasColumn(db, "context_items", "session_id")) {
     db.exec(
       "ALTER TABLE context_items ADD COLUMN session_id TEXT REFERENCES sessions(id)",

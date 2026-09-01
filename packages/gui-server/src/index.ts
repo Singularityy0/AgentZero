@@ -7,6 +7,7 @@ import {
 import { delimiter, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { executeCommand } from "@agentic-runtime/command";
+import { stopRustEngine } from "@agentic-runtime/core";
 import {
   PROVIDER_FIELD_SPECS,
   validateStoredProvider,
@@ -103,6 +104,9 @@ export function startSettingsServer(
     storeClosed = true;
     workspaceWatcher.close();
     store.close();
+    // The Rust sidecar is a child process shared by the whole runtime. Closing
+    // the server without stopping it leaves an orphan behind.
+    stopRustEngine();
   };
   const ready = new Promise<void>((resolve, reject) => {
     const handleListening = (): void => {

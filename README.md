@@ -45,10 +45,13 @@ node --version   # expect v22.5 or newer
 pnpm --version   # expect 9.x
 ```
 
-### 3. Rust (only for the native helper crate)
+### 3. Rust (for the native helper crate)
 
-`pnpm build` compiles a small Rust crate. Skip this and use `pnpm build:ts` if
-you only need the TypeScript packages.
+`pnpm build` compiles a small Rust crate. It backs `analyze_code_structure`,
+`compute_ast_diff`, and signature pruning during context compaction; all three
+degrade to a readable tool error without it, so `pnpm start`, `pnpm tui`, and
+`pnpm settings` run either way. Use `pnpm build:ts` if you want the TypeScript
+packages alone.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -108,15 +111,22 @@ ollama pull qwen2.5-coder:7b         # ~4.7 GB, fits 8 GB VRAM
 `qwen2.5-coder:7b` is the default local route and runs comfortably within
 16 GB RAM / 8 GB VRAM. Verification and review stages deliberately avoid the
 local route when a hosted one is configured; see
-[docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md#4-verification-requires-evidence-and-never-degrades-to-a-weaker-model).
+[docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md#6-verification-requires-evidence-and-never-degrades-to-a-weaker-model).
 
 ### 7. Run
 
 ```sh
-pnpm start        # desktop IDE
+pnpm start        # desktop IDE (Electron window)
 pnpm tui          # terminal interface
-pnpm settings     # settings/server only
+pnpm settings     # loopback server only, open the printed URL in a browser
 ```
+
+All three build what they need first, so a fresh clone needs no separate build
+step. They also try to build the Rust sidecar and continue with a warning if
+Cargo is missing: structural slicing, the AST diff tool, and signature pruning
+are then unavailable, but nothing else changes. `pnpm build` and
+`pnpm desktop:package` still fail hard without it, because an installer shipped
+without the sidecar is a silently reduced product.
 
 On a headless Linux box the Electron desktop needs an X or Wayland display. Use
 `pnpm settings` and open the printed URL in a browser instead.
@@ -172,8 +182,10 @@ Detailed project references:
 IDE tooling uses established libraries: `diff` for patches and diffs, `ajv` for
 tool argument validation, `@vscode/ripgrep` for fast search, and `execa` for
 process execution. The persistent retrieval package uses the TypeScript compiler
-API for symbols/imports/exports/references/calls and text fallback for other
-languages. File operations use the workspace service; command execution uses the
+API for symbols/imports/exports/references/calls across both TypeScript and
+JavaScript, with a regex text fallback for other languages. Indexing is
+incremental and stat-gated: a file whose size and mtime match the index is not
+re-read at all, so the refresh that runs on every query stays cheap. File operations use the workspace service; command execution uses the
 host operating system's native shell.
 
 ## Tool approval policy
@@ -190,9 +202,18 @@ files fail closed and rejected hunks are returned to agent context. New tools re
 
 `TaskOrchestrator` in `@agentic-runtime/core` runs a bounded, sequential plan
 through role-specific workers. Steps can depend on earlier steps, and each
-worker receives the objective, scoped context, and completed results. The
+worker receives the objective, scoped context, and completed results.
 The headless coding path executes planner, semantic retriever, coder, verifier,
-and read-only reviewer stages. Failed verification rolls back journaled file-tool
+and read-only reviewer stages.
+
+The plan's shape is fixed but its length is not. The static plan carries one
+placeholder coding step; the planner may return a fenced `subtasks` block, and
+the orchestrator then replaces that placeholder with up to four narrowly scoped
+coding steps, rewiring dependencies so retrieval still runs first and
+verification still runs over the whole change. A missing or malformed block
+leaves the single step in place, so a model that cannot emit structured output
+loses nothing. Accepted rewrites are checkpointed and replayed on resume, and
+surface as `plan_expanded` events and `plan_expansion` trace spans. Failed verification rolls back journaled file-tool
 mutations only when hashes still match, refreshes retrieval, asks the planner for
 a revised approach, and requires fresh approval for corrective coding. It checkpoints before and after steps, invokes a
 corrective coder after verifier failure, stops repeated failure fingerprints,
@@ -290,7 +311,14 @@ OLLAMA_MODEL=your-local-model
 ## Provider Gateway
 
 `@agentic-runtime/gateway` separates provider configuration, discovered models,
-and execution routes. Credentials are read by reference from environment
+and execution routes. Routes are filtered by tool support, context fit, an
+optional per-stage context-window floor, and cooldown; the survivors are then
+ordered by the request's bias — `capacity` (largest known parameter count) for
+planning a complex task and for verification and review, `economy` (cheapest)
+for retrieval summarisation and plain chat, `balanced` (the operator's
+configured order) otherwise. Task complexity is classified syntactically from
+the prompt rather than with a model call. Every route decision is emitted with
+a human-readable reason. Credentials are read by reference from environment
 variables and are never included in task/session state or gateway events.
 The desktop settings screen persists credentials in the machine-local global
 SQLite database, so normal users do not need to create or repeatedly edit an

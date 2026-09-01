@@ -13,8 +13,12 @@ export {
   type CreateHeadlessRuntimeOptions,
 } from "./composition.js";
 export {
+  classifyTaskComplexity,
   HeadlessRuntimeService,
+  parsePlannedSubtasks,
+  routePolicyForStage,
   type HeadlessRuntimeServiceOptions,
+  type TaskComplexity,
 } from "./runtime-service.js";
 export {
   DEFAULT_RUNTIME_LIMITS,

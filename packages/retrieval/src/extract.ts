@@ -15,6 +15,28 @@ interface ImportedBinding {
   moduleSpecifier: string;
 }
 
+/**
+ * The TypeScript compiler parses JavaScript with the same API, so plain `.js`
+ * and `.jsx` sources get real symbol, import, export, and call edges instead of
+ * falling back to line regexes. Picking the right `ScriptKind` matters: JSX in a
+ * `.js` file only parses under `ScriptKind.JSX`.
+ */
+function scriptKindFor(path: string): ts.ScriptKind {
+  const lowered = path.toLowerCase();
+  if (lowered.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (lowered.endsWith(".jsx")) return ts.ScriptKind.JSX;
+  if (
+    lowered.endsWith(".js") ||
+    lowered.endsWith(".mjs") ||
+    lowered.endsWith(".cjs")
+  ) {
+    // A `.js` file may legally contain JSX; TSX/JSX parsing is a superset of
+    // plain JS for everything this extractor reads.
+    return ts.ScriptKind.JSX;
+  }
+  return ts.ScriptKind.TS;
+}
+
 export function extractTypeScript(
   path: string,
   content: string,
@@ -24,7 +46,7 @@ export function extractTypeScript(
     content,
     ts.ScriptTarget.Latest,
     true,
-    path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    scriptKindFor(path),
   );
   const symbols: IndexedSymbol[] = [];
   const declarationPositions = new Set<number>();

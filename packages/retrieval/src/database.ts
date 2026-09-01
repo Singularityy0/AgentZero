@@ -46,6 +46,7 @@ export interface StoredEdge {
 }
 
 export class RetrievalDatabase {
+  private closed = false;
   private readonly db: DatabaseSync;
 
   constructor(
@@ -66,7 +67,14 @@ export class RetrievalDatabase {
       .run(project.id, project.rootPath, Date.now(), Date.now());
   }
 
+  /**
+   * Idempotent: the index can be owned by a runtime that closes it and also
+   * held by a caller that closes it too, and a second close should be a no-op
+   * rather than an error that masks the real shutdown path.
+   */
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 
@@ -83,6 +91,19 @@ export class RetrievalDatabase {
         "SELECT * FROM retrieval_files WHERE project_id = ? AND path = ?",
       )
       .get(this.project.id, path) as StoredFile | undefined;
+  }
+
+  /**
+   * Record a new stat for a file whose content hash did not change, so the
+   * next index pass can skip reading it. Content-derived columns are untouched.
+   */
+  touchFile(path: string, modifiedAt: number, size: number): void {
+    this.db
+      .prepare(
+        `UPDATE retrieval_files SET modified_at = ?, size = ?, indexed_at = ?
+         WHERE project_id = ? AND path = ?`,
+      )
+      .run(modifiedAt, size, Date.now(), this.project.id, path);
   }
 
   replaceFile(

@@ -1,7 +1,62 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface, type Interface } from "node:readline";
 import { fileURLToPath } from "node:url";
+
+/**
+ * Locate the Rust sidecar.
+ *
+ * A packaged desktop build has no `rust/target` tree next to the JavaScript, so
+ * the path is taken from `AGENTIC_RUST_PATH` when the host sets one — the
+ * desktop main process points it at the bundled binary, exactly as it already
+ * does for ripgrep. In a source checkout, a release build is preferred over a
+ * debug build when both exist; the previous hard-coded `target/debug` path
+ * meant a release build was never found.
+ *
+ * Returning a best-guess path rather than throwing is deliberate: every caller
+ * treats a missing sidecar as a lost capability, not an error. Structural
+ * slicing and the AST diff tool report a tool error, and compaction silently
+ * falls back to its structured-exchange path.
+ */
+function resolveRustBinaryPath(): string {
+  const configured = process.env.AGENTIC_RUST_PATH?.trim();
+  if (configured) return configured;
+  const extension = process.platform === "win32" ? ".exe" : "";
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const candidates = ["release", "debug"].map((profile) =>
+    join(
+      moduleDirectory,
+      "..",
+      "..",
+      "..",
+      "rust",
+      "target",
+      profile,
+      `rust${extension}`,
+    ),
+  );
+  // Pick the most recently built profile, not a fixed preference. The dev
+  // scripts build debug, so preferring release outright would silently run a
+  // stale release binary after someone edits the crate and restarts - the
+  // hardest kind of bug to notice, because the old binary still answers.
+  const built = candidates
+    .map((path) => ({ path, builtAt: modifiedAt(path) }))
+    .filter(
+      (candidate): candidate is { path: string; builtAt: number } =>
+        candidate.builtAt !== undefined,
+    )
+    .sort((left, right) => right.builtAt - left.builtAt);
+  return built[0]?.path ?? candidates[1]!;
+}
+
+function modifiedAt(path: string): number | undefined {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface DiffChunk {
   start_line: number;
@@ -37,20 +92,8 @@ export class RustClient {
   constructor(options: RustClientOptions | string = {}) {
     const normalizedOptions =
       typeof options === "string" ? { binaryPath: options } : options;
-    const extension = process.platform === "win32" ? ".exe" : "";
-    const moduleDirectory = dirname(fileURLToPath(import.meta.url));
     this.rustBinaryPath =
-      normalizedOptions.binaryPath ??
-      join(
-        moduleDirectory,
-        "..",
-        "..",
-        "..",
-        "rust",
-        "target",
-        "debug",
-        `rust${extension}`,
-      );
+      normalizedOptions.binaryPath ?? resolveRustBinaryPath();
     this.requestTimeoutMs = normalizedOptions.requestTimeoutMs ?? 30_000;
   }
 
@@ -60,6 +103,15 @@ export class RustClient {
     const child = spawn(this.rustBinaryPath, [], {
       stdio: ["pipe", "pipe", "pipe"],
     });
+    // The sidecar is a helper, not a reason for the host to stay alive. The
+    // child and each of its pipes hold their own handle on the event loop, so
+    // all four are released: without this a run that had finished its work hung
+    // instead of exiting, because an idle sidecar kept the loop open. Pending
+    // requests are unaffected - they are kept alive by their own timers.
+    child.unref();
+    for (const stream of [child.stdin, child.stdout, child.stderr]) {
+      (stream as unknown as { unref?: () => void }).unref?.();
+    }
     this.process = child;
     this.rl = createInterface({ input: child.stdout, terminal: false });
 

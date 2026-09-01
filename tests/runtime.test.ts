@@ -10,10 +10,16 @@ import {
   MultiAgentOrchestrator,
   TaskOrchestrator,
   ToolRegistry,
+  analyzeCodeStructureTool,
+  computeAstDiffTool,
   type AgentEvent,
   type LanguageModel,
   type ModelRequest,
+  type AgentWorkRequest,
+  type AgentWorkResult,
+  type ConversationMessage,
   type ModelResponse,
+  type OrchestrationState,
   type Tool,
 } from "../packages/core/dist/index.js";
 import { executeCommand } from "../packages/command/dist/index.js";
@@ -47,8 +53,10 @@ import {
   CODING_AGENT_ID,
   CONVERSATION_AGENT_ID,
   createDefaultAgents,
+  createHeadlessRuntime,
   DEFAULT_AGENT_ID,
   HeadlessRuntimeService,
+  parsePlannedSubtasks,
   REVIEWER_AGENT_ID,
   VERIFIER_AGENT_ID,
   type RuntimeEvent,
@@ -3292,4 +3300,696 @@ test("SessionStore persists project-isolated sessions, tasks, events, and contex
       await rm(root, { recursive: true, force: true });
     }
   })();
+});
+
+test("planner subtask parsing only rewrites the plan for a real decomposition", () => {
+  const decomposed = parsePlannedSubtasks(
+    [
+      "Plan:",
+      "1. Add the parser.",
+      "2. Wire it into the CLI.",
+      "```subtasks",
+      JSON.stringify([
+        {
+          title: "Add parser",
+          prompt: "Create src/parse.ts exporting parse().",
+        },
+        { title: "Wire CLI", prompt: "Call parse() from src/cli.ts." },
+      ]),
+      "```",
+    ].join("\n"),
+  );
+  assert.equal(decomposed?.length, 2);
+  assert.equal(decomposed?.[0]?.title, "Add parser");
+
+  // A single entry is what the default plan already does.
+  assert.equal(
+    parsePlannedSubtasks(
+      '```subtasks\n[{"title":"One","prompt":"Only thing."}]\n```',
+    ),
+    undefined,
+  );
+  // Prose with no block, and a malformed block, both keep the static plan.
+  assert.equal(
+    parsePlannedSubtasks("Just a numbered plan.\n1. Do it."),
+    undefined,
+  );
+  assert.equal(parsePlannedSubtasks("```subtasks\n[{oops}]\n```"), undefined);
+  // Entries without a prompt are dropped, which can collapse the list.
+  assert.equal(
+    parsePlannedSubtasks('```subtasks\n[{"title":"a"},{"title":"b"}]\n```'),
+    undefined,
+  );
+});
+
+test("TaskOrchestrator runs, rewires, and resumes a planner-expanded plan", async () => {
+  const staticPlan = {
+    objective: "Expand the plan.",
+    steps: [
+      { id: "plan", role: "planner" as const, title: "Plan", prompt: "Plan." },
+      {
+        id: "code",
+        role: "coder" as const,
+        title: "Implement",
+        prompt: "Implement.",
+        dependsOn: ["plan"],
+      },
+      {
+        id: "verify",
+        role: "verifier" as const,
+        title: "Verify",
+        prompt: "Verify.",
+        dependsOn: ["code"],
+      },
+    ],
+  };
+  const expansion = {
+    targetId: "code",
+    steps: [
+      {
+        id: "code-1",
+        role: "coder" as const,
+        title: "First",
+        prompt: "First.",
+      },
+      {
+        id: "code-2",
+        role: "coder" as const,
+        title: "Second",
+        prompt: "Second.",
+        dependsOn: ["code-1"],
+      },
+    ],
+  };
+
+  let saved: OrchestrationState | undefined;
+  const coded: string[] = [];
+  const events: string[] = [];
+  const makeWorkers = () => ({
+    planner: async (): Promise<AgentWorkResult> => ({
+      success: true,
+      summary: "planned",
+      expandPlan: expansion,
+    }),
+    coder: async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
+      coded.push(request.step.id);
+      return { success: true, summary: `coded ${request.step.id}` };
+    },
+    verifier: async (): Promise<AgentWorkResult> => ({
+      success: true,
+      passed: true,
+      summary: "ok",
+    }),
+  });
+
+  const first = await new TaskOrchestrator(makeWorkers(), {
+    checkpoint: {
+      load: async () => undefined,
+      save: async (state) => {
+        saved = structuredClone(state);
+      },
+    },
+    onEvent: (event) => {
+      events.push(event.type);
+    },
+  }).run(staticPlan);
+
+  // The placeholder step is gone, both sub-steps ran in order, and the
+  // verifier still ran last because its dependency was rewired.
+  assert.equal(first.stage, "completed");
+  assert.deepEqual(coded, ["code-1", "code-2"]);
+  assert.deepEqual(first.completedStepIds, [
+    "plan",
+    "code-1",
+    "code-2",
+    "verify",
+  ]);
+  assert.ok(events.includes("plan_expanded"));
+  assert.equal(first.expansions?.length, 1);
+
+  // Resuming from a checkpoint taken mid-decomposition replays the expansion
+  // rather than rejecting `code-1` as an unknown step.
+  const midRun: OrchestrationState = {
+    ...structuredClone(saved!),
+    stage: "implementing",
+    completedStepIds: ["plan", "code-1"],
+  };
+  coded.length = 0;
+  const resumed = await new TaskOrchestrator(makeWorkers(), {
+    checkpoint: { load: async () => midRun, save: async () => undefined },
+  }).run(staticPlan);
+  assert.equal(resumed.stage, "completed");
+  assert.deepEqual(coded, ["code-2"]);
+});
+
+test("TaskOrchestrator ignores an unusable plan expansion instead of failing", async () => {
+  const coded: string[] = [];
+  const state = await new TaskOrchestrator(
+    {
+      planner: async () => ({
+        success: true,
+        summary: "planned",
+        // "plan" has already completed, so this expansion cannot be applied.
+        expandPlan: {
+          targetId: "plan",
+          steps: [
+            { id: "x", role: "coder" as const, title: "X", prompt: "X." },
+          ],
+        },
+      }),
+      coder: async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
+        coded.push(request.step.id);
+        return { success: true, summary: "coded" };
+      },
+    },
+    {},
+  ).run({
+    objective: "Reject a bad expansion.",
+    steps: [
+      { id: "plan", role: "planner", title: "Plan", prompt: "Plan." },
+      {
+        id: "code",
+        role: "coder",
+        title: "Implement",
+        prompt: "Implement.",
+        dependsOn: ["plan"],
+      },
+    ],
+  });
+
+  assert.equal(state.stage, "completed");
+  assert.deepEqual(coded, ["code"]);
+  assert.equal(state.expansions?.length ?? 0, 0);
+});
+
+test("the pipeline runs one coding step per planner sub-task on an existing codebase", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-decompose-"));
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(
+    join(root, "src", "rate-limit.ts"),
+    "export function allow(): boolean {\n  return true;\n}\n",
+  );
+  await writeFile(
+    join(root, "src", "api.ts"),
+    'import { allow } from "./rate-limit.js";\n\nexport function handle(): string {\n  return allow() ? "ok" : "no";\n}\n',
+  );
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+
+  const coderPrompts: string[] = [];
+  const models = new Map<string, LanguageModel>([
+    [
+      DEFAULT_AGENT_ID,
+      new FakeModel([
+        assistantResponse(
+          [
+            "Plan:",
+            "1. Add a token bucket to the limiter.",
+            "2. Apply it in the API handler.",
+            "```subtasks",
+            JSON.stringify([
+              {
+                title: "Token bucket",
+                prompt: "Add a token bucket to src/rate-limit.ts.",
+              },
+              {
+                title: "Apply in handler",
+                prompt: "Call the limiter from src/api.ts.",
+              },
+            ]),
+            "```",
+          ].join("\n"),
+        ),
+      ]),
+    ],
+    [
+      CODING_AGENT_ID,
+      {
+        respond: async (request) => {
+          // Mutate once per step, then report instead of looping: a real coder
+          // stops after its edit, and this keeps the assertion about coder
+          // *steps* rather than about turns inside one step.
+          if (request.messages.some((message) => message.role === "tool")) {
+            return assistantResponse("Sub-task implemented.");
+          }
+          const last = [...request.messages]
+            .reverse()
+            .find((message) => message.role === "user");
+          coderPrompts.push(last?.content ?? "");
+          return assistantResponse("", [
+            {
+              id: `write-${coderPrompts.length}`,
+              name: "write_file",
+              arguments: { content: "changed" },
+            },
+          ]);
+        },
+      },
+    ],
+    [
+      VERIFIER_AGENT_ID,
+      new FakeModel([
+        assistantResponse("", [
+          {
+            id: "v-read",
+            name: "read_file",
+            arguments: { path: "src/api.ts" },
+          },
+        ]),
+        assistantResponse("VERIFICATION_PASSED"),
+      ]),
+    ],
+    [REVIEWER_AGENT_ID, new FakeModel([assistantResponse("Review complete.")])],
+  ]);
+  const tools = new ToolRegistry()
+    .register({
+      name: "write_file",
+      description: "Record a test mutation.",
+      approval: "auto",
+      parameters: {
+        type: "object",
+        properties: { content: { type: "string" } },
+        required: ["content"],
+        additionalProperties: false,
+      },
+      execute: async () => ({ output: "changed", changed: true }),
+    })
+    .register({
+      name: "read_file",
+      description: "Read a file.",
+      approval: "auto",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      execute: async () => ({ output: "export function handle() {}" }),
+    });
+
+  const events: RuntimeEvent[] = [];
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "fake" },
+    resolveModel: (agent) => models.get(agent.id)!,
+    resolveTools: () => tools,
+    requestApproval: async () => true,
+    retrieval,
+  });
+  service.subscribe((event) => {
+    events.push(event);
+  });
+
+  try {
+    const session = service.createSession();
+    const result = await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt:
+        "Add rate limiting to the API in this repository: update src/rate-limit.ts and then apply it in src/api.ts, and keep every existing caller working.",
+    });
+    assert.equal(result.status, "completed");
+
+    const persisted = store.getTask(result.taskId);
+    const orchestration = persisted?.state.orchestration as {
+      completedStepIds?: string[];
+      expansions?: unknown[];
+    };
+    // The single placeholder `code` step became two, and verification still
+    // ran last because its dependency was rewired to the final sub-step.
+    assert.deepEqual(orchestration.completedStepIds, [
+      "plan",
+      "retrieve",
+      "code-1",
+      "code-2",
+      "verify",
+      "review",
+    ]);
+    assert.equal(orchestration.expansions?.length, 1);
+
+    // Each coder call carried only its own sub-task, not the whole objective.
+    assert.equal(coderPrompts.length, 2);
+    assert.match(coderPrompts[0] ?? "", /token bucket to src\/rate-limit\.ts/i);
+    assert.match(coderPrompts[1] ?? "", /Call the limiter from src\/api\.ts/i);
+    assert.match(coderPrompts[0] ?? "", /sub-task 1 of 2/i);
+    // The consumed block is stripped, so the sub-task JSON is not repeated in
+    // every later stage's context.
+    assert.doesNotMatch(coderPrompts[0] ?? "", /```subtasks/i);
+    assert.match(
+      (
+        orchestration as unknown as {
+          results?: { plan?: { summary?: string } };
+        }
+      ).results?.plan?.summary ?? "",
+      /token bucket to the limiter/i,
+    );
+
+    // The decomposition is observable, not just internal.
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "pipeline_event" &&
+          event.event.type === "plan_expanded" &&
+          event.event.targetId === "code",
+      ),
+      "a plan_expanded event should be emitted",
+    );
+    assert.ok(
+      service
+        .listTraceSpans(result.taskId)
+        .some((span) => span.kind === "plan_expansion"),
+      "a plan_expansion trace span should be recorded",
+    );
+  } finally {
+    retrieval.close();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project agents and rules never leak between codebases", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "agentic-shared-data-"));
+  const alpha = await mkdtemp(join(tmpdir(), "agentic-alpha-"));
+  const beta = await mkdtemp(join(tmpdir(), "agentic-beta-"));
+  try {
+    // Alpha ships a private agent and its own AGENTS.md rule.
+    await mkdir(join(alpha, ".agentic", "agents"), { recursive: true });
+    await writeFile(
+      join(alpha, ".agentic", "agents", "internal.md"),
+      [
+        "---",
+        "id: alpha-internal",
+        "name: Alpha Internal",
+        "description: Alpha-only deployment agent.",
+        "---",
+        "Deploy through the alpha-internal pipeline.",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(alpha, "AGENTS.md"),
+      "# Alpha rules\nAlways publish to the alpha-internal registry.\n",
+    );
+    await writeFile(
+      join(beta, "AGENTS.md"),
+      "# Beta rules\nAlways publish to the public registry.\n",
+    );
+
+    const open = (root: string) =>
+      createHeadlessRuntime({
+        workspaceRoot: root,
+        model: { providerId: "ollama", modelId: "fake" },
+        requestApproval: async () => false,
+        sessionStore: { dataRoot },
+      });
+
+    const alphaService = open(alpha);
+    assert.ok(
+      alphaService.listAgents().some((agent) => agent.id === "alpha-internal"),
+      "alpha should see its own project agent",
+    );
+
+    // Both projects share one data root, which is exactly the case that used to
+    // leak: agent definitions lived in the global database.
+    const betaService = open(beta);
+    const betaIds = betaService.listAgents().map((agent) => agent.id);
+    assert.equal(
+      betaIds.includes("alpha-internal"),
+      false,
+      "alpha's project agent must not be visible in beta",
+    );
+
+    // Project rules are baked into the built-in prompts, so they must swap too.
+    const betaCoder = betaService
+      .listAgents()
+      .find((agent) => agent.id === CODING_AGENT_ID);
+    assert.doesNotMatch(betaCoder?.systemPrompt ?? "", /alpha-internal/i);
+    assert.match(betaCoder?.systemPrompt ?? "", /public registry/i);
+
+    // Sessions and tasks are project-scoped as well.
+    const alphaSession = alphaService.createSession();
+    assert.deepEqual(
+      betaService.listSessions().map((session) => session.id),
+      [],
+    );
+    assert.ok(alphaSession.id);
+
+    await alphaService.close();
+    await betaService.close();
+  } finally {
+    await rm(dataRoot, { recursive: true, force: true }).catch(() => undefined);
+    await rm(alpha, { recursive: true, force: true }).catch(() => undefined);
+    await rm(beta, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("the Rust sidecar is reachable, overridable, and optional", async () => {
+  // A source checkout resolves the binary itself; a packaged app points at a
+  // bundled copy through AGENTIC_RUST_PATH.
+  const toolContext = {
+    cwd: process.cwd(),
+    signal: new AbortController().signal,
+    requestApproval: async () => true,
+  };
+  const structure = await analyzeCodeStructureTool.execute(
+    {
+      code: [
+        "export function alpha(a) { return a + 1; }",
+        "export function beta(b) { return b * 2; }",
+      ].join("\n"),
+      symbols: ["beta"],
+      extension: "ts",
+    },
+    toolContext,
+  );
+  assert.equal(structure.isError ?? false, false, structure.output);
+  assert.match(structure.output, /function beta/);
+
+  const diff = await computeAstDiffTool.execute(
+    { original: "one\ntwo\nthree", proposal: "one\nCHANGED\nthree" },
+    toolContext,
+  );
+  assert.equal(diff.isError ?? false, false, diff.output);
+  assert.match(diff.output, /CHANGED/);
+
+  // A missing sidecar is a lost capability, not a crash: the tool reports an
+  // error the model can read, and the runtime keeps going.
+  const { RustClient } = await import("../packages/core/dist/rust-bridge.js");
+  const missing = new RustClient({
+    binaryPath: join(tmpdir(), "no-such-rust"),
+  });
+  missing.start();
+  await assert.rejects(() => missing.sliceAst("const a = 1;", ["a"], "ts"));
+  missing.stop();
+});
+
+test("a question about the opened project is answered with tools, not from memory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-workspace-question-"));
+  await writeFile(join(root, "index.ts"), "export const value = 1;\n");
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+
+  const routedTo: string[] = [];
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "fake" },
+    resolveModel: (agent) => {
+      routedTo.push(agent.id);
+      return new FakeModel([assistantResponse("Answered.")]);
+    },
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => false,
+    retrieval,
+  });
+
+  try {
+    const ask = async (prompt: string): Promise<string> => {
+      routedTo.length = 0;
+      const session = service.createSession();
+      await service.runTask({
+        sessionId: session.id,
+        agentId: DEFAULT_AGENT_ID,
+        prompt,
+      });
+      return routedTo[0] ?? "(none)";
+    };
+
+    // General knowledge needs no project access, so the tool-free chat agent
+    // is the cheap and correct route.
+    assert.equal(await ask("hi"), CONVERSATION_AGENT_ID);
+    assert.equal(
+      await ask("what is a closure in javascript"),
+      CONVERSATION_AGENT_ID,
+    );
+
+    // These are explanation requests too, so they must not reach the coder -
+    // but they are about the opened codebase, and the chat agent has no tools
+    // and no context, so it could only invent an answer. They go to the
+    // Architect, which can read the workspace but cannot mutate it.
+    assert.equal(await ask("what files are in this repo"), DEFAULT_AGENT_ID);
+    assert.equal(
+      await ask("explain how this project handles retries"),
+      DEFAULT_AGENT_ID,
+    );
+
+    // A read-only verification request still skips planning and coding.
+    assert.equal(await ask("run the test suite"), VERIFIER_AGENT_ID);
+  } finally {
+    // The service owns the retrieval index it was given, so closing the
+    // service is enough.
+    await service.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("a conversational lead-in does not turn a question into workspace work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-preamble-"));
+  await writeFile(join(root, "index.ts"), "export const value = 1;\n");
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+
+  let called: string[] = [];
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "fake" },
+    resolveModel: (agent) => ({
+      respond: async () => {
+        called.push(agent.id);
+        return assistantResponse("ok");
+      },
+    }),
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => false,
+    retrieval,
+  });
+
+  try {
+    const reachedCoder = async (prompt: string): Promise<boolean> => {
+      called = [];
+      const session = service.createSession();
+      await service.runTask({
+        sessionId: session.id,
+        agentId: DEFAULT_AGENT_ID,
+        prompt,
+      });
+      return called.includes(CODING_AGENT_ID);
+    };
+
+    // The explanation test is anchored so an unanchored "what" cannot match
+    // mid-sentence, but nobody opens with the keyword. Each of these used to
+    // fall through to `hasWorkspaceReference` and start the coding pipeline on
+    // a question - which is how a plain "what is this repo" ended up failing
+    // inside the Coder.
+    for (const question of [
+      "yo can you tell me what this project directory about",
+      "hey what does this repo do",
+      "so what is this project",
+      "can you explain this codebase to me",
+      "give me an overview of this repository",
+      "do you know what this project is",
+    ]) {
+      assert.equal(await reachedCoder(question), false, question);
+    }
+
+    // The same politeness must not stop real work from reaching the Coder.
+    for (const work of [
+      "yo can you fix the null check in index.ts",
+      "hey please add a retry to the client",
+      "so, could you please rename the value export in index.ts",
+      "can you explain why the build fails and then fix it",
+    ]) {
+      assert.equal(await reachedCoder(work), true, work);
+    }
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("an oversized first request is trimmed to fit instead of failing", async () => {
+  const window = 8_192;
+  const seen: number[] = [];
+  let rejected = 0;
+  const model: LanguageModel = {
+    estimateContext: (request) => ({
+      inputTokens: Math.ceil(JSON.stringify(request.messages).length / 4),
+      contextWindowTokens: window,
+      reservedOutputTokens: 1_024,
+    }),
+    respond: async (request) => {
+      const tokens = Math.ceil(JSON.stringify(request.messages).length / 4);
+      seen.push(tokens);
+      if (tokens + 1_024 > window) {
+        rejected += 1;
+        // Exactly what the gateway raises when no configured route can fit.
+        throw new ModelError(
+          "No configured route can fit the request context.",
+          { code: "context_length", retryable: true },
+        );
+      }
+      return assistantResponse("done");
+    },
+  };
+
+  // One user message holding the task with a large evidence dump appended, and
+  // no history at all - the shape of a pipeline worker's very first call, where
+  // exchange folding has nothing to fold.
+  const evidence = JSON.stringify({
+    results: Array.from({ length: 300 }, (_, index) => ({
+      path: `src/module-${index}.ts`,
+      startLine: 1,
+      endLine: 40,
+      content: `export function thing${index}() {\n${"  // detail\n".repeat(20)}}\n`,
+    })),
+  });
+  const messages: ConversationMessage[] = [
+    { role: "system", content: "You are SURGICAL CODER." },
+    {
+      role: "user",
+      content: `Implement the plan.\n\nObjective:\nAdd retries.\n\nContext from the parent workflow:\n${evidence}`,
+    },
+  ];
+  const before = Math.ceil(JSON.stringify(messages).length / 4);
+  assert.ok(
+    before > window * 3,
+    `the fixture must start far over the window, was ${before}`,
+  );
+
+  const runner = new AgentRunner(model, new ToolRegistry(), {
+    cwd: process.cwd(),
+    enforceWorkflowCompletion: false,
+    requestApproval: async () => true,
+  });
+  const result = await runner.run(messages);
+
+  assert.equal(result.text, "done");
+  assert.equal(rejected, 0, "the request should be shrunk before it is sent");
+  assert.ok(seen[0]! + 1_024 <= window, `first request was ${seen[0]} tokens`);
+  // The instruction survives; only the appended evidence is cut.
+  const user = messages.find((message) => message.role === "user");
+  assert.match(user?.content ?? "", /Objective:\nAdd retries\./);
+  assert.match(user?.content ?? "", /Context truncated to fit/);
 });

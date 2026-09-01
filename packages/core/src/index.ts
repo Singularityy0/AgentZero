@@ -20,6 +20,7 @@ export {
   type ModelErrorOptions,
   type ModelRequest,
   type ModelResponse,
+  type ModelRouteBias,
   type ModelRoutePolicy,
   type ModelTiming,
   type ModelUsage,
@@ -57,6 +58,7 @@ export {
   type PendingStepRecovery,
   type OrchestrationState,
   type OrchestrationStep,
+  type PlanExpansion,
   type StepResult,
   type TaskOrchestratorOptions,
 } from "./orchestrator.js";
@@ -72,4 +74,8 @@ export {
   type MultiAgentResult,
 } from "./agents.js";
 export { RustClient } from "./rust-bridge.js";
-export { analyzeCodeStructureTool, computeAstDiffTool } from "./rust-tools.js";
+export {
+  analyzeCodeStructureTool,
+  computeAstDiffTool,
+  stopRustEngine,
+} from "./rust-tools.js";
