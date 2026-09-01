@@ -59,6 +59,7 @@ import {
   HeadlessRuntimeService,
   parsePlannedSubtasks,
   REVIEWER_AGENT_ID,
+  sessionTitleFor,
   VERIFIER_AGENT_ID,
   type RuntimeEvent,
 } from "../packages/runtime/dist/index.js";
@@ -4411,4 +4412,201 @@ test("the duplicate limit counts consecutive repeats, not repeats over a run", a
   assert.equal(result.stopReason, undefined, result.text);
   assert.equal(result.text, "Done.");
   assert.equal(executions, 4, "each distinct call runs once");
+});
+
+test("save-as writes a new path and refuses to overwrite an existing one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-save-as-"));
+  await writeFile(join(root, "index.ts"), "export const value = 1;\n");
+  const server = startSettingsServer({ projectRoot: root, port: 0 });
+  await server.ready;
+  const put = (body: unknown) =>
+    fetch(`${server.url}/api/files/content`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  try {
+    // Save-as sends `expectedHash: null`, which means "this path must not
+    // already exist" - so a new path is written...
+    const created = await put({
+      path: "src/copy.ts",
+      content: "export const copied = 2;\n",
+      expectedHash: null,
+    });
+    assert.equal(created.status, 200);
+    assert.equal(
+      await readFile(join(root, "src", "copy.ts"), "utf8"),
+      "export const copied = 2;\n",
+    );
+
+    // ...and an occupied one is refused rather than silently clobbered.
+    const collision = await put({
+      path: "index.ts",
+      content: "export const value = 99;\n",
+      expectedHash: null,
+    });
+    assert.equal(collision.status, 409);
+    assert.match(
+      ((await collision.json()) as { error?: string }).error ?? "",
+      /already exists/,
+    );
+    assert.equal(
+      await readFile(join(root, "index.ts"), "utf8"),
+      "export const value = 1;\n",
+      "the existing file must be untouched",
+    );
+
+    // An ordinary save carries the hash it read, so a stale buffer conflicts.
+    const stale = await put({
+      path: "index.ts",
+      content: "export const value = 5;\n",
+      expectedHash: "0".repeat(64),
+    });
+    assert.equal(stale.status, 409);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("a conversation is named from its first prompt and keeps that name", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-titles-"));
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "fake" },
+    resolveModel: () => new FakeModel([assistantResponse("Sure.")]),
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => false,
+  });
+
+  try {
+    // A placeholder title is replaced; the user is not going to name a chat
+    // before asking their question.
+    const session = service.createSession("IDE session");
+    await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "what is a closure in javascript",
+    });
+    const titled = store.getSession(session.id);
+    assert.equal(titled?.title, "what is a closure in javascript");
+
+    // A later prompt must not rewrite a name the history list already shows.
+    await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "and what about generators",
+    });
+    assert.equal(
+      store.getSession(session.id)?.title,
+      "what is a closure in javascript",
+    );
+
+    // A title the user chose is never overwritten.
+    const named = service.createSession("Release checklist");
+    await service.runTask({
+      sessionId: named.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "what is a promise",
+    });
+    assert.equal(store.getSession(named.id)?.title, "Release checklist");
+
+    // Long prompts are cut at a word boundary, not mid-word.
+    assert.equal(sessionTitleFor(""), "New session");
+    const long = sessionTitleFor(
+      "Refactor the authentication layer so that every caller uses the new token exchange helper instead of the old one",
+    );
+    assert.ok(long.length <= 61, long);
+    assert.ok(long.endsWith("…"));
+    assert.doesNotMatch(long, / …$/);
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("chat history is per project, resumable, and deletes cleanly", async () => {
+  const dataRoot = await mkdtemp(join(tmpdir(), "agentic-history-data-"));
+  const alpha = await mkdtemp(join(tmpdir(), "agentic-history-alpha-"));
+  const beta = await mkdtemp(join(tmpdir(), "agentic-history-beta-"));
+  const open = (root: string) => {
+    const store = new SessionStore({ projectRoot: root, dataRoot });
+    for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+    return {
+      store,
+      service: new HeadlessRuntimeService({
+        store,
+        model: { providerId: "ollama", modelId: "fake" },
+        resolveModel: () => new FakeModel([assistantResponse("Noted.")]),
+        resolveTools: () => new ToolRegistry(),
+        requestApproval: async () => false,
+      }),
+    };
+  };
+
+  const first = open(alpha);
+  let sessionId = "";
+  let taskId = "";
+  try {
+    const session = first.service.createSession("New session");
+    sessionId = session.id;
+    const result = await first.service.runTask({
+      sessionId,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "explain the retry policy",
+    });
+    taskId = result.taskId;
+  } finally {
+    await first.service.close();
+  }
+
+  // A different project opened against the same data root sees none of it.
+  const other = open(beta);
+  try {
+    assert.deepEqual(other.store.listSessions(), []);
+  } finally {
+    await other.service.close();
+  }
+
+  // Reopening the project restores the conversation with its transcript, so a
+  // user can pick up where they left off after closing the IDE.
+  const reopened = open(alpha);
+  try {
+    const [restored] = reopened.store.listSessions();
+    assert.equal(restored?.id, sessionId);
+    assert.equal(restored?.title, "explain the retry policy");
+    assert.deepEqual(
+      restored?.messages.map((message) => message.role),
+      ["user", "assistant"],
+    );
+
+    // Continuing appends to the same conversation rather than starting one.
+    await reopened.service.runTask({
+      sessionId,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "and the backoff",
+    });
+    assert.equal(reopened.store.listSessions().length, 1);
+    assert.equal(reopened.store.getSession(sessionId)?.messages.length, 4);
+
+    // Deleting takes the task, its events, and its trace spans with it, so no
+    // orphaned history survives in the dashboard.
+    assert.ok(reopened.store.getTask(taskId));
+    assert.equal(reopened.store.deleteSession(sessionId), true);
+    assert.deepEqual(reopened.store.listSessions(), []);
+    assert.equal(reopened.store.getTask(taskId), undefined);
+    assert.deepEqual(reopened.store.listTraceSpans(taskId), []);
+    assert.deepEqual(reopened.store.listEvents(sessionId), []);
+  } finally {
+    await reopened.service.close();
+    for (const path of [dataRoot, alpha, beta]) {
+      await rm(path, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
 });

@@ -126,6 +126,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Global settings and project-isolated databases.
 - [x] Sessions, tasks, events, and context items are persisted.
 - [x] Session resume support exists at the persistence level.
+- [x] Chat history per codebase, in the IDE sidebar: previous conversations
+      listed newest-first with an auto-generated title, relative time, and
+      message count; click to reopen the transcript and continue in the same
+      session; rename and delete, with delete cascading to that conversation's
+      tasks, events, and trace spans. History is project-scoped, so one
+      codebase never shows another's conversations.
 - [x] Durable orchestration checkpoints in project SQLite.
 - [x] `resumeTask()` skips completed stages and is reachable from the IDE: the
       dashboard task list offers Resume on any paused, failed, or pending task

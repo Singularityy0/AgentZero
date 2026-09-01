@@ -19,6 +19,7 @@ export {
   HeadlessRuntimeService,
   parsePlannedSubtasks,
   routePolicyForStage,
+  sessionTitleFor,
   type HeadlessRuntimeServiceOptions,
   type TaskComplexity,
 } from "./runtime-service.js";

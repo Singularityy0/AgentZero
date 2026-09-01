@@ -743,6 +743,94 @@ model spinning on one call, so it now resets whenever a tool actually executes.
 
 ---
 
+## 28. The desktop renderer has no native dialogs
+
+**Decision.** Create, rename, and save-as collect their input through an in-app
+`PromptDialog`. `window.prompt` is not used anywhere.
+
+**The bug this fixed.** Electron's renderer does not implement `prompt()`: it
+returns undefined without showing anything. Every explorer action built on it -
+new file, new folder, rename - returned early on a falsy name and did nothing,
+so the menu items looked like unimplemented stubs. The server endpoints behind
+them worked the whole time and were already covered by tests; only the way the
+UI asked for a name was broken. `window.confirm` had already been replaced for
+delete for the same class of reason, which is the clue we should have followed.
+
+**Boundary.** The dialog restores what the native one gave for free: Enter to
+confirm, Escape and backdrop click to cancel, focus moved in and restored on
+close, and a rename pre-selecting the filename stem so the extension survives
+unless the user types over it.
+
+---
+
+## 29. Save-as refuses a collision instead of resolving one
+
+**Decision.** Save-as writes with `expectedHash: null`, which the workspace
+reads as "this path must not already exist", and reports the collision back to
+the user.
+
+**What we got wrong first.** The obvious implementation - create the entry, then
+write to it - trips that same guard against the empty file it just created, so
+save-as failed with `File already exists` on a path that was free a millisecond
+earlier. The write alone creates the file; the create step was both redundant
+and self-defeating.
+
+**Why refuse rather than overwrite.** The three hash modes are a deliberate
+contract: `undefined` writes unconditionally, a hash requires that exact
+version, and `null` requires absence. Save-as is the one operation where the
+user has typed a path from memory, which is exactly when silently overwriting
+an existing file does the most damage. Refusing costs one more keystroke;
+clobbering costs someone's work.
+
+---
+
+## 30. Conversations are named by what was asked, not by the client
+
+**Decision.** The first prompt in a session becomes its title, assigned by the
+runtime rather than the client, and only when the existing title is a
+placeholder. A title the user chose is never overwritten, and later prompts
+never rename an already-named conversation.
+
+**What was actually missing.** Sessions were persisted, project-scoped, and
+already reloaded their transcript when selected - continuing an old chat worked.
+What did not work was _finding_ one: the IDE created every session as "IDE
+session" and the TUI as "New session", so the history was a list of identical
+labels. The storage was right and the affordance was missing.
+
+**Why the runtime titles it.** Both clients had the same problem, and a user is
+never going to name a conversation before asking their question. Putting it at
+the point where a task starts means the TUI and the IDE get it from one place
+and cannot drift.
+
+**Boundary.** Titling triggers on a known set of placeholder strings rather than
+on "is this the first task", so a conversation the user has deliberately named
+keeps that name even if its first task is deleted and re-run.
+
+---
+
+## 31. Deleting a conversation deletes what it produced
+
+**Decision.** `deleteSession` removes the session's trace spans, events, context
+items, and tasks in one transaction before the session row itself.
+
+**Why cascade rather than delete the row.** Tasks, events, and traces reference
+the session, so removing only the session leaves history the dashboard still
+lists and the user believes they discarded. Trace spans are removed by
+_session_ rather than by task, because a span can belong to no task at all - an
+isolated `/bytheway` question is the case that would otherwise be left behind.
+
+**What we got wrong first.** The initial cascade filtered `tasks` by
+`project_id`, which that table does not have: it is scoped through the session
+it belongs to, and the database file is per project already. SQLite reported
+`no such column: project_id`, the transaction rolled back, and the delete
+silently returned false. A test that asserted the return value rather than just
+"it did not throw" is what caught it.
+
+**Boundary.** A session with a running task is refused rather than deleted, so a
+task cannot keep writing into history the user has thrown away.
+
+---
+
 ## Known gaps
 
 Stated plainly, because an unclaimed gap is cheaper than a claimed feature that

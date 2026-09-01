@@ -227,6 +227,14 @@ export class RuntimeTransport {
     }
   }
 
+  /** True while a task is running in this session. */
+  isSessionActive(sessionId: string): boolean {
+    for (const handle of this.activeTasks.values()) {
+      if (handle.sessionId === sessionId) return true;
+    }
+    return false;
+  }
+
   async prepareForConfigurationChange(): Promise<void> {
     if (this.activeTasks.size > 0) {
       throw new Error(

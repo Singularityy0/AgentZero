@@ -232,6 +232,18 @@ export class SessionStore {
     return row ? deserializeSession(row) : undefined;
   }
 
+  /** Run `action` atomically against the project database. */
+  private transaction(action: () => void): void {
+    this.projectDb.exec("BEGIN IMMEDIATE");
+    try {
+      action();
+      this.projectDb.exec("COMMIT");
+    } catch (error) {
+      this.projectDb.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   listSessions(): SessionRecord[] {
     const rows = this.projectDb
       .prepare(
@@ -243,6 +255,42 @@ export class SessionStore {
 
   saveMessages(sessionId: string, messages: ConversationMessage[]): void {
     this.updateSession(sessionId, { messages, status: "idle" });
+  }
+
+  /**
+   * Remove a session and everything recorded under it.
+   *
+   * Tasks, events, context items, and trace spans reference the session, so
+   * deleting only the session row would leave orphaned history that still shows
+   * up in the dashboard. Done in one transaction so a failure cannot leave a
+   * half-deleted conversation behind.
+   */
+  deleteSession(sessionId: string): boolean {
+    let removed = false;
+    this.transaction(() => {
+      // Children first: events, context items, and trace spans all reference
+      // tasks, and tasks reference the session. Trace spans are removed by
+      // session rather than by task so spans that belong to no task - an
+      // isolated /bytheway question, for instance - go with the conversation
+      // instead of being orphaned in the dashboard.
+      for (const table of ["trace_spans", "events", "context_items"]) {
+        this.projectDb
+          .prepare(
+            `DELETE FROM ${table} WHERE session_id = ? AND project_id = ?`,
+          )
+          .run(sessionId, this.project.id);
+      }
+      // `tasks` carries no project_id of its own; it is scoped through the
+      // session it belongs to, and the database file is per project.
+      this.projectDb
+        .prepare("DELETE FROM tasks WHERE session_id = ?")
+        .run(sessionId);
+      const result = this.projectDb
+        .prepare("DELETE FROM sessions WHERE id = ? AND project_id = ?")
+        .run(sessionId, this.project.id);
+      removed = Number(result.changes) > 0;
+    });
+    return removed;
   }
 
   updateSession(

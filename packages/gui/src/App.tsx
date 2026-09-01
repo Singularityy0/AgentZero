@@ -16,6 +16,7 @@ import {
   Folder,
   FolderOpen,
   GitBranch,
+  History,
   KeyRound,
   Layers,
   LayoutDashboard,
@@ -52,7 +53,8 @@ self.MonacoEnvironment = {
   },
 };
 
-type Section = "explorer" | "search" | "agents" | "dashboard" | "settings";
+type Section =
+  "explorer" | "search" | "history" | "agents" | "dashboard" | "settings";
 
 /** An inclusive 1-based line span selected in the editor or named by a tag. */
 interface LineRange {
@@ -615,6 +617,9 @@ function MonacoPane({
   return <div ref={host} className="h-full min-h-0 w-full bg-canvas" />;
 }
 
+/** Quiet period before an auto-save write, so typing is one save. */
+const AUTO_SAVE_DELAY_MS = 1_200;
+
 export function App() {
   const [section, setSection] = useState<Section>("explorer");
   const [workbench, setWorkbench] = useState<WorkbenchResponse>();
@@ -644,7 +649,23 @@ export function App() {
     path: string;
     mode: "copy" | "cut";
   }>();
+  const [autoSave, setAutoSave] = useState(() => {
+    try {
+      return localStorage.getItem("agentic.autoSave") === "on";
+    } catch {
+      return false;
+    }
+  });
   const [deleteCandidate, setDeleteCandidate] = useState<FileEntry>();
+  const [sessionToDelete, setSessionToDelete] = useState<SessionView>();
+  // A pending in-app prompt: what to ask, and what to do with the answer.
+  const [prompt, setPrompt] = useState<{
+    title: string;
+    label: string;
+    initialValue?: string;
+    confirmLabel: string;
+    submit: (value: string) => void | Promise<void>;
+  }>();
   const [deletingPath, setDeletingPath] = useState<string>();
   const submissionInFlight = useRef(false);
   const openFilesRef = useRef<OpenFileView[]>([]);
@@ -717,11 +738,7 @@ export function App() {
   }, []);
 
   /** Creates a file or folder under the folder currently shown in the tree. */
-  const createEntry = async (type: "file" | "directory") => {
-    const name = window.prompt(
-      type === "directory" ? "New folder name" : "New file name",
-    );
-    if (!name?.trim()) return;
+  const createEntry = async (type: "file" | "directory", name: string) => {
     const target =
       folderPath === "." ? name.trim() : `${folderPath}/${name.trim()}`;
     try {
@@ -738,9 +755,8 @@ export function App() {
     }
   };
 
-  const renameEntry = async (entry: FileEntry) => {
-    const name = window.prompt(`Rename ${entry.name} to`, entry.name);
-    if (!name?.trim() || name.trim() === entry.name) return;
+  const renameEntry = async (entry: FileEntry, name: string) => {
+    if (name.trim() === entry.name) return;
     const parent = entry.path.split("/").slice(0, -1).join("/");
     const target = parent ? `${parent}/${name.trim()}` : name.trim();
     try {
@@ -1279,6 +1295,37 @@ export function App() {
     return body.session.id;
   };
 
+  const renameSession = async (session: SessionView, title: string) => {
+    try {
+      await requestJson(`/api/sessions/${encodeURIComponent(session.id)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      await refreshWorkbench();
+      setNotice(`Renamed to ${title}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const deleteSession = async (session: SessionView) => {
+    try {
+      await requestJson(`/api/sessions/${encodeURIComponent(session.id)}`, {
+        method: "DELETE",
+      });
+      // Selecting a deleted conversation would render an empty transcript that
+      // looks like a bug, so selection falls back to whatever remains.
+      setSelectedSessionId((current) =>
+        current === session.id ? undefined : current,
+      );
+      await refreshWorkbench();
+      setNotice(`Deleted ${session.title}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const startTask = async () => {
     const prompt = composerText.trim();
     if (!prompt || submitting || submissionInFlight.current) return;
@@ -1441,6 +1488,109 @@ export function App() {
   };
 
   const activeFile = openFiles.find((file) => file.path === activePath);
+
+  /**
+   * Write the active buffer to a new path.
+   *
+   * Composed from the same endpoints the explorer uses - create the entry, then
+   * write to it - so a "save as" cannot reach a path the workspace guard would
+   * refuse for a normal write.
+   */
+  const saveOpenFileAs = useCallback(
+    async (targetPath: string) => {
+      const file = openFiles.find((candidate) => candidate.path === activePath);
+      if (!file) return;
+      try {
+        const body = await requestJson<{
+          file: { path: string; content: string; hash: string };
+        }>("/api/files/content", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          // `expectedHash: null` means "this path must not already exist", so
+          // a save-as reports a collision instead of silently overwriting
+          // someone's file. Creating the entry first would trip that guard
+          // against the empty file it had just made.
+          body: JSON.stringify({
+            path: targetPath,
+            content: file.content,
+            expectedHash: null,
+          }),
+        });
+        setOpenFiles((current) => [
+          ...current.filter((candidate) => candidate.path !== body.file.path),
+          {
+            path: body.file.path,
+            content: body.file.content,
+            savedContent: body.file.content,
+            hash: body.file.hash,
+          },
+        ]);
+        setActivePath(body.file.path);
+        await loadFolder(folderPath);
+        setNotice(`Saved as ${body.file.path}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setNotice(
+          message.includes("already exists")
+            ? `${targetPath} already exists. Choose a different path.`
+            : message,
+        );
+      }
+    },
+    [activePath, folderPath, loadFolder, openFiles],
+  );
+
+  // Ctrl/Cmd+S was bound only inside Monaco, so it did nothing whenever focus
+  // sat in the explorer, a tab, or the assistant. Binding it on the window also
+  // stops the browser's own "save page" from taking the shortcut.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (
+        !(event.ctrlKey || event.metaKey) ||
+        event.key.toLowerCase() !== "s"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (!activePath) return;
+      if (event.shiftKey) {
+        const file = openFiles.find(
+          (candidate) => candidate.path === activePath,
+        );
+        setPrompt({
+          title: "Save as",
+          label: "Workspace-relative path",
+          initialValue: file?.path ?? "",
+          confirmLabel: "Save",
+          submit: (value) => saveOpenFileAs(value),
+        });
+        return;
+      }
+      void saveOpenFile(activePath);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activePath, openFiles, saveOpenFile, saveOpenFileAs]);
+
+  // Auto-save debounces on the active buffer rather than saving on every
+  // keystroke, so a burst of typing is one write and one conflict check.
+  useEffect(() => {
+    if (!autoSave || !activeFile) return;
+    if (activeFile.content === activeFile.savedContent) return;
+    const timer = setTimeout(() => {
+      void saveOpenFile(activeFile.path);
+    }, AUTO_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [autoSave, activeFile, saveOpenFile]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("agentic.autoSave", autoSave ? "on" : "off");
+    } catch {
+      // A renderer with site data disabled still works; the choice just does
+      // not persist across restarts.
+    }
+  }, [autoSave]);
   const language = activePath ? languageForPath(activePath) : "plaintext";
 
   return (
@@ -1500,6 +1650,13 @@ export function App() {
               <Search size={20} />
             </IconButton>
             <IconButton
+              label="Chat history"
+              active={section === "history"}
+              onClick={() => setSection("history")}
+            >
+              <History size={20} />
+            </IconButton>
+            <IconButton
               label="Agents"
               active={section === "agents"}
               onClick={() => setSection("agents")}
@@ -1538,8 +1695,23 @@ export function App() {
               onOpen={openFile}
               onFolder={loadFolder}
               onOpenFolder={() => void openFolder()}
-              onCreate={(type) => void createEntry(type)}
-              onRename={(entry) => void renameEntry(entry)}
+              onCreate={(type) =>
+                setPrompt({
+                  title: type === "directory" ? "New folder" : "New file",
+                  label: "Name",
+                  confirmLabel: "Create",
+                  submit: (name) => createEntry(type, name),
+                })
+              }
+              onRename={(entry) =>
+                setPrompt({
+                  title: `Rename ${entry.name}`,
+                  label: "New name",
+                  initialValue: entry.name,
+                  confirmLabel: "Rename",
+                  submit: (name) => renameEntry(entry, name),
+                })
+              }
               onDelete={setDeleteCandidate}
               onRefresh={() => void loadFolder(folderPath)}
               projectRootPath={workbench?.project.rootPath ?? ""}
@@ -1556,6 +1728,24 @@ export function App() {
             />
           )}
           {section === "search" && <SearchPanel onOpen={openFile} />}
+          {section === "history" && (
+            <HistoryPanel
+              sessions={workbench?.sessions ?? []}
+              selectedSessionId={selectedSessionId}
+              onOpen={(sessionId) => setSelectedSessionId(sessionId)}
+              onCreate={() => void createSession()}
+              onRename={(session) =>
+                setPrompt({
+                  title: "Rename conversation",
+                  label: "Title",
+                  initialValue: session.title,
+                  confirmLabel: "Rename",
+                  submit: (value) => renameSession(session, value),
+                })
+              }
+              onDelete={(session) => setSessionToDelete(session)}
+            />
+          )}
           {section === "agents" && (
             <AgentsPanel agents={workbench?.agents ?? []} />
           )}
@@ -1620,6 +1810,47 @@ export function App() {
                       />
                     </button>
                   ))
+                )}
+                {activeFile && (
+                  <div className="ml-auto flex shrink-0 items-center gap-1 border-l border-white/5 px-2">
+                    <button
+                      type="button"
+                      onClick={() => void saveOpenFile(activeFile.path)}
+                      disabled={activeFile.content === activeFile.savedContent}
+                      className="px-2 py-1 text-[11px] text-neutral-400 hover:text-neutral-200 disabled:opacity-30"
+                      title="Save (Ctrl+S)"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPrompt({
+                          title: "Save as",
+                          label: "Workspace-relative path",
+                          initialValue: activeFile.path,
+                          confirmLabel: "Save",
+                          submit: (value) => saveOpenFileAs(value),
+                        })
+                      }
+                      className="px-2 py-1 text-[11px] text-neutral-400 hover:text-neutral-200"
+                      title="Save as (Ctrl+Shift+S)"
+                    >
+                      Save as
+                    </button>
+                    <label
+                      className="flex cursor-pointer items-center gap-1 px-2 py-1 text-[11px] text-neutral-500"
+                      title="Save the active file automatically after you stop typing"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={autoSave}
+                        onChange={(event) => setAutoSave(event.target.checked)}
+                        className="size-3 accent-indigo-400"
+                      />
+                      Auto
+                    </label>
+                  </div>
                 )}
               </div>
               <div className="relative min-h-0 flex-1">
@@ -1728,6 +1959,33 @@ export function App() {
           <span>{language}</span>
         </div>
       </footer>
+      {prompt && (
+        <PromptDialog
+          title={prompt.title}
+          label={prompt.label}
+          initialValue={prompt.initialValue}
+          confirmLabel={prompt.confirmLabel}
+          onCancel={() => setPrompt(undefined)}
+          onConfirm={(value) => {
+            const pending = prompt;
+            setPrompt(undefined);
+            void pending.submit(value);
+          }}
+        />
+      )}
+      {sessionToDelete && (
+        <ConfirmDialog
+          title="Delete conversation"
+          body={`"${sessionToDelete.title}" and its tasks, events, and traces will be removed from this project. This cannot be undone.`}
+          confirmLabel="Delete"
+          onCancel={() => setSessionToDelete(undefined)}
+          onConfirm={() => {
+            const pending = sessionToDelete;
+            setSessionToDelete(undefined);
+            void deleteSession(pending);
+          }}
+        />
+      )}
       {deleteCandidate && (
         <DeleteConfirmation
           entry={deleteCandidate}
@@ -1749,7 +2007,13 @@ function SidebarHeader({
 }) {
   return (
     <div className="flex h-10 shrink-0 items-center justify-between px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-neutral-500">
-      <span>{section === "dashboard" ? "Task traces" : section}</span>
+      <span>
+        {section === "dashboard"
+          ? "Task traces"
+          : section === "history"
+            ? "Chat history"
+            : section}
+      </span>
       <button
         type="button"
         onClick={onRefresh}
@@ -2193,6 +2457,186 @@ function MenuItem({
   );
 }
 
+/** Confirmation for a destructive action that is not a file deletion. */
+function ConfirmDialog({
+  title,
+  body,
+  confirmLabel,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    previousFocus.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    // Focus lands on Cancel, so an accidental Enter does not destroy anything.
+    cancelButton.current?.focus();
+    return () => {
+      const target = previousFocus.current;
+      if (target?.isConnected) target.focus();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <div className="w-80 border border-white/10 bg-panel p-4 shadow-xl">
+        <p className="text-xs font-medium text-neutral-200">{title}</p>
+        <p className="mt-2 text-[11px] leading-4 text-neutral-500">{body}</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            ref={cancelButton}
+            type="button"
+            onClick={onCancel}
+            className="border border-white/10 px-3 py-1 text-[11px] text-neutral-400 hover:text-neutral-200"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="border border-red-400/40 bg-red-500/20 px-3 py-1 text-[11px] text-red-200"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * In-app replacement for `window.prompt`.
+ *
+ * Electron's renderer does not implement `prompt()`: it returns undefined
+ * without showing anything, so every explorer action built on it - create file,
+ * create folder, rename - silently did nothing in the desktop app. The same
+ * reason `window.confirm` was already replaced for delete.
+ */
+function PromptDialog({
+  title,
+  label,
+  initialValue = "",
+  confirmLabel = "Create",
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  label: string;
+  initialValue?: string;
+  confirmLabel?: string;
+  busy?: boolean;
+  onCancel: () => void;
+  onConfirm: (value: string) => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const input = useRef<HTMLInputElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    previousFocus.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    input.current?.focus();
+    // Select the stem of a filename so a rename replaces the name but keeps
+    // the extension unless the user types over it.
+    const dot = initialValue.lastIndexOf(".");
+    input.current?.setSelectionRange(0, dot > 0 ? dot : initialValue.length);
+    return () => {
+      const target = previousFocus.current;
+      if (target?.isConnected) target.focus();
+    };
+  }, [initialValue]);
+
+  const submit = (): void => {
+    const trimmed = value.trim();
+    if (!trimmed || busy) return;
+    onConfirm(trimmed);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel();
+      }}
+    >
+      <div className="w-80 border border-white/10 bg-panel p-4 shadow-xl">
+        <p className="text-xs font-medium text-neutral-200">{title}</p>
+        <label className="mt-3 block text-[10px] uppercase tracking-wide text-neutral-600">
+          {label}
+        </label>
+        <input
+          ref={input}
+          value={value}
+          disabled={busy}
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              submit();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              if (!busy) onCancel();
+            }
+          }}
+          className="field mt-1 w-full"
+        />
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="border border-white/10 px-3 py-1 text-[11px] text-neutral-400 hover:text-neutral-200"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !value.trim()}
+            className="border border-indigo-400/40 bg-indigo-500/20 px-3 py-1 text-[11px] text-indigo-200 disabled:opacity-40"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Non-blocking destructive-action confirmation for the desktop renderer.
  * Native `window.confirm()` blocks Electron's web contents and can leave the
@@ -2495,6 +2939,109 @@ function SearchPanel({ onOpen }: { onOpen: (path: string) => void }) {
       ))}
     </div>
   );
+}
+
+/**
+ * Previous conversations in this project, newest first.
+ *
+ * Sessions were always persisted and project-scoped; what was missing was a way
+ * to see them. A dropdown of identically titled entries is not history, so
+ * conversations are named from their first prompt and listed with when they
+ * were last touched and how much was said.
+ */
+function HistoryPanel({
+  sessions,
+  selectedSessionId,
+  onOpen,
+  onRename,
+  onDelete,
+  onCreate,
+}: {
+  sessions: SessionView[];
+  selectedSessionId?: string;
+  onOpen: (sessionId: string) => void;
+  onRename: (session: SessionView) => void;
+  onDelete: (session: SessionView) => void;
+  onCreate: () => void;
+}) {
+  if (sessions.length === 0) {
+    return (
+      <div className="min-h-0 flex-1 overflow-y-auto px-2">
+        <Empty label="No conversations in this project yet" />
+      </div>
+    );
+  }
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+      <button
+        type="button"
+        onClick={onCreate}
+        className="mb-2 mt-1 flex w-full items-center gap-2 border border-white/5 px-2 py-1.5 text-[11px] text-neutral-400 hover:bg-white/[0.03] hover:text-neutral-200"
+      >
+        <Plus size={12} /> New conversation
+      </button>
+      {sessions.map((session) => {
+        const turns = (session.messages ?? []).filter(
+          (message) => message.role === "user",
+        ).length;
+        const active = session.id === selectedSessionId;
+        return (
+          <div
+            key={session.id}
+            className={`group mb-1 border px-2 py-1.5 ${
+              active
+                ? "border-indigo-400/40 bg-indigo-500/10"
+                : "border-transparent hover:bg-white/[0.03]"
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => onOpen(session.id)}
+              className="block w-full text-left"
+              title={session.title}
+            >
+              <span className="line-clamp-2 text-[11px] leading-4 text-neutral-300">
+                {session.title}
+              </span>
+              <span className="mt-1 block text-[9px] uppercase tracking-wide text-neutral-600">
+                {relativeTime(session.updatedAt)} ·{" "}
+                {turns === 1 ? "1 message" : `${turns} messages`}
+              </span>
+            </button>
+            <div className="mt-1 flex gap-2 opacity-0 transition group-hover:opacity-100">
+              <button
+                type="button"
+                onClick={() => onRename(session)}
+                className="text-[9px] uppercase tracking-wide text-neutral-600 hover:text-neutral-300"
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                onClick={() => onDelete(session)}
+                className="text-[9px] uppercase tracking-wide text-neutral-600 hover:text-red-300"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Compact "2 hours ago" style stamp for history rows. */
+function relativeTime(timestamp: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(timestamp).toLocaleDateString();
 }
 
 function AgentsPanel({ agents }: { agents: AgentView[] }) {

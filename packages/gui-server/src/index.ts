@@ -661,6 +661,38 @@ async function handleRequest(
     return;
   }
 
+  const sessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
+  if (sessionMatch && (method === "PATCH" || method === "DELETE")) {
+    const sessionId = decodeURIComponent(sessionMatch[1]!);
+    if (!store.getSession(sessionId)) {
+      sendJson(response, 404, { error: "Session not found." });
+      return;
+    }
+    // Renaming or deleting the conversation a task is running in would leave
+    // that task writing to history the user believes they discarded.
+    if (runtimeTransport.isSessionActive(sessionId)) {
+      sendJson(response, 409, {
+        error: "This session has a running task. Stop it first.",
+      });
+      return;
+    }
+    if (method === "DELETE") {
+      store.deleteSession(sessionId);
+      sendJson(response, 200, { deleted: sessionId });
+      return;
+    }
+    const body = (await readJsonBody(request)) as { title?: unknown };
+    const title =
+      typeof body.title === "string" ? body.title.trim().slice(0, 120) : "";
+    if (!title) {
+      sendJson(response, 400, { error: "A session title is required." });
+      return;
+    }
+    store.updateSession(sessionId, { title });
+    sendJson(response, 200, { session: store.getSession(sessionId) });
+    return;
+  }
+
   const sessionEventsMatch = url.pathname.match(
     /^\/api\/sessions\/([^/]+)\/events$/,
   );

@@ -371,6 +371,12 @@ export class HeadlessRuntimeService {
       throw new Error(`Session already has an active task: ${session.id}`);
     }
 
+    // Name the conversation after the work that started it. A history list
+    // where every entry reads "IDE session" is a list of nothing, and the user
+    // is not going to stop and title a chat before asking their question.
+    if (isPlaceholderSessionTitle(session.title)) {
+      this.store.updateSession(session.id, { title: sessionTitleFor(prompt) });
+    }
     const task = this.store.createTask(session.id, prompt);
     const state = { ...task.state, agentId: agent.id };
     this.store.updateTask(task.id, { state });
@@ -2702,6 +2708,43 @@ function readPersistedSpend(value: unknown):
     modelCalls: modelCalls ?? 0,
   };
 }
+
+/** Titles a client assigns before it knows what the conversation is about. */
+const PLACEHOLDER_SESSION_TITLES: ReadonlySet<string> = new Set([
+  "new session",
+  "ide session",
+  "session",
+  "untitled",
+  "",
+]);
+
+function isPlaceholderSessionTitle(title: string): boolean {
+  return PLACEHOLDER_SESSION_TITLES.has(title.trim().toLowerCase());
+}
+
+/**
+ * A short, human-scannable title taken from the first prompt.
+ *
+ * Cut at a sentence or line boundary when one falls in range, so a title ends
+ * on a natural break instead of mid-word.
+ */
+export function sessionTitleFor(prompt: string): string {
+  const cleaned = prompt.replace(/\s+/gu, " ").trim();
+  if (!cleaned) return "New session";
+  if (cleaned.length <= MAX_SESSION_TITLE_CHARS) return cleaned;
+  const window = cleaned.slice(0, MAX_SESSION_TITLE_CHARS);
+  const boundary = Math.max(
+    window.lastIndexOf(". "),
+    window.lastIndexOf("? "),
+    window.lastIndexOf("! "),
+    window.lastIndexOf(", "),
+    window.lastIndexOf(" "),
+  );
+  const cut = boundary > MAX_SESSION_TITLE_CHARS / 2 ? boundary : window.length;
+  return `${window.slice(0, cut).trimEnd()}…`;
+}
+
+const MAX_SESSION_TITLE_CHARS = 60;
 
 /** Depth ceiling for the trace roll-up walk; the hierarchy is far shallower. */
 const MAX_TRACE_ROLLUP_DEPTH = 24;

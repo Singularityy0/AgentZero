@@ -147,8 +147,16 @@ separate browser tab or server terminal. Startup is intentionally folderless;
 use **Open Folder** or **File → Open Folder** to select a codebase. A recent
 folder is used only as the native picker's starting location and is never
 opened automatically. The workbench includes editable Monaco tabs with
-conflict-safe `Ctrl+S` saves and a workspace command terminal with discovered
+conflict-safe saves — `Ctrl+S` from anywhere in the window, `Ctrl+Shift+S` for
+save-as, a Save/Save as/Auto control beside the tabs, and an optional debounced
+auto-save remembered per machine — and a workspace command terminal with discovered
 PowerShell, Command Prompt, Git Bash, and Bash profiles.
+A **Chat history** sidebar lists this project's previous conversations, newest
+first, titled from their opening prompt. Selecting one reopens its transcript
+and continues in the same session; conversations can be renamed or deleted, and
+deleting one removes its tasks, events, and traces with it. History is scoped to
+the opened codebase.
+
 The assistant panel is connected to the headless runtime: it streams task
 progress, persists messages, supports cancellation, and surfaces tool approval
 requests. A usable model provider is still required. Configure and validate
