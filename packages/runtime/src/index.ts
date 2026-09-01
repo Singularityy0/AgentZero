@@ -3,6 +3,8 @@ export {
   CONVERSATION_AGENT_ID,
   createDefaultAgents,
   DEFAULT_AGENT_ID,
+  INTERNAL_AGENT_IDS,
+  isSelectableAgent,
   RESERVED_AGENT_IDS,
   RETRIEVER_AGENT_ID,
   REVIEWER_AGENT_ID,

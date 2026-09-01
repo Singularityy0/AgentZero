@@ -12,6 +12,7 @@ import {
   ProviderGateway,
   ProviderRegistry,
   rankModelRoutes,
+  validateStoredProvider,
   type GatewayEvent,
   type ModelInfo,
   type ModelRoute,
@@ -663,4 +664,155 @@ test("stage route policies follow task complexity", () => {
   assert.equal(routePolicyForStage("coding-agent", "simple")?.bias, "economy");
   // A standard coding task keeps the operator's configured order.
   assert.equal(routePolicyForStage("coding-agent", "standard"), undefined);
+});
+
+test("validation exercises inference, not just the model listing", async () => {
+  const calls: string[] = [];
+  const store = {
+    getProviderSetting: (providerId: string, key: string) =>
+      key === "manualModelId" && providerId === "cerebras"
+        ? "gemma-4-31b"
+        : undefined,
+    setProviderSetting: () => undefined,
+    clearProviderSetting: () => undefined,
+    getCredential: () => "test-key",
+  };
+  const spec = PROVIDER_FIELD_SPECS.find((item) => item.id === "cerebras")!;
+
+  // A key that lists models happily and then refuses to run anything: an
+  // unverified trial, an account without billing, a key with no entitlement to
+  // the chosen model. This is what shipped as "validated" while every task
+  // died on a bare "402 status code (no body)".
+  const listsButCannotInfer: typeof fetch = async (input, init) => {
+    const url = String(input);
+    calls.push(`${init?.method ?? "GET"} ${url}`);
+    if (url.endsWith("/models")) {
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    }
+    return new Response("", { status: 402 });
+  };
+
+  const failed = await validateStoredProvider(
+    store,
+    spec,
+    {},
+    listsButCannotInfer,
+  );
+  assert.equal(failed.ok, false, "a key that cannot infer must not validate");
+  assert.ok(
+    calls.some((call) => call.startsWith("POST")),
+    `validation should attempt a completion, saw ${JSON.stringify(calls)}`,
+  );
+  // The message has to say what to do about it; "402" alone does not.
+  assert.match(failed.message ?? "", /402/);
+  assert.match(failed.message ?? "", /billing|verification/i);
+
+  // A provider that can actually serve a request validates.
+  calls.length = 0;
+  const healthy: typeof fetch = async (input, init) => {
+    calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+    return String(input).endsWith("/models")
+      ? new Response(JSON.stringify({ data: [] }), { status: 200 })
+      : new Response(
+          JSON.stringify({ choices: [{ message: { content: "hi" } }] }),
+          { status: 200 },
+        );
+  };
+  const passed = await validateStoredProvider(store, spec, {}, healthy);
+  assert.equal(passed.ok, true, passed.message);
+});
+
+test("a billing failure fails over to the next provider instead of ending the task", async () => {
+  const attempted: string[] = [];
+  const first = model("cerebras", "gemma-4-31b", { contextWindow: 100_000 });
+  const second = model("groq", "qwen-27b", { contextWindow: 100_000 });
+  const registry = new ProviderRegistry()
+    .register(
+      new StubProvider("cerebras", [first], async () => {
+        attempted.push("cerebras/gemma-4-31b");
+        // Exactly what a Cerebras trial that has not been verified returns.
+        throw new ModelError("402 status code (no body)", {
+          code: "quota",
+          retryable: true,
+          status: 402,
+        });
+      }),
+    )
+    .register(
+      new StubProvider("groq", [second], async () => {
+        attempted.push("groq/qwen-27b");
+        return response;
+      }),
+    );
+  const gateway = new ProviderGateway(registry);
+  registerModels(gateway, [first, second]);
+  gateway.setRoutePreferences([
+    { providerId: "cerebras", modelId: "gemma-4-31b" },
+    { providerId: "groq", modelId: "qwen-27b" },
+  ]);
+
+  const answered = await gateway.respond(request("what is this project about"));
+
+  // Billing exhaustion is terminal for that account, not for the user's task.
+  assert.deepEqual(attempted, ["cerebras/gemma-4-31b", "groq/qwen-27b"]);
+  assert.equal(answered, response);
+});
+
+test("a bare 402 is classified as quota, not as a terminal bad request", () => {
+  // The OpenAI SDK throws an APIError carrying `.status`; some transports only
+  // put the code in the message. Both must reach the failover path, because a
+  // 4xx catch-all would classify them as invalid_request and end the task.
+  const withStatus = Object.assign(new Error("402 status code (no body)"), {
+    status: 402,
+  });
+  const messageOnly = new Error("402 status code (no body)");
+  const nested = Object.assign(new Error("Payment Required"), {
+    response: { status: 402 },
+  });
+  for (const error of [withStatus, messageOnly, nested]) {
+    const classified = classifyModelError(error);
+    assert.equal(classified.code, "quota", error.message);
+    assert.equal(classified.retryable, true, error.message);
+  }
+});
+
+test("a task near its budget routes down, and exclusions still hold", () => {
+  const cheapSmall = model("groq", "small", {
+    contextWindow: 8_000,
+    inputCost: 0,
+    outputCost: 0,
+    totalParameters: 8_000_000_000,
+  });
+  const costlyLarge = model("openrouter", "large", {
+    contextWindow: 128_000,
+    inputCost: 5,
+    outputCost: 5,
+    totalParameters: 32_000_000_000,
+  });
+  const base = {
+    requiresTools: true,
+    contextTokens: 100,
+    estimatedOutputTokens: 50,
+    now: 1_000,
+  };
+  const candidates = [
+    { model: costlyLarge, preference: 0 },
+    { model: cheapSmall, preference: 1 },
+  ] as const;
+
+  // Early in a task, a judgement stage asks for capacity and a window floor.
+  const early = rankModelRoutes(candidates, {
+    ...base,
+    bias: "capacity",
+    minContextWindow: 32_000,
+  });
+  assert.equal(early[0]?.model.id, "large");
+
+  // Once most of the budget is gone the runtime rewrites that policy to
+  // economy and drops the floor, because a task halted at the ceiling scores
+  // zero however good the model was.
+  const late = rankModelRoutes(candidates, { ...base, bias: "economy" });
+  assert.equal(late[0]?.model.id, "small");
+  assert.equal(late[0]?.eligible, true);
+  assert.match(late[0]?.reason ?? "", /economy bias/);
 });

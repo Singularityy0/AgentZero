@@ -99,6 +99,7 @@ export class AgentRunner {
     const successfulMutationLabels: string[] = [];
     let workspaceRevision = 0;
     let duplicateCallCount = 0;
+    const repeatedCalls = new Set<string>();
     let toolCallCount = 0;
     let hadNoOpMutation = false;
     let truncatedResponses = 0;
@@ -170,11 +171,16 @@ export class AgentRunner {
         const cached = cachedToolResults.get(signature);
         if (cached?.workspaceRevision === workspaceRevision) {
           duplicateCallCount += 1;
-          const result: ToolResult = {
-            output:
-              `Duplicate ${call.name} call skipped because the workspace has not changed. ` +
-              "Use the earlier tool result already present in the conversation and continue the task without calling it again.",
-          };
+          // Serve the cached result again rather than withholding it.
+          //
+          // Telling the model to "use the earlier tool result" assumes that
+          // result is still readable, and often it is not: compaction replaces
+          // `read_file` bodies with signatures to save tokens, so the content
+          // the model is being redirected to no longer exists. It then re-reads,
+          // is refused again, and loops into the safety limit having changed
+          // nothing. Repeating cached bytes costs tokens; deadlocking costs the
+          // task.
+          const result = cached.result;
           await this.emit({
             type: "tool_completed",
             spanId: toolSpanId,
@@ -182,10 +188,35 @@ export class AgentRunner {
             call,
             result,
           });
-          messages.push(this.toToolMessage(call, result));
-          if (duplicateCallCount >= 4) {
+          // Move the payload rather than copying it: the earlier tool message
+          // is shrunk to a one-line pointer and the full result is appended
+          // here. Context stays the same size, the data sits at the position a
+          // small model attends to best, and the earlier message stays in place
+          // so every tool_call in that turn still has a matching response.
+          const superseded = cached.message;
+          const repeated = this.toToolMessage(call, result);
+          if (superseded) {
+            const index = messages.indexOf(superseded);
+            if (index !== -1) {
+              messages[index] = {
+                ...superseded,
+                content: `[Superseded: ${call.name} was called again with the same arguments; the result appears later in this conversation.]`,
+              };
+            }
+          }
+          cachedToolResults.set(signature, {
+            ...cached,
+            message: repeated,
+          });
+          // The tool message keeps the cached payload verbatim so it stays
+          // parseable by compaction. The nudge is deferred rather than pushed
+          // here: a provider rejects a non-tool message inserted between the
+          // tool results answering one assistant turn's tool calls.
+          messages.push(repeated);
+          repeatedCalls.add(call.name);
+          if (duplicateCallCount >= MAX_CONSECUTIVE_DUPLICATE_CALLS) {
             const text =
-              "The model repeatedly requested cached tool calls without making progress. " +
+              `The model called ${call.name} with identical arguments ${duplicateCallCount} times in a row without acting on the result. ` +
               "The run was stopped before it could loop or exceed the provider token limit.";
             await this.emit({ type: "agent_safety_limit", text });
             return { text, messages, stopReason: "safety_limit" };
@@ -194,6 +225,11 @@ export class AgentRunner {
         }
 
         const result = await this.executeTool(call);
+        // Reset on real work. The limit is meant to catch a model spinning on
+        // one call, not to cap how many repeats a long productive run may
+        // accumulate across unrelated steps: read A, edit, read B, edit is
+        // progress even if A and B were each read twice.
+        duplicateCallCount = 0;
         if (!result.isError) executedToolNames.push(call.name);
         if (
           !result.isError &&
@@ -216,7 +252,12 @@ export class AgentRunner {
           hadNoOpMutation = true;
         }
         if (result.changed === true) workspaceRevision += 1;
-        cachedToolResults.set(signature, { result, workspaceRevision });
+        const toolMessage = this.toToolMessage(call, result);
+        cachedToolResults.set(signature, {
+          result,
+          workspaceRevision,
+          message: toolMessage,
+        });
         await this.emit({
           type: "tool_completed",
           spanId: toolSpanId,
@@ -224,7 +265,7 @@ export class AgentRunner {
           call,
           result,
         });
-        messages.push(this.toToolMessage(call, result));
+        messages.push(toolMessage);
         if (result.denied === true) {
           const text =
             `The ${call.name} action was denied by the user. ` +
@@ -232,6 +273,19 @@ export class AgentRunner {
           await this.emit({ type: "agent_completed", text });
           return { text, messages, stopReason: "approval_denied" };
         }
+      }
+
+      if (repeatedCalls.size > 0) {
+        messages.push({
+          role: "user",
+          content:
+            `You called ${[...repeatedCalls].join(", ")} with arguments you had already used, and nothing in the workspace has changed since. ` +
+            "The results above are those same results, repeated. Do not call them again. " +
+            (this.options.workflowMode === "mutation"
+              ? "Make the edit now with apply_patch, write_file, or create_file."
+              : "Take the next concrete action toward the objective."),
+        });
+        repeatedCalls.clear();
       }
 
       const stopAfterMutations = this.options.stopAfterMutationCount ?? 0;
@@ -828,6 +882,8 @@ function findIncompleteMutation(
 interface CachedToolResult {
   result: ToolResult;
   workspaceRevision: number;
+  /** The tool message carrying this result, so a repeat can supersede it. */
+  message?: ToolMessage;
 }
 
 interface ReadFilePayload extends Record<string, unknown> {
@@ -894,6 +950,14 @@ function lastUserExchangeIndex(
   }
   return -1;
 }
+
+/**
+ * Identical tool calls in a row before the run is stopped.
+ *
+ * Counted consecutively, not cumulatively: it exists to catch a model spinning
+ * on one call, not to cap repeats across a long productive run.
+ */
+const MAX_CONSECUTIVE_DUPLICATE_CALLS = 4;
 
 /** Bounded so a message that refuses to shrink cannot spin. */
 const MAX_TRIM_PASSES = 6;

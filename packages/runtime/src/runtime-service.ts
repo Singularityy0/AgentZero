@@ -498,18 +498,63 @@ export class HeadlessRuntimeService {
     });
   }
 
-  /** Current spend for a task, or a zeroed record when nothing was billed. */
+  /**
+   * Fold what a task has already spent into its routing preference.
+   *
+   * The problem statement lists tokens already used as a routing signal, and it
+   * is the one signal that changes mid-task: a stage that deserved the strongest
+   * model at the start does not deserve it once the task is most of the way
+   * through its budget, because being halted at the ceiling scores zero however
+   * good the model was. Past the warning ratio, capacity requests degrade to
+   * economy and window floors are dropped, which keeps the task alive to finish.
+   *
+   * Provider exclusions are never relaxed: a verifier running on the model it is
+   * checking is worthless whatever it costs.
+   */
+  private budgetAwareRoutePolicy(
+    taskId: string,
+    policy: ModelRoutePolicy | undefined,
+  ): ModelRoutePolicy | undefined {
+    const spend = this.taskSpend(taskId);
+    if (spend.budgetUsd <= 0) return policy;
+    const consumed = spend.costUsd / spend.budgetUsd;
+    if (consumed < this.limits.taskCostWarningRatio) return policy;
+    const reason =
+      `${Math.round(consumed * 100)}% of the task budget is spent ` +
+      `(${spend.inputTokens + spend.outputTokens} tokens over ${spend.modelCalls} calls), ` +
+      "so the cheapest capable route is used to finish within the ceiling";
+    return {
+      ...policy,
+      bias: "economy" as const,
+      minContextWindow: undefined,
+      reason: policy?.reason ? `${policy.reason}; ${reason}` : reason,
+    };
+  }
+
+  /**
+   * Current spend for a task, or a zeroed record when nothing was billed.
+   *
+   * Falls back to the copy persisted in task state, so a task resumed in a new
+   * process continues counting from what it already spent. An in-memory total
+   * alone would reset the dollar ceiling every time the IDE restarted, which is
+   * exactly the case a long-horizon task hits.
+   */
   taskSpend(taskId: string): RuntimeTaskSpend {
-    return (
-      this.spendByTask.get(taskId) ?? {
-        taskId,
-        costUsd: 0,
-        budgetUsd: this.limits.maxTaskCostUsd,
-        inputTokens: 0,
-        outputTokens: 0,
-        modelCalls: 0,
-      }
+    const live = this.spendByTask.get(taskId);
+    if (live) return live;
+    const persisted = readPersistedSpend(
+      this.store.getTask(taskId)?.state.spend,
     );
+    const spend: RuntimeTaskSpend = {
+      taskId,
+      budgetUsd: this.limits.maxTaskCostUsd,
+      costUsd: persisted?.costUsd ?? 0,
+      inputTokens: persisted?.inputTokens ?? 0,
+      outputTokens: persisted?.outputTokens ?? 0,
+      modelCalls: persisted?.modelCalls ?? 0,
+    };
+    if (persisted) this.spendByTask.set(taskId, spend);
+    return spend;
   }
 
   /**
@@ -536,6 +581,22 @@ export class HeadlessRuntimeService {
       modelCalls: previous.modelCalls + 1,
     };
     this.spendByTask.set(taskId, spend);
+    // Persist alongside the task so a restart resumes the same running total
+    // rather than granting the task a fresh budget.
+    const record = this.store.getTask(taskId);
+    if (record) {
+      this.store.updateTask(taskId, {
+        state: {
+          ...record.state,
+          spend: {
+            costUsd: spend.costUsd,
+            inputTokens: spend.inputTokens,
+            outputTokens: spend.outputTokens,
+            modelCalls: spend.modelCalls,
+          },
+        },
+      });
+    }
     const exceeded = spend.costUsd >= spend.budgetUsd;
     const warning =
       !exceeded &&
@@ -810,9 +871,18 @@ export class HeadlessRuntimeService {
       }
 
       if (traceContext) {
+        // The task node is what the evaluation's wall-clock and token totals
+        // are read from, so it carries the whole run's usage, not just its own.
+        const rolled = this.rollUpUsage(
+          task.id,
+          traceContext.traceId,
+          traceContext.taskSpanId,
+        );
         this.finishTraceSpan(traceContext.traceId, traceContext.taskSpanId, {
           status: runtimeResult.status,
           output: runtimeResult,
+          ...(rolled.usage ? { usage: rolled.usage } : {}),
+          ...(rolled.cost !== undefined ? { cost: rolled.cost } : {}),
         });
       }
       return runtimeResult;
@@ -1640,10 +1710,13 @@ export class HeadlessRuntimeService {
     } else if (trace && event.type === "step_completed") {
       const spanId = this.activeStepSpans.get(stepKey);
       if (spanId) {
+        const rolled = this.rollUpUsage(taskId, trace.traceId, spanId);
         this.finishTraceSpan(trace.traceId, spanId, {
           status: "completed",
           output: event,
           stepId: event.stepId,
+          ...(rolled.usage ? { usage: rolled.usage } : {}),
+          ...(rolled.cost !== undefined ? { cost: rolled.cost } : {}),
         });
         this.activeStepSpans.delete(stepKey);
       }
@@ -1868,11 +1941,18 @@ export class HeadlessRuntimeService {
     if (event.type === "agent_completed" || event.type === "agent_failed") {
       const spanId = this.activeAgentSpans.get(agentKey);
       if (spanId) {
+        // Usage is reported per model call, but the dashboard has to answer
+        // "how many tokens did this agent use", so the agent's own calls are
+        // summed onto its span. Without this the hierarchy showed time per
+        // agent and tokens only on the leaves.
+        const rolled = this.rollUpUsage(taskId, trace.traceId, spanId);
         this.finishTraceSpan(trace.traceId, spanId, {
           status: event.type === "agent_completed" ? "completed" : "failed",
           output: event.output,
           error: event.type === "agent_failed" ? event.reason : undefined,
           agentId: event.agentId,
+          ...(rolled.usage ? { usage: rolled.usage } : {}),
+          ...(rolled.cost !== undefined ? { cost: rolled.cost } : {}),
         });
         this.activeAgentSpans.delete(agentKey);
       }
@@ -1964,6 +2044,67 @@ export class HeadlessRuntimeService {
         output: agentEvent.checkpoint.state,
       });
     }
+  }
+
+  /**
+   * Sum usage and cost across every span beneath `rootSpanId`.
+   *
+   * Providers report usage per model call, so any node above a model call - an
+   * agent, a pipeline step, the task itself - only has a total if one is
+   * computed. Walking the persisted spans means the numbers agree with what the
+   * dashboard renders, rather than being tracked separately and drifting.
+   */
+  private rollUpUsage(
+    taskId: string,
+    traceId: string,
+    rootSpanId: string,
+  ): { usage?: ModelUsage; cost?: number } {
+    const spans = this.store
+      .listTraceSpans(taskId)
+      .filter((span) => span.traceId === traceId);
+    const childrenOf = new Map<string, TraceSpanRecord[]>();
+    for (const span of spans) {
+      if (!span.parentSpanId) continue;
+      const siblings = childrenOf.get(span.parentSpanId) ?? [];
+      siblings.push(span);
+      childrenOf.set(span.parentSpanId, siblings);
+    }
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let totalTokens = 0;
+    let cost = 0;
+    let sawUsage = false;
+    let sawCost = false;
+    const visit = (spanId: string, depth: number): void => {
+      if (depth > MAX_TRACE_ROLLUP_DEPTH) return;
+      for (const child of childrenOf.get(spanId) ?? []) {
+        // Only leaf model calls carry provider-reported usage; adding an
+        // already-rolled-up ancestor would double count.
+        if (child.kind === "model_call") {
+          const usage = child.usage as ModelUsage | undefined;
+          if (usage) {
+            sawUsage = true;
+            inputTokens += usage.inputTokens ?? 0;
+            outputTokens += usage.outputTokens ?? 0;
+            totalTokens +=
+              usage.totalTokens ??
+              (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+          }
+          if (typeof child.cost === "number") {
+            sawCost = true;
+            cost += child.cost;
+          }
+        }
+        visit(child.spanId, depth + 1);
+      }
+    };
+    visit(rootSpanId, 0);
+    return {
+      ...(sawUsage
+        ? { usage: { inputTokens, outputTokens, totalTokens } }
+        : {}),
+      ...(sawCost ? { cost } : {}),
+    };
   }
 
   private lastActiveStepSpan(taskId: string): string | undefined {
@@ -2185,6 +2326,12 @@ function titleCase(value: string): string {
   return value
     .replaceAll("-", " ")
     .replace(/\b\w/gu, (character) => character.toLocaleUpperCase());
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
@@ -2531,6 +2678,33 @@ function boundedRetrievalPayload(retrieval: RetrievalQueryResult): string {
     omittedResults: retrieval.results.length - results.length,
   });
 }
+
+/** Read a persisted spend total back out of task state, ignoring bad shapes. */
+function readPersistedSpend(value: unknown):
+  | {
+      costUsd: number;
+      inputTokens: number;
+      outputTokens: number;
+      modelCalls: number;
+    }
+  | undefined {
+  const record = recordValue(value);
+  if (!record) return undefined;
+  const costUsd = numberValue(record.costUsd);
+  const inputTokens = numberValue(record.inputTokens);
+  const outputTokens = numberValue(record.outputTokens);
+  const modelCalls = numberValue(record.modelCalls);
+  if (costUsd === undefined) return undefined;
+  return {
+    costUsd,
+    inputTokens: inputTokens ?? 0,
+    outputTokens: outputTokens ?? 0,
+    modelCalls: modelCalls ?? 0,
+  };
+}
+
+/** Depth ceiling for the trace roll-up walk; the hierarchy is far shallower. */
+const MAX_TRACE_ROLLUP_DEPTH = 24;
 
 /** Upper bound on planner-produced coding steps. */
 const MAX_PLANNED_SUBTASKS = 4;

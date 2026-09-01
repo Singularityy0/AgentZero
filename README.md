@@ -355,7 +355,10 @@ remain supported as fallback configuration.
 
 ## Scripts
 
-- `pnpm build` compiles all current packages
+- `pnpm build` compiles all current packages (incremental)
+- `pnpm build:force` recompiles everything from scratch; run it after pulling,
+  because `tsc -b` has skipped files whose timestamps moved backwards during a
+  git operation and left stale JavaScript behind
 - `pnpm typecheck` runs the TypeScript build in checking mode
 - `pnpm test` runs the core agent and tool contract tests
 - `pnpm tui` builds the workspace and starts the interactive agentic TUI

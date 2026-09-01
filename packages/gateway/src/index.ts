@@ -763,11 +763,76 @@ abstract class HttpProvider implements ProviderAdapter {
       throw new Error(`Credential unavailable for provider ${this.id}.`);
     return key ? `Bearer ${key}` : undefined;
   }
+  /**
+   * Send the smallest possible completion to prove the account can actually run
+   * inference.
+   *
+   * Listing models only proves a key is well-formed. A Cerebras trial that has
+   * not been verified, a Groq account out of credit, or a key without access to
+   * the chosen model all return a healthy `/models` and then fail every real
+   * request - so the settings screen reported "validated" while the IDE failed
+   * on the first task with a bare `402 status code (no body)`. Validation must
+   * exercise the thing it claims to validate.
+   *
+   * Costs one output token. Skipped when no model is configured yet, because
+   * there is nothing to probe.
+   */
+  protected async probeInference(baseUrl: string): Promise<void> {
+    const modelId = this.getConfig().manualModelId?.trim();
+    if (!modelId) return;
+    const authorization = this.authorization();
+    const response = await this.fetcher(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authorization ? { Authorization: authorization } : {}),
+      },
+      body: JSON.stringify({
+        model: modelId,
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 1,
+      }),
+    });
+    if (response.ok) return;
+    const detail = (await response.text().catch(() => "")).slice(0, 300).trim();
+    throw new Error(
+      describeInferenceFailure(this.id, modelId, response.status, detail),
+    );
+  }
+
   abstract validateCredentials(): Promise<void>;
   abstract discoverModels(options?: {
     refresh?: boolean;
   }): Promise<ModelInfo[]>;
   abstract createRoute(model: ModelInfo): Promise<ModelRoute>;
+}
+
+/**
+ * Turn a bare status code into something a user can act on. `402 status code
+ * (no body)` is technically accurate and completely useless; the difference
+ * between "your key is wrong", "your account is not activated", and "this key
+ * cannot use that model" is what decides what the user does next.
+ */
+function describeInferenceFailure(
+  providerId: string,
+  modelId: string,
+  status: number,
+  detail: string,
+): string {
+  const suffix = detail ? ` Provider said: ${detail}` : "";
+  if (status === 401 || status === 403) {
+    return `${providerId} rejected the credential when running a request (${status}). The key is not accepted for inference.${suffix}`;
+  }
+  if (status === 402) {
+    return `${providerId} accepted the key but refused to run a request (402 Payment Required). The account usually needs billing set up or verification completed before inference is allowed.${suffix}`;
+  }
+  if (status === 404) {
+    return `${providerId} has no model "${modelId}" available to this key (404). Check the model ID in Provider Settings.${suffix}`;
+  }
+  if (status === 429) {
+    return `${providerId} is rate limiting this key (429). The credential works; try again shortly.${suffix}`;
+  }
+  return `${providerId} could not run a test request with "${modelId}" (${status}).${suffix}`;
 }
 
 export class OpenRouterProvider extends HttpProvider {
@@ -782,6 +847,7 @@ export class OpenRouterProvider extends HttpProvider {
       throw new Error("OpenRouter credentials were rejected.");
     if (!response.ok)
       throw new Error(`OpenRouter unavailable (${response.status}).`);
+    await this.probeInference("https://openrouter.ai/api/v1");
   }
   async discoverModels(
     options: { refresh?: boolean } = {},
@@ -837,6 +903,7 @@ export class GroqProvider extends HttpProvider {
     if (response.status === 401 || response.status === 403)
       throw new Error("Groq credentials were rejected.");
     if (!response.ok) throw new Error(`Groq unavailable (${response.status}).`);
+    await this.probeInference("https://api.groq.com/openai/v1");
   }
   async discoverModels(
     options: { refresh?: boolean } = {},
@@ -910,6 +977,7 @@ class HostedOpenAIProvider extends HttpProvider {
     }
     if (!response.ok)
       throw new Error(`${this.id} unavailable (${response.status}).`);
+    await this.probeInference(this.definition.baseUrl);
   }
 
   async discoverModels(
@@ -1259,10 +1327,11 @@ export async function validateStoredProvider(
   store: ProviderSettingsStore,
   spec: ProviderFieldSpec,
   envFallback: Record<string, string> = DEFAULT_CREDENTIAL_ENV_FALLBACK,
+  fetcher?: typeof fetch,
 ): Promise<{ ok: boolean; message?: string }> {
   try {
     const credentials = new StoredCredentialResolver(store, envFallback);
-    const gateway = createDefaultProviderGateway({ credentials });
+    const gateway = createDefaultProviderGateway({ credentials, fetcher });
     gateway.configure({
       providerId: spec.id,
       baseUrl: store.getProviderSetting(spec.id, "baseUrl"),

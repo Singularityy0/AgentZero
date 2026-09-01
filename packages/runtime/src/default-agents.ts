@@ -16,6 +16,34 @@ export const RESERVED_AGENT_IDS: ReadonlySet<string> = new Set([
   REVIEWER_AGENT_ID,
 ]);
 
+/**
+ * Built-in agents the runtime drives itself, which a user should never pick.
+ *
+ * Retriever, Verifier, and Reviewer are *stages* of the coding pipeline, not
+ * modes: running one standalone means running a verifier with nothing to verify.
+ * Chat is chosen automatically for prompts that need no project access. Offering
+ * these in a picker alongside Architect implies a choice that does not exist and
+ * silently disables automatic routing when taken.
+ */
+export const INTERNAL_AGENT_IDS: ReadonlySet<string> = new Set([
+  CONVERSATION_AGENT_ID,
+  RETRIEVER_AGENT_ID,
+  VERIFIER_AGENT_ID,
+  REVIEWER_AGENT_ID,
+]);
+
+/**
+ * True when a client should offer this agent for manual selection.
+ *
+ * Architect is the automatic entry point and must always be offered, because it
+ * is what "let the system decide" means. Coder is offered as a deliberate
+ * override for a user who knows the work is an edit. Project agents from
+ * `.agentic/agents` are offered because being chosen is their whole purpose.
+ */
+export function isSelectableAgent(agentId: string): boolean {
+  return !INTERNAL_AGENT_IDS.has(agentId);
+}
+
 export function createDefaultAgents(
   projectInstructions: readonly string[],
 ): AgentDefinition[] {

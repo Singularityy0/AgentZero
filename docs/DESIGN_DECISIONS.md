@@ -563,6 +563,186 @@ readable answer instead of a repeated routing error.
 
 ---
 
+## 21. Validation exercises the thing it validates
+
+**Decision.** `validateCredentials` sends a one-token completion after listing
+models. A provider only reports "validated" once it has actually served a
+request.
+
+**The bug this fixed.** Validation was `GET /models` plus a 401/403 check. A
+Cerebras trial that has not been verified, an account without billing, and a key
+with no entitlement to the chosen model all return a healthy model list and then
+refuse every real request. So the settings screen said validated, and the first
+task died with a bare `402 status code (no body)`. The user's reasonable
+conclusion was that the app was broken, not the account.
+
+**Why probe rather than just report better.** A validation button exists so the
+user can find out _before_ running a task. Checking a weaker property than the
+one it implies is the failure; a clearer error at task time would not have
+restored the button's purpose. The probe costs one output token.
+
+**What we also fixed.** The message. `402` alone is useless; the difference
+between "your key is wrong", "your account is not activated", and "this key
+cannot use that model" is what decides what the user does next, so each status
+now maps to a sentence naming the likely cause.
+
+---
+
+## 22. A billing failure is terminal for the account, not for the task
+
+**Decision.** HTTP 402 and quota-exhaustion messages classify as `quota`,
+retryable, so the gateway cools that route down and immediately tries the next
+configured provider.
+
+**Why this is not obvious.** 402 is a 4xx, and the generic 4xx branch calls
+those `invalid_request`, retryable `false` — correctly, for a malformed request
+that will fail identically everywhere. Billing is the exception: the request is
+fine, this _account_ cannot serve it, and another provider can. Ordering the
+402 check before the 4xx catch-all is what separates the two.
+
+**How it surfaced anyway.** Compiled output had gone stale, so the running app
+still had the pre-fix classification and ended the task on the first 402 instead
+of failing over — see the note below. The lesson we took is that a fix nobody
+can observe is indistinguishable from no fix.
+
+---
+
+## 23. A green test run must mean the current source is green
+
+**Decision.** `pnpm test` runs `tsc -b --force`. `pnpm build:force` does the
+same for a manual build.
+
+**The bug this fixed.** `tsc -b` skipped recompiling a source file that had been
+rewritten by a git operation, leaving `dist/model.js` hours older than its
+source and missing an entire branch of error classification. Everything
+downstream was consistent with itself and wrong: the app failed over incorrectly,
+and the test suite passed because it was testing the same stale output. We only
+caught it by testing the compiled classifier directly against the error shapes a
+provider actually throws.
+
+**Why force the whole build rather than detect staleness.** A staleness detector
+is more code that can itself be wrong about the thing it is guarding. The full
+build takes 17 seconds. Incremental builds remain the default for `pnpm start`,
+`pnpm tui`, and `pnpm settings`, where the feedback loop matters and a mistake is
+visible immediately; the test command is where a wrong answer is silent, so that
+is where the guarantee belongs.
+
+---
+
+## 24. A picker should not offer a choice that does not exist
+
+**Decision.** The agent picker offers Architect (labelled "Auto") and Coder, plus
+any agents the project ships itself. Retriever, Verifier, Reviewer, and Chat are
+hidden. `isSelectableAgent` owns the distinction in the runtime; the workbench
+API exposes `selectable` and `automatic` flags so clients never hardcode IDs.
+
+**The bug this fixed.** The dropdown listed every enabled agent, and the default
+was `agents.find((agent) => agent.enabled)` — whichever sorted first. Architect
+happened to win alphabetically, so the right thing happened by accident; a
+project shipping `.agentic/agents/aardvark.md` would have silently become the
+default agent for every prompt.
+
+**Why hide the stages.** Retriever, Verifier, and Reviewer are steps the
+pipeline drives, not modes: a Verifier run standalone has nothing to verify.
+Chat is selected automatically for prompts that need no project access. Listing
+them beside Architect implies a decision the user should be making, and taking
+that decision silently turns off the automatic routing that is the point of the
+system.
+
+**Why keep any manual override at all.** Two cases are genuine. A user who
+already knows the work is an edit can skip straight to Coder. And a project
+agent exists precisely to be chosen — being selectable is its entire purpose.
+Both are deliberate acts, which is the difference between an override and a
+default.
+
+---
+
+## 25. Usage is measured, rolled up, and persisted
+
+**Decision.** Providers report token usage per model call. Those calls are summed
+onto their agent span, their pipeline-stage span, and the task span, so every
+node in the hierarchy answers "how many tokens and how long". The same totals are
+available directly through `taskSpend(taskId)`, and are written into task state
+on every call.
+
+**What was missing.** Time was on every span already, and usage was on the model
+calls, but nothing above a leaf had a total — the dashboard could show how long
+an agent took and not how many tokens it used, which is half of what the problem
+statement asks a trace node to show. Rolling up by walking the persisted spans,
+rather than tracking a parallel counter, means the number shown always agrees
+with the tree it is shown in.
+
+**Why persistence matters more than it looks.** `spendByTask` was an in-memory
+Map. Every restart handed a resumed task a fresh $0.50 budget, so the ceiling
+that exists to stop a runaway task was the one thing a long-running task could
+reset by crashing. Cost is now written to task state next to the orchestration
+checkpoint, and read back when the map is cold.
+
+**Boundary.** A provider that reports no usage contributes zero rather than an
+estimate. Under-reporting a total is safer than inventing one, and every
+provider we ship does report: Groq and the OpenAI-compatible routes through
+`usage`, Ollama through `prompt_eval_count` and `eval_count`.
+
+---
+
+## 26. Spending changes the route, not just the alarm
+
+**Decision.** Once a task passes its cost warning ratio, `budgetAwareRoutePolicy`
+rewrites the stage's policy: capacity becomes economy and context-window floors
+are dropped. Provider exclusions are never relaxed.
+
+**Why cumulative spend is the routing signal that matters.** The other signals -
+complexity, context size, tool support - are properties of a request and do not
+change while a task runs. Spend does. A stage that deserved the strongest model
+at the start does not deserve it three quarters of the way through the budget,
+because a task halted at the ceiling scores zero however good the model was. The
+degradation is stated in the routing reason, so the change is visible rather
+than mysterious.
+
+**What stays fixed.** Exclusions. A verifier demoted onto the same local model
+that wrote the code is worthless at any price, so cost pressure can make
+judgement cheaper but never let it grade its own work.
+
+---
+
+## 27. A repeated tool call gets its result back, moved rather than copied
+
+**Decision.** When a model repeats a tool call with identical arguments and an
+unchanged workspace, the cached result is served again as the newest tool
+message, and the earlier copy is replaced by a one-line pointer. The nudge to
+stop repeating is a separate message appended after every tool result for that
+turn. The repeat limit counts _consecutive_ repeats.
+
+**The bug this fixed, from a real run.** The coding step failed with `did not
+call a workspace mutation tool`, and the dashboard showed the cause: `The model
+repeatedly requested cached tool calls without making progress.` The guard used
+to answer a repeat with a refusal - "use the earlier tool result already present
+in the conversation" - which assumes that result is still readable. It often is
+not: compaction replaces `read_file` bodies with signatures to save tokens. So
+the model re-read, was told to look at content that no longer existed, re-read
+again, and hit the loop limit having changed nothing. Two safeguards, each
+correct alone, deadlocked when combined.
+
+**Why move the payload instead of copying it.** Copying it back fixes the
+deadlock and inflates context, which is what the refusal was protecting against
+
+- a 3 KB result repeated four times is 12 KB of nothing. Moving it keeps context
+  flat, puts the data at the position a small model attends to best, and leaves
+  the earlier message in place so every `tool_call` in that turn still has a
+  matching response. Deleting the earlier message instead would make the provider
+  reject the request.
+
+**Why the nudge is deferred.** A provider rejects a non-tool message inserted
+between the tool results answering one assistant turn's tool calls, so the
+instruction is collected and flushed once the turn's results are complete.
+
+**Why consecutive rather than cumulative.** The counter never reset, so a long
+productive run - read A, edit, read B, edit - accumulated toward the limit and
+could be stopped for looping while it was making progress. It exists to catch a
+model spinning on one call, so it now resets whenever a tool actually executes.
+
+---
+
 ## Known gaps
 
 Stated plainly, because an unclaimed gap is cheaper than a claimed feature that

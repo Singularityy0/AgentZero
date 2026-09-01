@@ -210,8 +210,14 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
   yet emit model/tool correlation IDs and complete request/response payloads.
 - [~] Safe progress and routing/recovery events are persisted.
 - [~] Context artifact contracts exist, but tool-message propagation is incomplete.
-- [~] Provider timing, route, and available cost are recorded where supplied;
-  per-model usage is incomplete in the hierarchy.
+- [x] Tokens and wall-clock time are recorded for every node. Providers report
+      usage per model call (Groq, OpenAI-compatible, and Ollama via
+      `prompt_eval_count`/`eval_count`); those calls are summed onto their
+      agent, their pipeline stage, and the task span, so the dashboard can
+      answer "how many tokens and how long did this agent take". Totals are
+      also available without walking the trace via `taskSpend(taskId)`, and
+      are persisted in task state so a restart resumes the same running total
+      instead of granting a fresh budget.
 - [x] The React IDE renders task traces as a drill-down hierarchy with recorded
       input, output, context, usage, provider/model, cost, and timing fields,
       and follows a running task live: the dashboard switches to the active task,

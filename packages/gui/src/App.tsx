@@ -144,6 +144,10 @@ interface AgentView {
   name: string;
   description: string;
   enabled: boolean;
+  /** False for pipeline stages the runtime drives itself. */
+  selectable?: boolean;
+  /** True for the agent that routes a prompt to the right place on its own. */
+  automatic?: boolean;
 }
 
 interface TaskSpendView {
@@ -665,8 +669,13 @@ export function App() {
       setWorkbench(data);
       setConnectionError(undefined);
       setSelectedSessionId((current) => current ?? data.sessions[0]?.id);
+      // Default to the agent that decides for itself, not to whichever agent
+      // sorted first. Picking any other entry is an explicit override.
       setSelectedAgentId(
-        (current) => current ?? data.agents.find((agent) => agent.enabled)?.id,
+        (current) =>
+          current ??
+          data.agents.find((agent) => agent.enabled && agent.automatic)?.id ??
+          data.agents.find((agent) => agent.enabled)?.id,
       );
     } catch (error) {
       setConnectionError(
@@ -2491,6 +2500,11 @@ function SearchPanel({ onOpen }: { onOpen: (path: string) => void }) {
 function AgentsPanel({ agents }: { agents: AgentView[] }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-2">
+      <p className="px-1 py-2 text-[10px] leading-4 text-neutral-600">
+        The composer runs Auto by default: it reads each prompt and picks the
+        route itself. Choosing a specific agent overrides that for the next
+        message. Stage agents are driven by the pipeline and cannot be picked.
+      </p>
       {agents.map((agent) => (
         <div
           key={agent.id}
@@ -2500,6 +2514,13 @@ function AgentsPanel({ agents }: { agents: AgentView[] }) {
             <Bot size={13} className="text-indigo-400" />
             {agent.name}
             <StatusDot status={agent.enabled ? "completed" : "idle"} />
+            <span className="ml-auto text-[9px] uppercase tracking-wide text-neutral-600">
+              {agent.automatic
+                ? "auto"
+                : agent.selectable === false
+                  ? "stage"
+                  : "manual"}
+            </span>
           </div>
           <p className="mt-1.5 text-[10px] leading-4 text-neutral-600">
             {agent.description}
@@ -3029,12 +3050,13 @@ function AssistantPanel({
             onChange={(event) => onSelectAgent(event.target.value)}
             className="field min-w-0 flex-1"
             aria-label="Active agent"
+            title="Auto reads the prompt and routes it. Pick a specific agent to override that."
           >
             {agents
-              .filter((agent) => agent.enabled)
+              .filter((agent) => agent.enabled && agent.selectable !== false)
               .map((agent) => (
                 <option key={agent.id} value={agent.id}>
-                  {agent.name}
+                  {agent.automatic ? `Auto (${agent.name})` : agent.name}
                 </option>
               ))}
           </select>

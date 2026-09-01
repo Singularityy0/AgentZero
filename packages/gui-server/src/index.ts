@@ -8,6 +8,7 @@ import { delimiter, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { executeCommand } from "@agentic-runtime/command";
 import { stopRustEngine } from "@agentic-runtime/core";
+import { DEFAULT_AGENT_ID, isSelectableAgent } from "@agentic-runtime/runtime";
 import {
   PROVIDER_FIELD_SPECS,
   validateStoredProvider,
@@ -635,11 +636,16 @@ async function handleRequest(
       },
       sessions: store.listSessions(),
       tasks: store.listTasks(),
+      // `automatic` marks the agent that routes a prompt to the right place on
+      // its own; `selectable` hides the pipeline stages the runtime drives
+      // itself, which are not modes a user can meaningfully choose.
       agents: store.listAgents().map((agent) => ({
         id: agent.id,
         name: agent.name,
         description: agent.description,
         enabled: agent.enabled,
+        selectable: isSelectableAgent(agent.id),
+        automatic: agent.id === DEFAULT_AGENT_ID,
       })),
     });
     return;

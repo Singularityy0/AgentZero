@@ -55,6 +55,7 @@ import {
   createDefaultAgents,
   createHeadlessRuntime,
   DEFAULT_AGENT_ID,
+  isSelectableAgent,
   HeadlessRuntimeService,
   parsePlannedSubtasks,
   REVIEWER_AGENT_ID,
@@ -605,12 +606,19 @@ test("AgentRunner skips a repeated identical tool call and lets the model finish
 
   assert.equal(executions, 1);
   assert.equal(result.text, "Used the earlier result without reading again.");
+  // The repeat is served from cache with the real payload, and the earlier
+  // copy becomes a pointer, so the result exists exactly once.
   assert.ok(
     result.messages.some(
       (message) =>
-        message.role === "tool" &&
-        message.content.includes("Duplicate echo call skipped"),
+        message.role === "tool" && message.content.startsWith("[Superseded:"),
     ),
+  );
+  assert.equal(
+    result.messages.filter(
+      (message) => message.role === "tool" && message.content === "repeat",
+    ).length,
+    1,
   );
 });
 
@@ -643,13 +651,26 @@ test("AgentRunner detects alternating duplicate calls without duplicating large 
 
   assert.equal(executions, 2);
   assert.equal(result.text, "Finished from the original results.");
-  const duplicateMessages = result.messages.filter(
+
+  // A repeat moves its result rather than copying it: the earlier message
+  // shrinks to a pointer and the payload reappears once, at the end. Serving a
+  // short refusal instead used to deadlock a model whose earlier copy had been
+  // pruned to signatures by compaction - it re-read, was refused, and looped.
+  const superseded = result.messages.filter(
     (message) =>
-      message.role === "tool" &&
-      message.content.includes("Duplicate echo call skipped"),
+      message.role === "tool" && message.content.startsWith("[Superseded:"),
   );
-  assert.equal(duplicateMessages.length, 2);
-  assert.ok(duplicateMessages.every((message) => message.content.length < 300));
+  assert.equal(superseded.length, 2);
+  assert.ok(superseded.every((message) => message.content.length < 300));
+
+  // Each large payload is still present exactly once, so context did not grow.
+  for (const value of ["a", "b"]) {
+    const carrying = result.messages.filter(
+      (message) =>
+        message.role === "tool" && message.content.startsWith(`${value}:xxx`),
+    );
+    assert.equal(carrying.length, 1, `${value} should appear once`);
+  }
 });
 
 test("AgentRunner continues an interrupted edit and verification workflow", async () => {
@@ -4006,4 +4027,388 @@ test("an oversized first request is trimmed to fit instead of failing", async ()
   const user = messages.find((message) => message.role === "user");
   assert.match(user?.content ?? "", /Objective:\nAdd retries\./);
   assert.match(user?.content ?? "", /Context truncated to fit/);
+});
+
+test("only real modes are offered for selection, and Auto is the default", () => {
+  const agents = createDefaultAgents([]);
+  const offered = agents
+    .filter((agent) => isSelectableAgent(agent.id))
+    .map((agent) => agent.id)
+    .sort();
+
+  // Retriever, Verifier, and Reviewer are pipeline stages, and Chat is chosen
+  // automatically. Offering them as peers of Architect implies a choice that
+  // does not exist, and taking it silently disables automatic routing.
+  assert.deepEqual(offered, [CODING_AGENT_ID, DEFAULT_AGENT_ID].sort());
+  for (const internal of [
+    CONVERSATION_AGENT_ID,
+    "retriever",
+    VERIFIER_AGENT_ID,
+    REVIEWER_AGENT_ID,
+  ]) {
+    assert.equal(isSelectableAgent(internal), false, internal);
+  }
+
+  // A project's own agents exist to be chosen, so they stay selectable.
+  assert.equal(isSelectableAgent("acme-deploy"), true);
+});
+
+test("choosing an agent overrides automatic routing for that turn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-override-"));
+  await writeFile(join(root, "index.ts"), "export const value = 1;\n");
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  store.registerAgent({
+    id: "acme-deploy",
+    name: "Acme Deploy",
+    description: "Project-specific deployment agent.",
+    systemPrompt: "You deploy Acme services.",
+    capabilities: ["deployment"],
+    allowedTools: [],
+    enabled: true,
+  });
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+
+  let called: string[] = [];
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "fake" },
+    resolveModel: (agent) => ({
+      respond: async () => {
+        called.push(agent.id);
+        return assistantResponse("ok");
+      },
+    }),
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => false,
+    retrieval,
+  });
+
+  try {
+    const run = async (agentId: string, prompt: string): Promise<string[]> => {
+      called = [];
+      const session = service.createSession();
+      await service.runTask({ sessionId: session.id, agentId, prompt });
+      return called;
+    };
+
+    // Auto decides: a greeting never reaches a workspace agent, and an edit
+    // request goes to the pipeline without being told to.
+    assert.deepEqual(await run(DEFAULT_AGENT_ID, "hi"), [
+      CONVERSATION_AGENT_ID,
+    ]);
+    assert.ok(
+      (await run(DEFAULT_AGENT_ID, "fix the null check in index.ts")).includes(
+        CODING_AGENT_ID,
+      ),
+    );
+
+    // An explicit choice is honoured even when Auto would have gone elsewhere:
+    // a greeting sent to the Coder stays with the Coder.
+    assert.equal(
+      (await run(CODING_AGENT_ID, "hi")).includes(CONVERSATION_AGENT_ID),
+      false,
+    );
+
+    // A project agent runs directly, with no pipeline wrapped around it.
+    const custom = await run("acme-deploy", "deploy the service");
+    assert.deepEqual(custom, ["acme-deploy"]);
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("tokens and time are recorded per agent, per stage, and for the whole task", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-usage-"));
+  await writeFile(join(root, "index.ts"), "export const value = 1;\n");
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "fake" },
+    resolveModel: () => ({
+      respond: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          ...assistantResponse("Answered."),
+          usage: { inputTokens: 120, outputTokens: 30, totalTokens: 150 },
+          cost: 0.002,
+        };
+      },
+    }),
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => false,
+  });
+
+  try {
+    const session = service.createSession();
+    const result = await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "what is a closure in javascript",
+    });
+
+    const spans = service.listTraceSpans(result.taskId);
+    const task = spans.find((span) => span.kind === "task");
+    const agent = spans.find((span) => span.kind === "agent");
+    const call = spans.find((span) => span.kind === "model_call");
+
+    // Wall clock, which is what the evaluation measures end to end.
+    assert.ok((task?.durationMs ?? 0) > 0, "the task must record its duration");
+    assert.ok((agent?.durationMs ?? 0) > 0, "each agent must record duration");
+    assert.ok((call?.durationMs ?? 0) > 0, "each call must record duration");
+
+    // Providers report usage per call; the dashboard needs it per agent and for
+    // the whole task, so calls are summed onto their ancestors.
+    const usage = (span: (typeof spans)[number] | undefined) =>
+      span?.usage as
+        | { inputTokens: number; outputTokens: number; totalTokens: number }
+        | undefined;
+    assert.equal(usage(call)?.inputTokens, 120);
+    assert.equal(usage(agent)?.inputTokens, usage(call)?.inputTokens);
+    assert.equal(usage(task)?.totalTokens, usage(agent)?.totalTokens);
+    assert.equal(task?.cost, call?.cost);
+
+    // The same totals are available without walking the trace.
+    const spend = service.taskSpend(result.taskId);
+    assert.equal(spend.inputTokens, 120);
+    assert.equal(spend.outputTokens, 30);
+    assert.equal(spend.modelCalls, 1);
+    assert.ok(spend.costUsd > 0);
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("spend survives a restart so a resumed task keeps its budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-spend-resume-"));
+  const dataRoot = join(root, ".runtime-data");
+  await writeFile(join(root, "index.ts"), "export const value = 1;\n");
+
+  const open = (): {
+    store: SessionStore;
+    service: HeadlessRuntimeService;
+  } => {
+    const store = new SessionStore({ projectRoot: root, dataRoot });
+    for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+    const service = new HeadlessRuntimeService({
+      store,
+      model: { providerId: "ollama", modelId: "fake" },
+      resolveModel: () => ({
+        respond: async () => ({
+          ...assistantResponse("Answered."),
+          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+          cost: 0.01,
+        }),
+      }),
+      resolveTools: () => new ToolRegistry(),
+      requestApproval: async () => false,
+    });
+    return { store, service };
+  };
+
+  const first = open();
+  let taskId = "";
+  try {
+    const session = first.service.createSession();
+    const result = await first.service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "what is a promise",
+    });
+    taskId = result.taskId;
+    assert.ok(first.service.taskSpend(taskId).costUsd > 0);
+  } finally {
+    await first.service.close();
+  }
+
+  // A fresh process reading the same database must not hand the task a clean
+  // budget; an in-memory total would have reset the ceiling on every restart.
+  const second = open();
+  try {
+    const resumed = second.service.taskSpend(taskId);
+    assert.equal(resumed.costUsd, 0.01);
+    assert.equal(resumed.inputTokens, 100);
+    assert.equal(resumed.outputTokens, 20);
+    assert.equal(resumed.modelCalls, 1);
+  } finally {
+    await second.service.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("a repeated tool call returns its cached result and the run continues", async () => {
+  const calls: string[] = [];
+  let readCount = 0;
+  let wrote = false;
+  const tools = new ToolRegistry()
+    .register({
+      name: "read_file",
+      description: "Read a file.",
+      approval: "auto",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      execute: async () => {
+        readCount += 1;
+        return {
+          output: JSON.stringify({
+            path: "index.ts",
+            content: "export const value = 1;\n",
+          }),
+        };
+      },
+    })
+    .register({
+      name: "write_file",
+      description: "Write a file.",
+      approval: "auto",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, content: { type: "string" } },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+      execute: async () => {
+        wrote = true;
+        return { output: "written", changed: true };
+      },
+    });
+
+  // The reported failure: a small model re-reads the same file instead of
+  // editing. It used to be refused four times and stopped for looping, so the
+  // coding step failed with "did not call a workspace mutation tool".
+  let turn = 0;
+  const model: LanguageModel = {
+    respond: async (request) => {
+      turn += 1;
+      const nudged = request.messages.some(
+        (message) =>
+          message.role === "user" && message.content.includes("Do not call"),
+      );
+      calls.push(nudged ? "nudged" : "plain");
+      if (turn <= 3 && !nudged) {
+        return assistantResponse("", [
+          {
+            id: `r${turn}`,
+            name: "read_file",
+            arguments: { path: "index.ts" },
+          },
+        ]);
+      }
+      if (!wrote) {
+        return assistantResponse("", [
+          {
+            id: `w${turn}`,
+            name: "write_file",
+            arguments: {
+              path: "index.ts",
+              content: "export const value = 2;\n",
+            },
+          },
+        ]);
+      }
+      return assistantResponse("Done.");
+    },
+  };
+
+  const runner = new AgentRunner(model, tools, {
+    cwd: process.cwd(),
+    requestApproval: async () => true,
+    workflowMode: "mutation",
+    enforceWorkflowCompletion: false,
+  });
+  const messages: ConversationMessage[] = [
+    { role: "user", content: "Change value to 2 in index.ts." },
+  ];
+  const result = await runner.run(messages);
+
+  assert.equal(result.stopReason, undefined, result.text);
+  assert.equal(wrote, true, "the run must reach the mutation");
+  assert.equal(readCount, 1, "the repeat must be served from cache");
+
+  // The repeat carries the real content, not a refusal: compaction prunes
+  // read_file bodies, so "use the earlier result" can point at nothing. The
+  // payload moves rather than being copied, so it exists exactly once and the
+  // earlier message is a pointer.
+  const carrying = messages.filter(
+    (message) =>
+      message.role === "tool" && message.content.includes("export const value"),
+  );
+  assert.equal(carrying.length, 1);
+  assert.ok(
+    messages.some(
+      (message) =>
+        message.role === "tool" && message.content.startsWith("[Superseded:"),
+    ),
+  );
+  // The nudge is its own message, after the tool results, never between them.
+  const nudgeIndex = messages.findIndex(
+    (message) =>
+      message.role === "user" && message.content.includes("Do not call"),
+  );
+  assert.ok(nudgeIndex > 0);
+  assert.notEqual(messages[nudgeIndex - 1]?.role, "assistant");
+  assert.match(messages[nudgeIndex]!.content, /apply_patch|write_file/);
+});
+
+test("the duplicate limit counts consecutive repeats, not repeats over a run", async () => {
+  let executions = 0;
+  const tools = new ToolRegistry().register({
+    name: "look",
+    description: "Look at something.",
+    approval: "auto",
+    parameters: {
+      type: "object",
+      properties: { at: { type: "string" } },
+      required: ["at"],
+      additionalProperties: false,
+    },
+    execute: async () => {
+      executions += 1;
+      return { output: `looked ${executions}` };
+    },
+  });
+
+  // Alternating "repeat, then do something new" is progress, not a loop. The
+  // cumulative counter used to abort such a run on its fourth repeat.
+  const script = ["a", "a", "b", "b", "c", "c", "d", "d"];
+  let index = 0;
+  const model: LanguageModel = {
+    respond: async () => {
+      if (index >= script.length) return assistantResponse("Done.");
+      const at = script[index++]!;
+      return assistantResponse("", [
+        { id: `c${index}`, name: "look", arguments: { at } },
+      ]);
+    },
+  };
+
+  const runner = new AgentRunner(model, tools, {
+    cwd: process.cwd(),
+    maxSteps: 20,
+    requestApproval: async () => true,
+    enforceWorkflowCompletion: false,
+  });
+  const result = await runner.run([{ role: "user", content: "Look around." }]);
+
+  assert.equal(result.stopReason, undefined, result.text);
+  assert.equal(result.text, "Done.");
+  assert.equal(executions, 4, "each distinct call runs once");
 });

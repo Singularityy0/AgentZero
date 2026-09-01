@@ -148,6 +148,17 @@ saved sessions, but current presentation code starts a new one each time.
 
 Task routing happens inside `HeadlessRuntimeService.executeTask()`.
 
+Routing is automatic by default. The composer runs the Architect agent, which is
+the entry point to the decision below, and the user is never asked to classify
+their own prompt. Selecting a different agent is an explicit override for that
+turn, and only two are offered: Architect ("Auto") and Coder, plus any agents the
+project ships under `.agentic/agents`. Retriever, Verifier, and Reviewer are
+pipeline _stages_ rather than modes — running a verifier standalone means
+verifying nothing — and Chat is chosen automatically for prompts that need no
+project access, so all four are hidden from the picker. `isSelectableAgent`
+owns that distinction in the runtime, and clients read it from the workbench
+API rather than hardcoding agent IDs.
+
 ```mermaid
 flowchart TD
     Prompt[Persisted user task] --> Eligible{Built-in Architect or Coder?}
@@ -1543,8 +1554,9 @@ Cost:
 
 - One gateway is shared across roles; per-stage behavior comes from the route
   policy attached to each request, not from separate gateways.
-- Cumulative task tokens are not a route input; cumulative task _cost_ is
-  enforced, but it does not yet shift route order before the ceiling is hit.
+- Task cost and token totals are route inputs: past the warning ratio a
+  capacity request degrades to economy and window floors are dropped, so a
+  task finishes inside the ceiling rather than being halted at it.
 - The parameter catalog is hand-maintained, so a model absent from it is
   flagged `unverified` rather than blocked.
 
