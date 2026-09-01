@@ -1,3 +1,4 @@
+import { assessLocalModel } from "./local-hardware.js";
 import {
   ModelError,
   toModelError,
@@ -499,9 +500,60 @@ export class ProviderGateway implements LanguageModel {
     };
   }
 
+  /**
+   * When every policy-allowed route is cooling down, a short wait is better than
+   * demoting the request to an excluded provider. Rate-limit cooldowns are
+   * seconds; a judgement step is worth waiting for. The wait is bounded and
+   * abortable, and falls through to normal ranking when it expires.
+   */
+  private async waitOutCooldownForPolicy(request: ModelRequest): Promise<void> {
+    const policy = request.routePolicy;
+    const budget = policy?.maxCooldownWaitMs ?? 0;
+    if (!policy?.excludeProviders?.length || budget <= 0) return;
+    const excluded = new Set(policy.excludeProviders);
+    const allowed = this.routePreferences
+      .map((preference) =>
+        this.models.get(preference.providerId, preference.modelId),
+      )
+      .filter(
+        (model): model is ModelInfo =>
+          model !== undefined && !excluded.has(model.providerId),
+      );
+    if (allowed.length === 0) return;
+    const cooldowns = allowed.map(
+      (model) => this.cooldowns.get(keyFor(model.providerId, model.id)) ?? 0,
+    );
+    const now = this.now();
+    const earliest = Math.min(...cooldowns);
+    const waitMs = earliest - now;
+    if (waitMs <= 0 || waitMs > budget) return;
+    this.emit({
+      type: "routing_decision",
+      providerId: allowed[0]!.providerId,
+      modelId: allowed[0]!.id,
+      reason: `waiting ${waitMs} ms for a preferred route to leave cooldown rather than using ${[...excluded].join(", ")}${policy.reason ? `; ${policy.reason}` : ""}`,
+      attempt: 0,
+      contextTokens: estimateModelRequestTokens(request),
+      estimatedCost: null,
+    });
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, waitMs);
+      timer.unref?.();
+      request.signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    });
+  }
+
   rankRoutes(request: ModelRequest): RankedModelRoute[] {
     const contextTokens = estimateModelRequestTokens(request);
     const now = this.now();
+    const excluded = new Set(request.routePolicy?.excludeProviders ?? []);
     const candidates = this.routePreferences.flatMap(
       (preference, index): RouteRankingCandidate[] => {
         const model = this.models.get(
@@ -521,7 +573,12 @@ export class ProviderGateway implements LanguageModel {
           : [];
       },
     );
-    return rankModelRoutes(candidates, {
+    // Excluding every configured route would leave the caller with nothing, so
+    // the filter only applies while at least one route survives it.
+    const allowed = candidates.filter(
+      (candidate) => !excluded.has(candidate.model.providerId),
+    );
+    return rankModelRoutes(allowed.length > 0 ? allowed : candidates, {
       requiresTools: request.tools.length > 0,
       contextTokens,
       estimatedOutputTokens: this.estimatedOutputTokens,
@@ -535,6 +592,7 @@ export class ProviderGateway implements LanguageModel {
         { providerId: this.selected.providerId, modelId: this.selected.id },
       ];
     }
+    await this.waitOutCooldownForPolicy(request);
     const rankedRoutes = this.rankRoutes(request);
     const ranked = rankedRoutes
       .filter((candidate) => candidate.eligible)
@@ -910,7 +968,11 @@ export class OllamaProvider extends HttpProvider {
     if (!response.ok)
       throw new Error(`Ollama model discovery failed (${response.status}).`);
     const body = (await response.json()) as {
-      models?: Array<{ name?: string; details?: Record<string, unknown> }>;
+      models?: Array<{
+        name?: string;
+        size?: number;
+        details?: Record<string, unknown>;
+      }>;
     };
     if (!Array.isArray(body.models))
       throw new Error("Ollama returned a malformed model catalog.");
@@ -918,6 +980,11 @@ export class OllamaProvider extends HttpProvider {
       .filter((model) => Boolean(model.name))
       .map((model) => {
         const totalParams = lookupTotalParameters("ollama", model.name!);
+        // Ollama reports weight size for every installed model, which is what
+        // actually decides whether it fits the reference 16 GB / 8 GB machine.
+        const hardware = assessLocalModel(
+          typeof model.size === "number" ? model.size : undefined,
+        );
         return {
           id: model.name!,
           name: model.name!,
@@ -933,6 +1000,11 @@ export class OllamaProvider extends HttpProvider {
           metadata: {
             ...(model.details ?? {}),
             ...(totalParams ? {} : { unverified: true }),
+            hardwareFit: hardware.verdict,
+            hardwareDetail: hardware.detail,
+            ...(hardware.modelBytes === undefined
+              ? {}
+              : { weightBytes: hardware.modelBytes }),
           },
         };
       });
@@ -1304,6 +1376,15 @@ function manualModel(providerId: string, id: string): ModelInfo {
     // totalParameters may be supplied via catalog later
   };
 }
+export {
+  assessLocalModel,
+  formatGiB,
+  LOCAL_RAM_BUDGET_BYTES,
+  LOCAL_VRAM_BUDGET_BYTES,
+  type LocalFitVerdict,
+  type LocalHardwareAssessment,
+} from "./local-hardware.js";
+
 export function estimateModelCost(
   model: ModelInfo,
   inputTokens: number,

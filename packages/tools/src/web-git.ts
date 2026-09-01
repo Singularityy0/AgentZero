@@ -9,7 +9,7 @@ import { simpleGit, type SimpleGit } from "simple-git";
 const MAX_WEB_RESPONSE_BYTES = 2_000_000;
 
 export function createWebTools(): Tool[] {
-  return [createBrowseUrlTool(), createCrawlSiteTool()];
+  return [createWebSearchTool(), createBrowseUrlTool(), createCrawlSiteTool()];
 }
 
 export function createGitTools(): Tool[] {
@@ -75,6 +75,42 @@ export function createGitTools(): Tool[] {
       },
     ),
     createGitMutationTool(
+      "git_merge",
+      "Merge a branch into the current branch.",
+      objectSchema(
+        {
+          branch: { type: "string", minLength: 1 },
+          noFastForward: { type: "boolean" },
+          message: { type: "string", minLength: 1 },
+        },
+        ["branch"],
+      ),
+      async (git, arguments_) => {
+        const branch = requireString(arguments_, "branch");
+        const options = [
+          branch,
+          ...(arguments_.noFastForward === true ? ["--no-ff"] : []),
+          ...(typeof arguments_.message === "string" && arguments_.message
+            ? ["-m", arguments_.message]
+            : []),
+        ];
+        try {
+          const result = await git.merge(options);
+          return { merge: result, status: await git.status() };
+        } catch (error) {
+          // A conflicted merge is a real outcome the agent must be able to act
+          // on, not a crash: report the conflicted paths so it can resolve them.
+          const status = await git.status();
+          return {
+            merged: false,
+            conflicted: status.conflicted,
+            status,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    ),
+    createGitMutationTool(
       "git_push",
       "Push a branch to a remote.",
       objectSchema({
@@ -88,6 +124,81 @@ export function createGitTools(): Tool[] {
         ),
     ),
   ];
+}
+
+/**
+ * Keyless web search over DuckDuckGo's HTML endpoint.
+ *
+ * Every general search API (Brave, Serper, Google CSE) needs its own key and
+ * account, which would add a provider the evaluator has to configure before the
+ * agent can search at all. The HTML endpoint needs none, returns ranked organic
+ * results, and its markup is stable enough to parse. Results are titles, URLs,
+ * and snippets only: the agent follows up with browse_url when it wants the
+ * page, which keeps a search cheap in tokens.
+ */
+function createWebSearchTool(): Tool {
+  return {
+    name: "web_search",
+    description:
+      "Search the web and return ranked result titles, URLs, and snippets.",
+    approval: "ask",
+    parameters: objectSchema(
+      {
+        query: { type: "string", minLength: 1 },
+        maxResults: { type: "integer", minimum: 1, maximum: 20 },
+      },
+      ["query"],
+    ),
+    execute: async (arguments_, context) => {
+      const query = requireString(arguments_, "query");
+      const maxResults = optionalInteger(arguments_, "maxResults", 8, 20);
+      const endpoint = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+      await assertPublicUrl(endpoint);
+      const response = await fetchWebPage(endpoint, context.signal);
+      const dom = new JSDOM(response.body);
+      const results: Array<{
+        title: string;
+        url: string;
+        snippet: string;
+      }> = [];
+      for (const node of dom.window.document.querySelectorAll(".result")) {
+        const anchor = node.querySelector("a.result__a");
+        const href = anchor?.getAttribute("href");
+        if (!anchor || !href) continue;
+        const url = unwrapRedirect(href);
+        if (!url) continue;
+        results.push({
+          title: collapse(anchor.textContent ?? ""),
+          url,
+          snippet: collapse(
+            node.querySelector(".result__snippet")?.textContent ?? "",
+          ).slice(0, 400),
+        });
+        if (results.length >= maxResults) break;
+      }
+      return {
+        output: JSON.stringify({ query, results }),
+      };
+    },
+  };
+}
+
+function collapse(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+/** DuckDuckGo wraps outbound links in `/l/?uddg=<encoded>`. */
+function unwrapRedirect(href: string): string | undefined {
+  try {
+    const url = new URL(href, "https://duckduckgo.com");
+    const target = url.searchParams.get("uddg");
+    const resolved = target ? new URL(target) : url;
+    return resolved.protocol === "http:" || resolved.protocol === "https:"
+      ? resolved.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function createBrowseUrlTool(): Tool {

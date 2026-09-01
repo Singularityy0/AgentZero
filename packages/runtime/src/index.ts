@@ -26,6 +26,7 @@ export {
   type RuntimeEvent,
   type RuntimeEventListener,
   type RuntimeLimits,
+  type RuntimeTaskSpend,
   type RuntimeModelRouteSelection,
   type RuntimeModelSelection,
   type RuntimeFileContext,

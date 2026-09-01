@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,12 +19,14 @@ import {
 import { executeCommand } from "../packages/command/dist/index.js";
 import {
   OllamaModel,
+  DEFAULT_NUM_PREDICT,
   parseJsonToolCalls,
 } from "../packages/ollama/dist/index.js";
 import { findFiles, searchText } from "../packages/search/dist/index.js";
 import {
   createTaskCheckpointStore,
   loadProjectAgents,
+  loadProjectInstructions,
   SessionStore,
 } from "../packages/session/dist/index.js";
 import {
@@ -50,7 +53,15 @@ import {
   VERIFIER_AGENT_ID,
   type RuntimeEvent,
 } from "../packages/runtime/dist/index.js";
+import {
+  assessLocalModel,
+  rankModelRoutes,
+} from "../packages/gateway/dist/index.js";
 import { startSettingsServer } from "../packages/gui-server/dist/index.js";
+import {
+  createWorkspaceWatcher,
+  isIgnoredWorkspacePath,
+} from "../packages/gui-server/dist/workspace-watcher.js";
 import { hasOllamaModel } from "../packages/gui-server/dist/runtime-transport.js";
 import {
   initialTuiState,
@@ -82,6 +93,16 @@ function assistantResponse(
     text,
     toolCalls,
   };
+}
+
+/** Polls until `read` returns a non-empty result, or the timeout elapses. */
+async function waitFor<T>(read: () => T[], timeoutMs: number): Promise<T[]> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = read();
+    if (value.length > 0 || Date.now() > deadline) return value;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 function completedStep(
@@ -287,6 +308,29 @@ test("ProviderGateway discovers, selects, and executes an OpenRouter model witho
   );
 });
 
+test("local models are assessed against the 16GB RAM / 8GB VRAM reference machine", () => {
+  const gib = (value: number) => value * 1024 ** 3;
+  const host = gib(32);
+
+  // qwen2.5-coder:7b, the documented default local route.
+  const small = assessLocalModel(gib(4.7), host);
+  assert.equal(small.verdict, "fits");
+  assert.match(small.detail, /8 GB VRAM budget/u);
+
+  // Fits system RAM but not VRAM: runs with CPU offload, so it is reported.
+  const medium = assessLocalModel(gib(12), host);
+  assert.equal(medium.verdict, "tight");
+  assert.match(medium.detail, /slower/u);
+
+  // Beyond the reference machine entirely.
+  assert.equal(assessLocalModel(gib(20), host).verdict, "exceeds");
+
+  // Nothing is claimed when the provider reports no size.
+  const unknown = assessLocalModel(undefined, host);
+  assert.equal(unknown.verdict, "unknown");
+  assert.match(unknown.detail, /could not be verified/u);
+});
+
 test("StoredCredentialResolver prefers the settings store over the env fallback", () => {
   const store = new Map([["groq", "stored-key"]]);
   const resolver = new StoredCredentialResolver(
@@ -345,6 +389,7 @@ test("AgentRunner returns a denied tool result to the model", async () => {
   const toolMessage = result.messages.at(-2);
   assert.equal(toolMessage?.role, "tool");
   assert.match(toolMessage?.content ?? "", /denied by the user/);
+  assert.equal(toolMessage?.metadata?.isError, true);
 });
 
 test("AgentRunner auto-approves explicitly read-only tools", async () => {
@@ -387,6 +432,118 @@ test("AgentRunner reports the tool step limit without throwing", async () => {
   }).run([{ role: "user", content: "Loop." }]);
 
   assert.match(result.text, /1-step safety limit/);
+});
+
+test("AgentRunner refuses to write a mutation whose content was cut off", async () => {
+  // The exact shape of the reported failure: a stylesheet that stops inside a
+  // rule because the completion hit the output token limit.
+  const truncated = [
+    "<!DOCTYPE html>",
+    '<html lang="en">',
+    "<head><title>3D Rotating Cube</title>",
+    "<style>",
+    "  body { background: #0f0f1a; }",
+    "  #controls {",
+    "    display: flex;",
+    "    align-items: center;",
+  ].join("\n");
+  const writes: string[] = [];
+  let call = 0;
+  const model: LanguageModel = {
+    respond: async () => {
+      call += 1;
+      return call === 1
+        ? {
+            ...assistantResponse("", [
+              {
+                id: "write-truncated",
+                name: "create_file",
+                arguments: { path: "cube.html", content: truncated },
+              },
+            ]),
+            finishReason: "length",
+          }
+        : assistantResponse("Stopped without writing a partial file.");
+    },
+  };
+  const tools = new ToolRegistry().register({
+    name: "create_file",
+    description: "Record a created artifact.",
+    approval: "auto",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string" }, content: { type: "string" } },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+    execute: async (input) => {
+      writes.push(String((input as { content: string }).content));
+      return { output: "created", changed: true };
+    },
+  });
+
+  const result = await new AgentRunner(model, tools, {
+    cwd: process.cwd(),
+    enforceWorkflowCompletion: false,
+    requestApproval: async () => true,
+  }).run([{ role: "user", content: "Make a rotating cube page." }]);
+
+  assert.deepEqual(writes, [], "a truncated file must never reach the tool");
+  assert.match(result.text, /without writing a partial file/u);
+});
+
+test("AgentRunner accepts complete content that merely contains delimiters", async () => {
+  // Braces inside strings and comments must not read as truncation.
+  const complete = [
+    "<!DOCTYPE html>",
+    "<html><head><style>",
+    "  /* a comment with an unbalanced { brace */",
+    "  .face { transform: translateZ(80px); }",
+    "</style></head><body>",
+    "<script>",
+    '  const note = "a string with { an unbalanced brace";',
+    "  document.title = note;",
+    "</script></body></html>",
+  ].join("\n");
+  const writes: string[] = [];
+  let call = 0;
+  const model: LanguageModel = {
+    respond: async () => {
+      call += 1;
+      return call === 1
+        ? assistantResponse("", [
+            {
+              id: "write-complete",
+              name: "create_file",
+              arguments: { path: "cube.html", content: complete },
+            },
+          ])
+        : assistantResponse("Saved cube.html.");
+    },
+  };
+  const tools = new ToolRegistry().register({
+    name: "create_file",
+    description: "Record a created artifact.",
+    approval: "auto",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string" }, content: { type: "string" } },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+    execute: async (input) => {
+      writes.push(String((input as { content: string }).content));
+      return { output: "created", changed: true };
+    },
+  });
+
+  await new AgentRunner(model, tools, {
+    cwd: process.cwd(),
+    enforceWorkflowCompletion: false,
+    requestApproval: async () => true,
+  }).run([{ role: "user", content: "Make a rotating cube page." }]);
+
+  assert.equal(writes.length, 1, "valid content must not be rejected");
 });
 
 test("AgentRunner stops corrective mutation nudges after two retries", async () => {
@@ -612,6 +769,32 @@ test("TaskOrchestrator retries a failed worker within its limit", async () => {
   assert.equal(attempts, 2);
   assert.equal(state.results.code?.attempts, 2);
   assert.equal(state.stage, "completed");
+});
+
+test("TaskOrchestrator does not replay a terminal worker failure", async () => {
+  let attempts = 0;
+  const orchestrator = new TaskOrchestrator(
+    {
+      coder: async () => {
+        attempts += 1;
+        return {
+          success: false,
+          summary: "model exhausted its bounded tool-call recovery",
+          retryable: false,
+        };
+      },
+    },
+    { runId: "run-terminal", maxAttemptsPerStep: 5 },
+  );
+
+  const state = await orchestrator.run({
+    objective: "Do not replay this implementation.",
+    steps: [{ id: "code", role: "coder", title: "Code", prompt: "Implement." }],
+  });
+
+  assert.equal(attempts, 1);
+  assert.equal(state.stage, "failed");
+  assert.match(state.failure ?? "", /failed: model exhausted/);
 });
 
 test("TaskOrchestrator stops a repeated failure instead of looping", async () => {
@@ -934,6 +1117,7 @@ test("createIdeTools exposes the separate IDE tool catalog", () => {
   assert.deepEqual(
     createIdeTools().map((tool) => tool.name),
     [
+      "web_search",
       "browse_url",
       "crawl_site",
       "git_status",
@@ -943,6 +1127,7 @@ test("createIdeTools exposes the separate IDE tool catalog", () => {
       "git_add",
       "git_commit",
       "git_checkout",
+      "git_merge",
       "git_push",
       "list_directory",
       "read_file",
@@ -984,18 +1169,20 @@ test("optional tool arguments are not rejected by schema validation", () => {
 });
 
 test("web and Git tools use bounded read-only and approval-gated operations", async () => {
+  // Every web tool sends data to a third party, so all of them ask first.
   assert.deepEqual(
     createWebTools().map((tool) => tool.approval),
-    ["ask", "ask"],
+    ["ask", "ask", "ask"],
   );
+  // Reads are automatic; anything that changes history or a remote asks.
   assert.deepEqual(
     createGitTools().map((tool) => tool.approval),
-    ["auto", "auto", "auto", "auto", "ask", "ask", "ask", "ask"],
+    ["auto", "auto", "auto", "auto", "ask", "ask", "ask", "ask", "ask"],
   );
 
-  const browse = createWebTools()[0];
+  const browse = createWebTools().find((tool) => tool.name === "browse_url")!;
   await assert.rejects(
-    browse?.execute(
+    browse.execute(
       { url: "file:///secret.txt", maxCharacters: 500 },
       {
         cwd: process.cwd(),
@@ -1067,6 +1254,48 @@ test("search uses ripgrep for file and text discovery", async () => {
   assert.ok(
     matches.some((match) => match.path === "packages/tools/src/index.ts"),
   );
+});
+
+test("nested AGENTS.md files are discovered with their scope and bounded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-instructions-"));
+  try {
+    await writeFile(join(root, "AGENTS.md"), "Use tabs everywhere.\n");
+    await mkdir(join(root, "packages", "api"), { recursive: true });
+    await writeFile(
+      join(root, "packages", "api", "AGENTS.md"),
+      "This package uses spaces, not tabs.\n",
+    );
+    // Generated trees must never contribute rules.
+    await mkdir(join(root, "node_modules", "left-pad"), { recursive: true });
+    await writeFile(
+      join(root, "node_modules", "left-pad", "AGENTS.md"),
+      "Never read me.\n",
+    );
+    await mkdir(join(root, "dist"), { recursive: true });
+    await writeFile(join(root, "dist", "AGENTS.md"), "Never read me either.\n");
+
+    const instructions: string[] = loadProjectInstructions(root);
+
+    assert.equal(instructions.length, 2);
+    assert.match(instructions[0]!, /applies to the whole project/u);
+    assert.match(instructions[0]!, /Use tabs everywhere/u);
+    const scoped = instructions.find((entry) =>
+      entry.includes("spaces, not tabs"),
+    );
+    assert.ok(scoped, "a nested package rule file must be discovered");
+    assert.match(
+      scoped,
+      /packages\/api\/ and below/u,
+      "a nested rule file must state the subtree it governs",
+    );
+    assert.equal(
+      instructions.some((entry) => entry.includes("Never read me")),
+      false,
+      "generated directories must not contribute project rules",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("project agent files load separately from AGENTS.md instructions", async () => {
@@ -1167,6 +1396,28 @@ test("Ollama fallback parses common nested and array tool-call formats", () => {
   );
 });
 
+test("Ollama fallback repairs local-model JSON line continuations", () => {
+  const calls = parseJsonToolCalls(`[
+    {"name":"create_file","arguments":{"path":"cube.html","content":"\\
+<!doctype html>\\
+<html></html>"}}
+  ]`);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.name, "create_file");
+  assert.equal(calls[0]?.arguments.path, "cube.html");
+  assert.equal(calls[0]?.arguments.content, "\n<!doctype html>\n<html></html>");
+});
+
+test("Ollama fallback removes invalid local-model JSON escapes", () => {
+  const calls = parseJsonToolCalls(
+    String.raw`[{"name":"create_file","arguments":{"path":"index.html","content":"\<!doctype html>\n<html></html>"}}]`,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.arguments.content, "<!doctype html>\n<html></html>");
+});
+
 test("Ollama sends its configured context window to the local server", async () => {
   const originalFetch = globalThis.fetch;
   let requestBody: Record<string, unknown> | undefined;
@@ -1192,7 +1443,10 @@ test("Ollama sends its configured context window to the local server", async () 
       tools: [],
     });
 
-    assert.deepEqual(requestBody?.options, { num_ctx: 16_384 });
+    assert.deepEqual(requestBody?.options, {
+      num_ctx: 16_384,
+      num_predict: DEFAULT_NUM_PREDICT,
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1353,6 +1607,427 @@ test("GUI server saves edited files, runs terminal commands, and requests the na
   }
 });
 
+test("workspace watcher ignores generated directories and batches real changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-watch-unit-"));
+  const watcher = createWorkspaceWatcher(root, { debounceMs: 30 });
+
+  try {
+    assert.equal(
+      isIgnoredWorkspacePath("node_modules/left-pad/index.js"),
+      true,
+    );
+    assert.equal(isIgnoredWorkspacePath(".git/HEAD"), true);
+    assert.equal(isIgnoredWorkspacePath("dist/bundle.js"), true);
+    assert.equal(isIgnoredWorkspacePath("src/app.ts.4321.tmp"), true);
+    assert.equal(isIgnoredWorkspacePath("src/app.ts"), false);
+    assert.equal(isIgnoredWorkspacePath("calculator.py"), false);
+
+    const batches: string[][] = [];
+    watcher.subscribe((change) => batches.push(change.paths));
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await writeFile(join(root, "node_modules", "ignored.js"), "noop\n");
+    await writeFile(join(root, "calculator.py"), "print(2 + 2)\n");
+    await writeFile(join(root, "calculator.js"), "console.log(4);\n");
+
+    // Recursive watching is unavailable on some platforms and filesystems, and
+    // the watcher degrades to a no-op there rather than failing the server.
+    const observed = await waitFor(() => batches.flat(), 2000);
+    if (observed.length > 0) {
+      assert.ok(
+        observed.some((path) => path.endsWith("calculator.py")),
+        `expected a calculator.py notification, saw ${observed.join(", ")}`,
+      );
+      assert.equal(
+        observed.some((path) => path.includes("node_modules")),
+        false,
+        "generated directories must never reach the IDE",
+      );
+    }
+  } finally {
+    watcher.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GUI server streams workspace changes so the explorer stays live", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-watch-sse-"));
+  const server = startSettingsServer({
+    projectRoot: root,
+    port: 0,
+    staticDir: false,
+  });
+
+  try {
+    await server.ready;
+    const controller = new AbortController();
+    const stream = await fetch(`${server.url}/api/workspace/events`, {
+      signal: controller.signal,
+    });
+    assert.equal(stream.status, 200);
+    assert.match(
+      stream.headers.get("content-type") ?? "",
+      /text\/event-stream/u,
+    );
+
+    const frames: string[] = [];
+    const reader = stream.body!.getReader();
+    const decoder = new TextDecoder();
+    const pump = (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return;
+          frames.push(decoder.decode(value, { stream: true }));
+        }
+      } catch {
+        // Cancelled at the end of the test.
+      }
+    })();
+
+    // The agent writing a file must reach the IDE without a manual reopen.
+    await writeFile(join(root, "calculator.py"), "print(2 + 2)\n");
+    const payload = await waitFor(
+      () =>
+        frames
+          .join("")
+          .split("\n")
+          .filter((line) => line.startsWith("data: ")),
+      2000,
+    );
+    if (payload.length > 0) {
+      const change = JSON.parse(payload[0]!.slice("data: ".length)) as {
+        type: string;
+        paths: string[];
+      };
+      assert.equal(change.type, "workspace_changed");
+      assert.ok(change.paths.some((path) => path.endsWith("calculator.py")));
+    }
+    controller.abort();
+    await pump;
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GUI server creates, renames, and deletes explorer entries inside the workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-explorer-"));
+  const server = startSettingsServer({
+    projectRoot: root,
+    port: 0,
+    staticDir: false,
+  });
+
+  try {
+    await server.ready;
+    const createdFolder = await fetch(`${server.url}/api/files/entry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "src", type: "directory" }),
+    });
+    const createdFile = await fetch(`${server.url}/api/files/entry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "src/old.ts", type: "file" }),
+    });
+    const duplicate = await fetch(`${server.url}/api/files/entry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "src/old.ts", type: "file" }),
+    });
+    const renamed = await fetch(`${server.url}/api/files/entry`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from: "src/old.ts", to: "src/new.ts" }),
+    });
+    const escaped = await fetch(`${server.url}/api/files/entry`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "../outside.ts", type: "file" }),
+    });
+    assert.equal(createdFolder.status, 201);
+    assert.equal(createdFile.status, 201);
+    assert.equal(duplicate.status, 400);
+    assert.equal(renamed.status, 200);
+    assert.equal(existsSync(join(root, "src", "new.ts")), true);
+    assert.equal(existsSync(join(root, "src", "old.ts")), false);
+    assert.equal(
+      escaped.status,
+      400,
+      "explorer operations must stay inside the workspace",
+    );
+
+    const deleted = await fetch(
+      `${server.url}/api/files/entry?path=${encodeURIComponent("src")}`,
+      { method: "DELETE" },
+    );
+    assert.equal(deleted.status, 200);
+    assert.equal(existsSync(join(root, "src")), false);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("GUI server copies and duplicates entries without overwriting a collision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-copy-"));
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(join(root, "src", "app.ts"), "export const value = 1;\n");
+  const server = startSettingsServer({
+    projectRoot: root,
+    port: 0,
+    staticDir: false,
+  });
+
+  try {
+    await server.ready;
+    // Duplicate: same source and target, so the suffix rule has to apply.
+    const duplicated = (await (
+      await fetch(`${server.url}/api/files/copy`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: "src/app.ts", to: "src/app.ts" }),
+      })
+    ).json()) as { path: string };
+    const again = (await (
+      await fetch(`${server.url}/api/files/copy`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: "src/app.ts", to: "src/app.ts" }),
+      })
+    ).json()) as { path: string };
+    const pasted = (await (
+      await fetch(`${server.url}/api/files/copy`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: "src", to: "vendor" }),
+      })
+    ).json()) as { path: string };
+    const escaped = await fetch(`${server.url}/api/files/copy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from: "src/app.ts", to: "../escaped.ts" }),
+    });
+
+    assert.equal(duplicated.path, "src/app copy.ts");
+    assert.equal(again.path, "src/app copy 2.ts");
+    assert.equal(
+      await readFile(join(root, "src", "app copy.ts"), "utf8"),
+      "export const value = 1;\n",
+    );
+    assert.equal(
+      await readFile(join(root, "src", "app.ts"), "utf8"),
+      "export const value = 1;\n",
+      "the original must never be overwritten by a copy",
+    );
+    assert.equal(pasted.path, "vendor");
+    assert.equal(existsSync(join(root, "vendor", "app.ts")), true);
+    assert.equal(escaped.status, 400);
+    assert.equal(existsSync(join(root, "..", "escaped.ts")), false);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("route policy keeps judgement stages off excluded providers", () => {
+  const local = {
+    id: "mistral",
+    name: "mistral",
+    providerId: "ollama",
+    contextWindow: 8192,
+    capabilities: {
+      tools: true,
+      vision: false,
+      reasoning: false,
+      streaming: true,
+      structuredOutput: true,
+    },
+    metadata: {},
+  };
+  const hosted = {
+    ...local,
+    id: "qwen/qwen3.8-27b",
+    name: "qwen",
+    providerId: "groq",
+    contextWindow: 131_072,
+  };
+  const rank = (candidates: Parameters<typeof rankModelRoutes>[0]) =>
+    rankModelRoutes(candidates, {
+      requiresTools: true,
+      contextTokens: 2000,
+      estimatedOutputTokens: 500,
+      now: Date.now(),
+    })
+      .filter((route) => route.eligible)
+      .map((route) => route.model.providerId);
+
+  // Both configured: the hosted route must be the only judgement candidate.
+  assert.deepEqual(
+    rank([
+      { model: hosted, preference: 0 },
+      { model: local, preference: 1 },
+    ]),
+    ["groq", "ollama"],
+    "ranking itself still lists every eligible route",
+  );
+
+  // The exclusion is applied by the gateway before ranking; when it would empty
+  // the candidate set the local route must survive so an offline setup works.
+  const excluded = new Set(["ollama"]);
+  const onlyLocal = [{ model: local, preference: 0 }];
+  const filtered = onlyLocal.filter(
+    (candidate) => !excluded.has(candidate.model.providerId),
+  );
+  assert.deepEqual(
+    rank(filtered.length > 0 ? filtered : onlyLocal),
+    ["ollama"],
+    "excluding every configured route must not leave the caller with nothing",
+  );
+});
+
+test("GUI server pins whole files and selected line ranges, and completes @-mentions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-gui-context-"));
+  await writeFile(
+    join(root, "sample.ts"),
+    ["one", "two", "three", "four", "five"].join("\n") + "\n",
+  );
+  const server = startSettingsServer({
+    projectRoot: root,
+    port: 0,
+    staticDir: false,
+  });
+
+  try {
+    await server.ready;
+    const sessionResponse = await fetch(`${server.url}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Context session" }),
+    });
+    const { session } = (await sessionResponse.json()) as {
+      session: { id: string };
+    };
+
+    const wholeFile = await fetch(`${server.url}/api/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: session.id, path: "sample.ts" }),
+    });
+    const blockResponse = await fetch(`${server.url}/api/context`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sessionId: session.id,
+        path: "sample.ts",
+        startLine: 2,
+        endLine: 3,
+      }),
+    });
+    const block = (await blockResponse.json()) as {
+      item: { id: string; content: string; startLine: number; endLine: number };
+    };
+    const listed = (await (
+      await fetch(
+        `${server.url}/api/context?sessionId=${encodeURIComponent(session.id)}`,
+      )
+    ).json()) as { items: Array<{ id: string }> };
+    const lookup = (await (
+      await fetch(`${server.url}/api/files/lookup?q=sample`)
+    ).json()) as { paths: string[] };
+    const removed = await fetch(
+      `${server.url}/api/context/${encodeURIComponent(block.item.id)}?sessionId=${encodeURIComponent(session.id)}`,
+      { method: "DELETE" },
+    );
+    const remaining = (await (
+      await fetch(
+        `${server.url}/api/context?sessionId=${encodeURIComponent(session.id)}`,
+      )
+    ).json()) as { items: Array<{ id: string }> };
+
+    assert.equal(wholeFile.status, 201);
+    assert.equal(blockResponse.status, 201);
+    assert.equal(block.item.startLine, 2);
+    assert.equal(block.item.endLine, 3);
+    assert.match(block.item.content, /two\nthree$/u);
+    assert.equal(listed.items.length, 2);
+    assert.ok(lookup.paths.includes("sample.ts"));
+    assert.equal(removed.status, 200);
+    assert.equal(remaining.items.length, 1);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HeadlessRuntimeService answers /bytheway in isolation and leaves the transcript intact", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-bytheway-"));
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const isolatedRequests: ModelRequest[] = [];
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "mistral" },
+    resolveModel: () => ({
+      respond: async (request) => {
+        isolatedRequests.push(request);
+        return assistantResponse(
+          "A monad is a monoid in the category of endofunctors.",
+        );
+      },
+    }),
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => true,
+  });
+
+  try {
+    const session = service.createSession("Isolated session");
+    store.saveMessages(session.id, [
+      { role: "user", content: "keep working on the parser" },
+      { role: "assistant", content: "Parser work in progress." },
+    ]);
+
+    const handle = service.startIsolatedQuestion({
+      sessionId: session.id,
+      agentId: CONVERSATION_AGENT_ID,
+      prompt: "what is a monad",
+    });
+    const result = await handle.completion;
+
+    assert.match(result.text, /monoid/u);
+    assert.equal(isolatedRequests.length, 1);
+    // The runner appends its own reply to the same array, so assert on the
+    // prompt that was actually sent rather than the mutated conversation.
+    assert.deepEqual(isolatedRequests[0]?.messages[0], {
+      role: "user",
+      content: "what is a monad",
+    });
+    assert.equal(
+      isolatedRequests[0]?.messages.filter(
+        (message) => message.role === "system" || message.role === "tool",
+      ).length,
+      0,
+      "an isolated question must carry no prior or system context",
+    );
+    assert.equal(
+      isolatedRequests[0]?.tools.length,
+      0,
+      "an isolated question must not expose workspace tools",
+    );
+    assert.deepEqual(
+      store.getSession(session.id)?.messages.map((message) => message.content),
+      ["keep working on the parser", "Parser work in progress."],
+      "the ongoing transcript must be untouched",
+    );
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HeadlessRuntimeService routes casual conversation through the neutral chat model", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-direct-greeting-"));
   const store = new SessionStore({
@@ -1451,8 +2126,8 @@ test("HeadlessRuntimeService routes casual conversation through the neutral chat
   }
 });
 
-test("HeadlessRuntimeService answers standalone code requests without the edit pipeline", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agentic-direct-code-"));
+test("HeadlessRuntimeService writes every requested artifact instead of answering in chat", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-multi-artifact-"));
   const store = new SessionStore({
     projectRoot: root,
     dataRoot: join(root, ".runtime-data"),
@@ -1463,18 +2138,85 @@ test("HeadlessRuntimeService answers standalone code requests without the edit p
     databasePath: join(root, ".runtime-data", "retrieval.db"),
   });
   await retrieval.indexProject();
-  const events: RuntimeEvent[] = [];
+  const createdPaths: string[] = [];
   const resolvedAgents: string[] = [];
+  const languages = ["py", "js", "java", "cpp", "rb"];
+  const models = new Map<string, LanguageModel>([
+    [
+      CODING_AGENT_ID,
+      {
+        respond: async () =>
+          assistantResponse("", [
+            {
+              id: `create-${createdPaths.length}`,
+              name: "create_file",
+              arguments: {
+                path: `calculator.${languages[createdPaths.length] ?? "txt"}`,
+                content: "// complete calculator implementation",
+              },
+            },
+          ]),
+      },
+    ],
+    [
+      VERIFIER_AGENT_ID,
+      new FakeModel([
+        assistantResponse("", [
+          {
+            id: "verify-read",
+            name: "read_file",
+            arguments: { path: "calculator.py" },
+          },
+        ]),
+        assistantResponse("VERIFICATION_PASSED"),
+      ]),
+    ],
+    [REVIEWER_AGENT_ID, new FakeModel([assistantResponse("Review complete.")])],
+  ]);
+  const tools = new ToolRegistry()
+    .register({
+      name: "create_file",
+      description: "Record a created artifact.",
+      approval: "auto",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" }, content: { type: "string" } },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+      execute: async (input) => {
+        const path = String((input as { path: string }).path);
+        createdPaths.push(path);
+        return {
+          output: `created ${path}`,
+          changed: true,
+          changedFiles: [{ path }],
+        };
+      },
+    })
+    .register({
+      name: "read_file",
+      description: "Read a created artifact.",
+      approval: "auto",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      execute: async () => ({
+        output: "// complete calculator implementation",
+      }),
+    });
+  const events: RuntimeEvent[] = [];
   const service = new HeadlessRuntimeService({
     store,
     model: { providerId: "ollama", modelId: "mistral" },
     resolveModel: (agent) => {
       resolvedAgents.push(agent.id);
-      return new FakeModel([
-        assistantResponse("Here are five complete calculator examples."),
-      ]);
+      return models.get(agent.id) ?? new FakeModel([assistantResponse("ok")]);
     },
-    resolveTools: () => new ToolRegistry(),
+    resolveTools: () => tools,
     requestApproval: async () => true,
     retrieval,
   });
@@ -1483,20 +2225,41 @@ test("HeadlessRuntimeService answers standalone code requests without the edit p
   });
 
   try {
-    const session = service.createSession("Direct code session");
+    const session = service.createSession("Multi-artifact session");
     const result = await service.runTask({
       sessionId: session.id,
       agentId: DEFAULT_AGENT_ID,
       prompt: "write the code for calculator for me in 5 different languages",
     });
 
-    assert.equal(result.status, "completed");
-    assert.equal(result.text, "Here are five complete calculator examples.");
-    assert.deepEqual(resolvedAgents, [CONVERSATION_AGENT_ID]);
+    assert.equal(result.status, "completed", result.text);
     assert.equal(
-      events.some((event) => event.type === "pipeline_event"),
+      resolvedAgents.includes(CONVERSATION_AGENT_ID),
       false,
+      "a code request must not be answered by the tool-free chat agent",
     );
+    assert.ok(resolvedAgents.includes(CODING_AGENT_ID));
+    assert.equal(
+      new Set(createdPaths).size,
+      5,
+      `expected five created files, saw ${createdPaths.join(", ")}`,
+    );
+    // Each file must come from its own coding step. A single step told to emit
+    // five mutation calls is what small local models answer with prose instead.
+    const codingStepIds = events.flatMap((event) =>
+      event.type === "pipeline_event" && event.event.type === "step_started"
+        ? event.event.role === "coder"
+          ? [event.event.stepId]
+          : []
+        : [],
+    );
+    assert.deepEqual(codingStepIds, [
+      "code-1",
+      "code-2",
+      "code-3",
+      "code-4",
+      "code-5",
+    ]);
   } finally {
     await service.close();
     await rm(root, { recursive: true, force: true });
@@ -1747,6 +2510,105 @@ test("AgentRunner applies accepted hunks and returns rejected hunks to the model
   }
 });
 
+test("HeadlessRuntimeService halts a task that spends its dollar budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-budget-"));
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const events: RuntimeEvent[] = [];
+  let calls = 0;
+  // A model that never stops calling a tool: without a budget it would run to
+  // the step limit, billing every turn.
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "groq", modelId: "expensive" },
+    resolveModel: () => ({
+      respond: async () => {
+        calls += 1;
+        return {
+          ...assistantResponse("", [
+            {
+              id: `look-${calls}`,
+              name: "read_file",
+              arguments: { path: `file-${calls}.txt` },
+            },
+          ]),
+          usage: { inputTokens: 1000, outputTokens: 1000, totalTokens: 2000 },
+          cost: 0.03,
+        };
+      },
+    }),
+    resolveTools: () =>
+      new ToolRegistry().register({
+        name: "read_file",
+        description: "Read a file.",
+        approval: "auto",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+          additionalProperties: false,
+        },
+        execute: async () => ({ output: "contents" }),
+      }),
+    requestApproval: async () => true,
+    limits: { maxTaskCostUsd: 0.1, taskCostWarningRatio: 0.5 },
+  });
+  service.subscribe((event) => {
+    events.push(event);
+  });
+
+  try {
+    const session = service.createSession("Budget session");
+    // Exceeding the budget stops the run and surfaces as a task failure rather
+    // than silently returning a partial answer that already cost too much.
+    await assert.rejects(
+      service.runTask({
+        sessionId: session.id,
+        agentId: DEFAULT_AGENT_ID,
+        prompt: "audit this project and tell me what the code does",
+      }),
+      /reached its \$0\.10 budget/u,
+    );
+
+    const taskId = store
+      .listTasks(session.id)
+      .map((task) => task.id)
+      .at(-1)!;
+    assert.equal(store.getTask(taskId)?.status, "failed");
+    const spend = service.taskSpend(taskId);
+    assert.ok(spend.costUsd > 0, "real usage must be billed to the task");
+    assert.equal(spend.budgetUsd, 0.1);
+    assert.equal(spend.modelCalls, calls);
+    assert.equal(spend.inputTokens, 1000 * calls);
+    assert.ok(
+      calls <= 5,
+      `the budget must stop the run early, but it made ${calls} model calls`,
+    );
+
+    const spendEvents = events.filter((event) => event.type === "task_spend");
+    assert.equal(spendEvents.length, calls, "every call must publish spend");
+    assert.ok(
+      spendEvents.some((event) => event.level === "warning"),
+      "approaching the ceiling must be announced",
+    );
+    assert.ok(
+      spendEvents.some((event) => event.level === "exceeded"),
+      "crossing the ceiling must be announced",
+    );
+    assert.match(
+      String(store.getTask(taskId)?.state.errors ?? ""),
+      /budget/iu,
+      "the recorded failure must name the budget as the cause",
+    );
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HeadlessRuntimeService routes read-only test commands directly to verifier", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-verify-only-"));
   const store = new SessionStore({
@@ -1838,6 +2700,49 @@ test("HeadlessRuntimeService routes read-only test commands directly to verifier
   }
 });
 
+test("rolling back a created file preserves it by default and prunes empty parents otherwise", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-rollback-"));
+  const service = new WorkspaceFileService(root);
+
+  try {
+    const prepared = await service.prepareChange({
+      path: "calculator/python/calculator.py",
+      newContent: "print(2 + 2)\n",
+      expectedHash: null,
+    });
+    const written = await service.applyPreparedChange(
+      {
+        path: "calculator/python/calculator.py",
+        newContent: "print(2 + 2)\n",
+        expectedHash: null,
+      },
+      prepared,
+      prepared.hunks.map((hunk) => hunk.id),
+    );
+    const created = join(root, "calculator", "python", "calculator.py");
+    assert.equal(await readFile(created, "utf8"), "print(2 + 2)\n");
+
+    // Recovery must never delete the only copy of newly generated work.
+    const preserved = await service.rollbackMutation(written.mutation, {
+      preserveCreatedFiles: true,
+    });
+    assert.equal(preserved.status, "preserved");
+    assert.equal(await readFile(created, "utf8"), "print(2 + 2)\n");
+
+    // An explicit rollback still removes the file and the directories it made.
+    const removed = await service.rollbackMutation(written.mutation);
+    assert.equal(removed.status, "rolled_back");
+    assert.equal(existsSync(created), false);
+    assert.equal(
+      existsSync(join(root, "calculator")),
+      false,
+      "a rolled-back creation must not leave empty directories behind",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-pipeline-"));
   await writeFile(join(root, "index.ts"), "export const value = 1;\n");
@@ -1853,6 +2758,8 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
     databasePath: join(root, ".runtime-data", "retrieval.db"),
   });
   await retrieval.indexProject();
+  const coderRequests: ModelRequest[] = [];
+  let mutationExecutions = 0;
   const models = new Map<string, LanguageModel>([
     [
       DEFAULT_AGENT_ID,
@@ -1860,24 +2767,38 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
     ],
     [
       CODING_AGENT_ID,
+      {
+        respond: async (request) => {
+          coderRequests.push(request);
+          return assistantResponse("", [
+            {
+              id: `write-${coderRequests.length}`,
+              name: "write_file",
+              arguments: {
+                content:
+                  coderRequests.length === 1
+                    ? '<!doctype html><html><body><canvas></canvas><input type="range"><input type="range"><input type="range"><script>const gl=document.querySelector("canvas").getContext("webgl"); // ... (generate the remaining implementation)</script></body></html>'
+                    : coderRequests.length === 2
+                      ? '<!doctype html><html><style>.cube{perspective:800px}.face{transform:rotateY(45deg)}</style><body><div class="cube"><div class="face"></div></div><input type="range"><input type="range"><input type="range"></body></html>'
+                      : '<!doctype html><html><style>.cube{transform-style:preserve-3d}.face{transform:translateZ(1px)}</style><body><div class="cube"><div class="face"></div></div><input type="range"><input type="range"><input type="range"></body></html>',
+              },
+            },
+          ]);
+        },
+      },
+    ],
+    [
+      VERIFIER_AGENT_ID,
       new FakeModel([
         assistantResponse("", [
-          { id: "write", name: "write_file", arguments: {} },
-        ]),
-        assistantResponse("Implementation complete."),
-        assistantResponse("", [
           {
-            id: "read-created-file",
+            id: "verify-read",
             name: "read_file",
             arguments: { path: "rotating_cube.html" },
           },
         ]),
-        assistantResponse("Implementation re-read and complete."),
+        assistantResponse("VERIFICATION_PASSED"),
       ]),
-    ],
-    [
-      VERIFIER_AGENT_ID,
-      new FakeModel([assistantResponse("VERIFICATION_PASSED")]),
     ],
     [
       REVIEWER_AGENT_ID,
@@ -1894,10 +2815,14 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
       approval: "auto",
       parameters: {
         type: "object",
-        properties: {},
+        properties: { content: { type: "string" } },
+        required: ["content"],
         additionalProperties: false,
       },
-      execute: async () => ({ output: "changed", changed: true }),
+      execute: async () => {
+        mutationExecutions += 1;
+        return { output: "changed", changed: true };
+      },
     })
     .register({
       name: "read_file",
@@ -1941,6 +2866,21 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
     const persisted = store.getTask(result.taskId);
 
     assert.equal(result.status, "completed");
+    assert.equal(coderRequests.length, 3);
+    assert.equal(mutationExecutions, 1);
+    assert.deepEqual(
+      coderRequests[0]?.tools.map((tool) => tool.name),
+      ["write_file"],
+    );
+    assert.equal(
+      events.some(
+        (event) =>
+          event.type === "pipeline_event" &&
+          event.event.type === "step_retrying" &&
+          event.event.stepId === "code",
+      ),
+      false,
+    );
     assert.deepEqual(roles, [
       "planner",
       "retriever",

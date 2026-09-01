@@ -20,6 +20,7 @@ export {
   type ModelErrorOptions,
   type ModelRequest,
   type ModelResponse,
+  type ModelRoutePolicy,
   type ModelTiming,
   type ModelUsage,
 } from "./model.js";

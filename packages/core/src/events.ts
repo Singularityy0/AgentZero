@@ -34,6 +34,11 @@ export type AgentEvent =
       result: ToolResult;
     }
   | { type: "agent_completed"; text: string }
+  | {
+      type: "agent_output_truncated";
+      attempt: number;
+      finishReason: string;
+    }
   | { type: "agent_safety_limit"; text: string }
   | {
       type: "context_compacted";

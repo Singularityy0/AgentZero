@@ -21,7 +21,11 @@ export interface OllamaModelOptions {
   apiKey?: string;
   timeoutMs?: number;
   contextWindow?: number;
+  /** Upper bound on generated tokens; a whole file must fit in one response. */
+  maxOutputTokens?: number;
 }
+
+export const DEFAULT_NUM_PREDICT = 4096;
 
 interface OllamaMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -103,9 +107,12 @@ export class OllamaModel implements LanguageModel {
           model: this.options.model,
           messages: request.messages.map(toOllamaMessage),
           tools: request.tools.map(toOllamaTool),
-          ...(this.options.contextWindow
-            ? { options: { num_ctx: this.options.contextWindow } }
-            : {}),
+          options: {
+            ...(this.options.contextWindow
+              ? { num_ctx: this.options.contextWindow }
+              : {}),
+            num_predict: this.options.maxOutputTokens ?? DEFAULT_NUM_PREDICT,
+          },
           stream: false,
         }),
         signal: controller.signal,
@@ -291,7 +298,9 @@ export function parseJsonToolCalls(content: string): ToolCall[] {
 
   for (const candidateText of candidates) {
     try {
-      const parsed: unknown = JSON.parse(candidateText);
+      const parsed: unknown = JSON.parse(
+        normalizeJsonLineContinuations(candidateText),
+      );
       for (const candidate of collectJsonToolCandidates(parsed)) {
         const functionCall = asRecord(candidate.function);
         const name = firstString(
@@ -328,6 +337,14 @@ export function parseJsonToolCalls(content: string): ToolCall[] {
   }
 
   return calls;
+}
+
+function normalizeJsonLineContinuations(value: string): string {
+  // Some local instruct models emit a backslash followed by a physical newline
+  // while building multiline JSON string arguments. JSON has no line-
+  // continuation syntax, so convert that invalid form to the standard `\n`
+  // escape before parsing the otherwise valid tool call.
+  return value.replace(/\\\r?\n/gu, "\\n").replace(/\\([^"\\/bfnrtu])/gu, "$1");
 }
 
 function collectJsonToolCandidates(value: unknown): Record<string, unknown>[] {

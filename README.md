@@ -14,6 +14,113 @@ pnpm install
 pnpm build
 ```
 
+## Setup from scratch on Linux
+
+Verified on Ubuntu 22.04 and 24.04. Every step starts from a clean machine.
+
+### 1. System packages
+
+```sh
+sudo apt update
+sudo apt install -y curl git build-essential ripgrep
+```
+
+`ripgrep` backs file and text search. If your distribution has no `ripgrep`
+package, install it any way you like and point the runtime at the binary:
+
+```sh
+export AGENTIC_RIPGREP_PATH=/full/path/to/rg
+```
+
+### 2. Node.js 22 and pnpm
+
+```sh
+curl -fsSL https://fnm.vercel.app/install | bash
+exec "$SHELL"
+fnm install 22
+fnm use 22
+corepack enable
+corepack prepare pnpm@9.15.5 --activate
+node --version   # expect v22.5 or newer
+pnpm --version   # expect 9.x
+```
+
+### 3. Rust (only for the native helper crate)
+
+`pnpm build` compiles a small Rust crate. Skip this and use `pnpm build:ts` if
+you only need the TypeScript packages.
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+```
+
+### 4. Build and test
+
+```sh
+git clone <repository-url> agentic-runtime
+cd agentic-runtime
+pnpm install
+pnpm build
+pnpm test
+```
+
+### 5. Provider API keys
+
+Keys can be set **either** in the Settings screen (recommended; stored in the
+global SQLite settings database and shared by the TUI and the IDE) **or** as
+environment variables in a `.env` file at the workspace root. The Settings
+screen takes precedence over the environment.
+
+To use the settings screen:
+
+```sh
+pnpm settings     # opens the loopback server; go to Settings in the UI
+```
+
+To use environment variables instead:
+
+```sh
+cp .env.example .env
+```
+
+| Provider           | Where to get a key                                   | Variables                                | Notes                                            |
+| ------------------ | ---------------------------------------------------- | ---------------------------------------- | ------------------------------------------------ |
+| **Groq**           | <https://console.groq.com/keys> — free tier          | `GROQ_API_KEY`, `GROQ_MODEL`             | Default hosted route. One key serves all stages. |
+| **OpenRouter**     | <https://openrouter.ai/keys> — free tier             | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Use a `:free` model id to stay on the free tier. |
+| **Mistral**        | <https://console.mistral.ai/api-keys> — free tier    | `MISTRAL_API_KEY`, `MISTRAL_MODEL`       | Pay-as-you-go beyond the free allowance.         |
+| **Cerebras**       | <https://cloud.cerebras.ai> — free tier              | `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`     |                                                  |
+| **Hugging Face**   | <https://huggingface.co/settings/tokens> — free tier | `HF_TOKEN`, `HUGGINGFACE_MODEL`          | Inference providers routing.                     |
+| **Ollama** (local) | no key                                               | `OLLAMA_ENDPOINT`, `OLLAMA_MODEL`        | Local fallback; see below.                       |
+
+Every provider is rejected at registration unless it is on the free-tier /
+pay-as-you-go / local allowlist, and every model is rejected if its known total
+parameter count exceeds 80B.
+
+### 6. Local models with Ollama
+
+```sh
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve &                       # if not already running as a service
+ollama pull qwen2.5-coder:7b         # ~4.7 GB, fits 8 GB VRAM
+```
+
+`qwen2.5-coder:7b` is the default local route and runs comfortably within
+16 GB RAM / 8 GB VRAM. Verification and review stages deliberately avoid the
+local route when a hosted one is configured; see
+[docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md#4-verification-requires-evidence-and-never-degrades-to-a-weaker-model).
+
+### 7. Run
+
+```sh
+pnpm start        # desktop IDE
+pnpm tui          # terminal interface
+pnpm settings     # settings/server only
+```
+
+On a headless Linux box the Electron desktop needs an X or Wayland display. Use
+`pnpm settings` and open the printed URL in a browser instead.
+
 ## Desktop application
 
 Start the complete workbench as a native desktop window from the repository

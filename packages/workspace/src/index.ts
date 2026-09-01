@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  cp,
   lstat,
   mkdir,
   readFile,
@@ -86,11 +87,21 @@ export interface ReviewedFileChangeResult extends FileMutationResult {
 }
 
 export interface FileMutationRollbackSuccess {
-  status: "rolled_back";
+  /**
+   * `preserved` means the mutation created a file that did not exist before and
+   * the caller asked to keep it. Undoing a creation deletes the only copy of the
+   * work, so recovery keeps it and lets the corrective pass overwrite it.
+   */
+  status: "rolled_back" | "preserved";
   mutationId: string;
   path: string;
   operation: "write" | "delete";
   hash: string | null;
+}
+
+export interface RollbackOptions {
+  /** Keep files this mutation created instead of deleting them. */
+  preserveCreatedFiles?: boolean;
 }
 
 export interface FileMutationRollbackConflict {
@@ -161,6 +172,111 @@ export class WorkspaceFileService {
 
   async previewChange(change: FileChange): Promise<string> {
     return (await this.prepareChange(change)).diff;
+  }
+
+  /** Creates an empty file, failing if anything already occupies the path. */
+  async createEmptyFile(inputPath: string): Promise<string> {
+    const path = this.resolvePath(inputPath);
+    await this.assertNoSymlinkPath(path, inputPath);
+    if (await this.pathExists(path)) {
+      throw new Error(`Path already exists: ${inputPath}`);
+    }
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "", { encoding: "utf8", flag: "wx" });
+    return relative(this.root, path).replaceAll("\\", "/");
+  }
+
+  /** Creates a directory, failing if anything already occupies the path. */
+  async createDirectory(inputPath: string): Promise<string> {
+    const path = this.resolvePath(inputPath);
+    await this.assertNoSymlinkPath(path, inputPath);
+    if (await this.pathExists(path)) {
+      throw new Error(`Path already exists: ${inputPath}`);
+    }
+    await mkdir(path, { recursive: true });
+    return relative(this.root, path).replaceAll("\\", "/");
+  }
+
+  /** Renames or moves a file or directory inside the workspace. */
+  async renameEntry(fromPath: string, toPath: string): Promise<string> {
+    const source = this.resolvePath(fromPath);
+    const target = this.resolvePath(toPath);
+    await this.assertNoSymlinkPath(source, fromPath);
+    await this.assertNoSymlinkPath(target, toPath);
+    if (!(await this.pathExists(source))) {
+      throw new Error(`Path not found: ${fromPath}`);
+    }
+    if (await this.pathExists(target)) {
+      throw new Error(`Path already exists: ${toPath}`);
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await rename(source, target);
+    return relative(this.root, target).replaceAll("\\", "/");
+  }
+
+  /** Removes a file, or a directory and everything inside it. */
+  async removeEntry(inputPath: string): Promise<void> {
+    const path = this.resolvePath(inputPath);
+    if (path === resolve(this.root)) {
+      throw new Error("The workspace root cannot be deleted.");
+    }
+    await this.assertNoSymlinkPath(path, inputPath);
+    if (!(await this.pathExists(path))) {
+      throw new Error(`Path not found: ${inputPath}`);
+    }
+    await rm(path, { recursive: true, force: true });
+  }
+
+  /**
+   * Copies a file or directory, choosing a non-colliding name when the target
+   * is taken. Used by both Copy/Paste and Duplicate in the explorer.
+   */
+  async copyEntry(fromPath: string, toPath: string): Promise<string> {
+    const source = this.resolvePath(fromPath);
+    await this.assertNoSymlinkPath(source, fromPath);
+    if (!(await this.pathExists(source))) {
+      throw new Error(`Path not found: ${fromPath}`);
+    }
+    const target = await this.availablePath(toPath);
+    const resolvedTarget = this.resolvePath(target);
+    if (
+      resolvedTarget === source ||
+      resolvedTarget.startsWith(`${source}${sep}`)
+    ) {
+      throw new Error("A directory cannot be copied into itself.");
+    }
+    await this.assertNoSymlinkPath(resolvedTarget, target);
+    await mkdir(dirname(resolvedTarget), { recursive: true });
+    await cp(source, resolvedTarget, { recursive: true, errorOnExist: true });
+    return relative(this.root, resolvedTarget).replaceAll("\\", "/");
+  }
+
+  /** Appends " copy", " copy 2", … until the path is free, like Finder. */
+  async availablePath(inputPath: string): Promise<string> {
+    const path = this.resolvePath(inputPath);
+    if (!(await this.pathExists(path))) return inputPath;
+    const name = inputPath.split("/").at(-1) ?? inputPath;
+    const parent = inputPath.slice(0, inputPath.length - name.length);
+    const dot = name.lastIndexOf(".");
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    const extension = dot > 0 ? name.slice(dot) : "";
+    for (let index = 1; index < 1000; index += 1) {
+      const suffix = index === 1 ? " copy" : ` copy ${index}`;
+      const candidate = `${parent}${stem}${suffix}${extension}`;
+      if (!(await this.pathExists(this.resolvePath(candidate)))) {
+        return candidate;
+      }
+    }
+    throw new Error(`Could not find a free name for ${inputPath}.`);
+  }
+
+  private async pathExists(path: string): Promise<boolean> {
+    try {
+      await lstat(path);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async prepareChange(change: FileChange): Promise<PreparedFileChange> {
@@ -273,6 +389,7 @@ export class WorkspaceFileService {
 
   async rollbackMutation(
     mutation: FileMutationRecord,
+    options: RollbackOptions = {},
   ): Promise<FileMutationRollbackResult> {
     this.assertMutationRecord(mutation);
     const actualHash = await this.readOptionalHash(mutation.path);
@@ -290,7 +407,17 @@ export class WorkspaceFileService {
     const path = this.resolvePath(mutation.path);
     await this.assertNoSymlinkPath(path, mutation.path);
     if (mutation.before === null) {
+      if (options.preserveCreatedFiles) {
+        return {
+          status: "preserved",
+          mutationId: mutation.id,
+          path: mutation.path,
+          operation: mutation.operation,
+          hash: mutation.afterHash,
+        };
+      }
       await unlink(path);
+      await this.removeEmptyParents(path);
       return {
         status: "rolled_back",
         mutationId: mutation.id,
@@ -309,6 +436,26 @@ export class WorkspaceFileService {
       operation: mutation.operation,
       hash: mutation.before.hash,
     };
+  }
+
+  /**
+   * Removes directories that a rolled-back creation left behind, stopping at the
+   * workspace root and at the first directory that still has contents.
+   */
+  private async removeEmptyParents(path: string): Promise<void> {
+    let directory = dirname(path);
+    while (directory.startsWith(this.root) && directory !== this.root) {
+      try {
+        const entries = await readdir(directory);
+        if (entries.length > 0) return;
+        // fs.rm on a directory requires the recursive flag; the emptiness check
+        // above is what keeps this from removing anything the user still has.
+        await rm(directory, { recursive: true, force: true });
+      } catch {
+        return;
+      }
+      directory = dirname(directory);
+    }
   }
 
   private async atomicWrite(

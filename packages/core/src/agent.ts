@@ -16,6 +16,7 @@ import {
   type LanguageModel,
   type ModelRequest,
   type ModelResponse,
+  type ModelRoutePolicy,
 } from "./model.js";
 import { ToolRegistry } from "./tool-registry.js";
 import type {
@@ -51,6 +52,20 @@ export interface AgentRunnerOptions {
   signal?: AbortSignal;
   beforeModelRequest?: () => void;
   enforceWorkflowCompletion?: boolean;
+  /**
+   * End the agent node once this many distinct file mutations have succeeded.
+   * Undefined or zero lets the node run to its natural completion. A count
+   * above one keeps greenfield runs alive for multi-artifact requests such as
+   * "a calculator in five languages".
+   */
+  stopAfterMutationCount?: number;
+  /** Reject obvious placeholder file content before approval or execution. */
+  rejectIncompleteMutations?: boolean;
+  /** Original task text used for lightweight, request-derived artifact checks. */
+  mutationObjective?: string;
+  workflowMode?: "mutation" | "verification";
+  /** Routing constraints applied to every model call this runner makes. */
+  routePolicy?: ModelRoutePolicy;
   compaction?: false | ContextCompactionOptions;
   onEvent?: (event: AgentEvent) => void | Promise<void>;
 }
@@ -80,15 +95,17 @@ export class AgentRunner {
   async run(messages: ConversationMessage[]): Promise<AgentRunResult> {
     const cachedToolResults = new Map<string, CachedToolResult>();
     const executedToolNames: string[] = [];
+    const successfulMutationLabels: string[] = [];
     let workspaceRevision = 0;
     let duplicateCallCount = 0;
     let toolCallCount = 0;
     let hadNoOpMutation = false;
+    let truncatedResponses = 0;
     let lastResponseText = "";
     const workflow =
       this.options.enforceWorkflowCompletion === false
         ? { followUp: () => undefined }
-        : createWorkflowState(messages);
+        : createWorkflowState(messages, this.options.workflowMode);
 
     for (let step = 0; step < this.maxSteps; step += 1) {
       await this.compactContextIfNecessary(messages, "token_threshold");
@@ -96,6 +113,30 @@ export class AgentRunner {
       const response = await this.requestModelWithContextRecovery(messages);
       messages.push(response.message);
       lastResponseText = response.text;
+
+      if (isTruncatedResponse(response) && response.toolCalls.length > 0) {
+        truncatedResponses += 1;
+        await this.emit({
+          type: "agent_output_truncated",
+          attempt: truncatedResponses,
+          finishReason: response.finishReason ?? "length",
+        });
+        if (truncatedResponses > MAX_TRUNCATED_RETRIES) {
+          const text =
+            "The model's output was cut off by the token limit on every attempt, " +
+            "so no complete file could be produced. Nothing was written.";
+          await this.emit({ type: "agent_safety_limit", text });
+          return { text, messages };
+        }
+        messages.push({
+          role: "user",
+          content:
+            "Your previous response was cut off by the output token limit, so its file content was incomplete and was discarded. " +
+            "Nothing was written. Produce the file again in a single complete response. If it cannot fit, create a smaller, " +
+            "genuinely complete file rather than a truncated one.",
+        });
+        continue;
+      }
 
       if (response.toolCalls.length === 0) {
         const followUp = workflow.followUp(executedToolNames, hadNoOpMutation);
@@ -154,6 +195,18 @@ export class AgentRunner {
         const result = await this.executeTool(call);
         if (!result.isError) executedToolNames.push(call.name);
         if (
+          !result.isError &&
+          result.changed === true &&
+          ["apply_patch", "write_file", "create_file", "delete_file"].includes(
+            call.name,
+          )
+        ) {
+          const paths = result.changedFiles?.map((file) => file.path) ?? [];
+          successfulMutationLabels.push(
+            ...(paths.length > 0 ? paths : [call.name]),
+          );
+        }
+        if (
           result.changed === false &&
           ["apply_patch", "write_file", "create_file", "delete_file"].includes(
             call.name,
@@ -171,6 +224,17 @@ export class AgentRunner {
           result,
         });
         messages.push(this.toToolMessage(call, result));
+      }
+
+      const stopAfterMutations = this.options.stopAfterMutationCount ?? 0;
+      if (
+        stopAfterMutations > 0 &&
+        new Set(successfulMutationLabels).size >= stopAfterMutations
+      ) {
+        const changed = [...new Set(successfulMutationLabels)].join(", ");
+        const text = `Workspace mutation completed: ${changed}.`;
+        await this.emit({ type: "agent_completed", text });
+        return { text, messages };
       }
     }
 
@@ -399,6 +463,9 @@ export class AgentRunner {
       messages,
       tools: this.tools.list(),
       signal: this.options.signal,
+      ...(this.options.routePolicy
+        ? { routePolicy: this.options.routePolicy }
+        : {}),
     };
   }
 
@@ -451,6 +518,35 @@ export class AgentRunner {
         output: `Invalid tool arguments: ${validationErrors.join("; ")}`,
         isError: true,
       };
+    }
+
+    // Truncation is rejected for every mutation, not just greenfield ones:
+    // writing half a file is never the intended result, whatever the caller
+    // asked for. The richer objective checks stay opt-in.
+    const truncated = findTruncatedMutation(call);
+    if (truncated) {
+      return {
+        output:
+          `Truncated file mutation rejected before approval: content ${truncated}. ` +
+          "Nothing was written. Send the complete file in one response.",
+        isError: true,
+      };
+    }
+
+    if (this.options.rejectIncompleteMutations) {
+      const incomplete = findIncompleteMutation(
+        call,
+        this.options.mutationObjective,
+      );
+      if (incomplete) {
+        return {
+          output:
+            `Incomplete file mutation rejected before approval: ${incomplete}. ` +
+            "Replace the placeholder with the full working implementation and call the file tool again.",
+          isError: true,
+          changed: false,
+        };
+      }
     }
 
     let approval: ToolExecutionContext["approval"];
@@ -538,15 +634,137 @@ export class AgentRunner {
       toolCallId: call.id,
       toolName: call.name,
       content: `${result.output}${suffix}${review}`,
-      metadata:
-        result.changedFiles || result.contextArtifacts
-          ? {
-              changedFiles: result.changedFiles,
-              contextArtifacts: result.contextArtifacts,
-            }
-          : undefined,
+      metadata: {
+        isError: result.isError === true,
+        changed: result.changed,
+        exitCode: result.exitCode,
+        changedFiles: result.changedFiles,
+        contextArtifacts: result.contextArtifacts,
+      },
     };
   }
+}
+
+const MAX_TRUNCATED_RETRIES = 2;
+
+/** True when the provider stopped generating because it ran out of tokens. */
+function isTruncatedResponse(response: ModelResponse): boolean {
+  const reason = response.finishReason?.toLowerCase();
+  return reason === "length" || reason === "max_tokens";
+}
+
+/**
+ * Detects content that simply stops mid-structure.
+ *
+ * `finishReason` is the authoritative truncation signal, but not every provider
+ * reports it, and a tool call assembled from a fallback JSON parse can lose it
+ * entirely. Unbalanced delimiters catch the same failure from the content alone:
+ * a stylesheet that ends inside a rule, or a document with no closing tag, is
+ * not something a model produces deliberately.
+ */
+function findUnterminatedContent(content: string): string | undefined {
+  const trimmed = content.trimEnd();
+  if (trimmed.length === 0) return "is empty";
+
+  const stripped = trimmed
+    .replace(/\/\*[\s\S]*?\*\//gu, "")
+    .replace(/<!--[\s\S]*?-->/gu, "")
+    .replace(/(["'`])(?:\\.|(?!\1)[^\\\n])*\1/gu, '""');
+  for (const [open, close, label] of [
+    ["{", "}", "braces"],
+    ["[", "]", "brackets"],
+    ["(", ")", "parentheses"],
+  ] as const) {
+    const opened = stripped.split(open).length - 1;
+    const closed = stripped.split(close).length - 1;
+    if (opened > closed) {
+      return `stops mid-structure with ${opened - closed} unclosed ${label}, so the content was cut off`;
+    }
+  }
+
+  if (/<html[\s>]/iu.test(trimmed) && !/<\/html\s*>/iu.test(trimmed)) {
+    return "is missing its closing </html> tag, so the document was cut off";
+  }
+  if (/<style[\s>]/iu.test(trimmed) && !/<\/style\s*>/iu.test(trimmed)) {
+    return "is missing its closing </style> tag, so the stylesheet was cut off";
+  }
+  if (/<script[\s>]/iu.test(trimmed) && !/<\/script\s*>/iu.test(trimmed)) {
+    return "is missing its closing </script> tag, so the script was cut off";
+  }
+  return undefined;
+}
+
+/** Rejects a mutation whose content simply stops part-way through. */
+function findTruncatedMutation(call: ToolCall): string | undefined {
+  const content = mutationContent(call);
+  return content === undefined ? undefined : findUnterminatedContent(content);
+}
+
+function mutationContent(call: ToolCall): string | undefined {
+  if (!["create_file", "write_file", "apply_patch"].includes(call.name)) {
+    return undefined;
+  }
+  return ["content", "newContent"]
+    .map((key) => call.arguments[key])
+    .find((value): value is string => typeof value === "string");
+}
+
+function findIncompleteMutation(
+  call: ToolCall,
+  objective = "",
+): string | undefined {
+  const content = mutationContent(call);
+  if (!content) return undefined;
+
+  const patterns: Array<[RegExp, string]> = [
+    [/\b(?:TODO|FIXME|TBD)\b/iu, "contains a TODO/FIXME marker"],
+    [
+      /(?:\/\/|\/\*|#|<!--)[^\n]{0,80}\.\.\.[^\n]{0,100}\b(?:add|code|complete|continue|generate|implement|insert|remaining|rest|update)\b/iu,
+      "contains an ellipsis placeholder instead of implementation",
+    ],
+    [
+      /\b(?:code|implementation|logic|content)\s+(?:goes|go)\s+here\b/iu,
+      "contains a placeholder phrase",
+    ],
+    [
+      /<!--\s*(?:[A-Z][A-Z0-9_]*_(?:HERE|IMPORT|LINK|SCRIPT)|(?:TODO|PLACEHOLDER))\s*-->/u,
+      "contains an unresolved template marker",
+    ],
+  ];
+  for (const [pattern, reason] of patterns) {
+    if (pattern.test(content)) return reason;
+  }
+
+  const requestedSliders = objective.match(
+    /\b(\d+)\s+(?:range\s+)?sliders?\b/iu,
+  );
+  if (requestedSliders) {
+    const expected = Number.parseInt(requestedSliders[1] ?? "0", 10);
+    const actual = [
+      ...content.matchAll(/<input\b[^>]*\btype\s*=\s*["']range["'][^>]*>/giu),
+    ].length;
+    if (expected > 0 && actual < expected) {
+      return `objective requires ${expected} sliders but the artifact contains ${actual}`;
+    }
+  }
+
+  if (
+    /\b3d\b/iu.test(objective) &&
+    /<!doctype\s+html|<html\b/iu.test(content)
+  ) {
+    const uses3dLibrary =
+      /\bTHREE\.|three(?:\.min)?\.js|<a-scene\b|\bBABYLON\.|babylon(?:\.min)?\.js/iu.test(
+        content,
+      );
+    const usesWebGl = /getContext\(\s*["']webgl2?["']/iu.test(content);
+    const usesCss3d =
+      /transform-style\s*:\s*preserve-3d/iu.test(content) &&
+      /translate(?:Z|3d)\s*\(/iu.test(content);
+    if (!uses3dLibrary && !usesWebGl && !usesCss3d) {
+      return "objective requires real 3D depth, but the HTML has no WebGL/3D library or CSS preserve-3d plus depth translation";
+    }
+  }
+  return undefined;
 }
 
 interface CachedToolResult {
@@ -826,6 +1044,7 @@ interface WorkflowState {
 
 function createWorkflowState(
   messages: readonly ConversationMessage[],
+  mode?: "mutation" | "verification",
 ): WorkflowState {
   const request = [...messages]
     .reverse()
@@ -837,18 +1056,23 @@ function createWorkflowState(
     return { followUp: () => undefined };
   }
 
-  const requestsPatch = /apply_patch|patch/i.test(request);
+  const requestsPatch =
+    mode !== "verification" && /apply_patch|patch/i.test(request);
   const requestsMutation =
-    requestsPatch ||
-    /\b(add|create|delete|remove|modify|change|edit|write|overwrite)\b/i.test(
-      request,
-    );
+    mode !== "verification" &&
+    (requestsPatch ||
+      /\b(add|create|delete|remove|modify|change|edit|write|overwrite)\b/i.test(
+        request,
+      ));
   const requestsReadAfterMutation =
     /read (the )?file again|verify (the )?(file|change)|re-?read/i.test(
       request,
     );
   const requestsVerification =
+    mode === "verification" ||
     /\b(build|compile|format|syntax|typecheck|test|verify)\b/i.test(request);
+  const allowsStaticVerification =
+    /\b(?:standalone|artifact|html|css|markdown)\b/i.test(request);
 
   if (!requestsMutation && !requestsVerification) {
     return { followUp: () => undefined };
@@ -876,11 +1100,13 @@ function createWorkflowState(
       const hasReadAfterMutation =
         mutationIndex >= 0 &&
         executedTools.slice(mutationIndex + 1).includes("read_file");
-      const hasVerification = executedTools.some((tool) =>
-        ["compile_code", "syntax_check", "format_code", "run_code"].includes(
-          tool,
-        ),
-      );
+      const hasVerification =
+        executedTools.some((tool) =>
+          ["compile_code", "syntax_check", "format_code", "run_code"].includes(
+            tool,
+          ),
+        ) ||
+        (allowsStaticVerification && executedTools.includes("read_file"));
 
       if (requestsPatch && !hasPatch) {
         return boundedFollowUp(
@@ -907,7 +1133,9 @@ function createWorkflowState(
       if (requestsVerification && !hasVerification) {
         return boundedFollowUp(
           "verification",
-          `The requested edit and verification are not complete. Do not answer with prose or ask the user to run a command. Call the appropriate verification tool now, then report its actual result: ${request}`,
+          mode === "verification"
+            ? `Verification has not inspected the actual workspace artifact yet. Do not answer with a plan or ask the user to run a command. Call read_file for the changed artifact now, use another available verification tool only when relevant, then report the evidence from those tool results: ${request}`
+            : `The requested edit and verification are not complete. Do not answer with prose or ask the user to run a command. Call the appropriate verification tool now, then report its actual result: ${request}`,
         );
       }
       return undefined;

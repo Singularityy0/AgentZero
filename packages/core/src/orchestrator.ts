@@ -41,6 +41,8 @@ export interface AgentWorkResult {
   output?: string;
   progressKey?: string;
   passed?: boolean;
+  /** False when repeating the same worker input cannot make progress. */
+  retryable?: boolean;
 }
 
 export interface StepResult extends AgentWorkResult {
@@ -356,6 +358,10 @@ export class TaskOrchestrator {
       if (failureKey) failureFingerprints[step.id] = failureKey;
       state.updatedAt = Date.now();
       await this.save(state);
+      if (result.retryable === false) {
+        await this.fail(state, `Step "${step.id}" failed: ${reason}`);
+        return undefined;
+      }
       if (attempt < this.options.maxAttemptsPerStep) {
         if (this.options.recoverStep) {
           state.pendingRecovery = {

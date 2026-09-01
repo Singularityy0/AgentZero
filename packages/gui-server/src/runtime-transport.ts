@@ -7,11 +7,14 @@ import {
   PROVIDER_FIELD_SPECS,
 } from "@agentic-runtime/gateway";
 import {
+  CONVERSATION_AGENT_ID,
+  DEFAULT_RUNTIME_LIMITS,
   createHeadlessRuntime,
   DEFAULT_AGENT_ID,
   type HeadlessRuntimeService,
   type RuntimeApprovalRequest,
   type RuntimeEvent,
+  type RuntimeTaskSpend,
   type RuntimeModelRouteSelection,
   type RuntimeModelSelection,
   type RuntimeProviderId,
@@ -132,6 +135,59 @@ export class RuntimeTransport {
       agentId: input.agentId?.trim() || DEFAULT_AGENT_ID,
       prompt: input.prompt,
     });
+    this.activeTasks.set(handle.taskId, handle);
+    void handle.completion
+      .catch(() => undefined)
+      .finally(() => this.activeTasks.delete(handle.taskId));
+    return handle;
+  }
+
+  /**
+   * Answers one question with zero prior context and without mutating the
+   * session transcript, so the user returns to the ongoing task unchanged.
+   */
+  async askIsolatedQuestion(input: {
+    sessionId: string;
+    agentId?: string;
+    prompt: string;
+  }): Promise<string> {
+    if (this.selectedProvider() === "ollama") {
+      await this.ensureOllamaAvailable();
+    }
+    const runtime = this.ensureRuntime();
+    const handle = runtime.startIsolatedQuestion({
+      sessionId: input.sessionId,
+      agentId: input.agentId?.trim() || CONVERSATION_AGENT_ID,
+      prompt: input.prompt,
+    });
+    const result = await handle.completion;
+    return result.text;
+  }
+
+  /** Dollars and tokens billed to a task so far, zeroed when it never ran. */
+  taskSpend(taskId: string): RuntimeTaskSpend {
+    return (
+      this.runtime?.taskSpend(taskId) ?? {
+        taskId,
+        costUsd: 0,
+        budgetUsd: DEFAULT_RUNTIME_LIMITS.maxTaskCostUsd,
+        inputTokens: 0,
+        outputTokens: 0,
+        modelCalls: 0,
+      }
+    );
+  }
+
+  /**
+   * Continues an interrupted task from its last durable checkpoint instead of
+   * restarting it. Completed pipeline stages are skipped, so a task that
+   * survived a crash or a closed IDE resumes rather than repeating work.
+   */
+  async resumeTask(taskId: string): Promise<RuntimeTaskHandle> {
+    if (this.selectedProvider() === "ollama") {
+      await this.ensureOllamaAvailable();
+    }
+    const handle = this.ensureRuntime().resumeTask({ taskId });
     this.activeTasks.set(handle.taskId, handle);
     void handle.completion
       .catch(() => undefined)

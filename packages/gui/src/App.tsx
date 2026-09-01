@@ -52,6 +52,27 @@ self.MonacoEnvironment = {
 };
 
 type Section = "explorer" | "search" | "agents" | "dashboard" | "settings";
+
+/** An inclusive 1-based line span selected in the editor or named by a tag. */
+interface LineRange {
+  startLine: number;
+  endLine: number;
+}
+
+/** A jump request from a clickable file tag; `nonce` re-fires repeat clicks. */
+interface RevealTarget extends Partial<LineRange> {
+  path: string;
+  startLine: number;
+  nonce: number;
+}
+
+/** One `/bytheway` exchange, held in the panel and never in session context. */
+interface IsolatedExchange {
+  id: string;
+  question: string;
+  answer?: string;
+  error?: string;
+}
 type BottomTab = "problems" | "output" | "terminal";
 
 interface ProjectView {
@@ -124,6 +145,15 @@ interface AgentView {
   enabled: boolean;
 }
 
+interface TaskSpendView {
+  taskId: string;
+  costUsd: number;
+  budgetUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  modelCalls: number;
+}
+
 interface TraceSpan {
   traceId: string;
   spanId: string;
@@ -184,6 +214,24 @@ interface RuntimeRouteView {
   selected: boolean;
 }
 
+interface ProposedHunk {
+  id: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  original: string;
+  replacement: string;
+}
+
+interface FileDiffPreview {
+  kind: "file_diff";
+  path: string;
+  baseHash: string | null;
+  proposedHash: string;
+  text: string;
+  hunks: ProposedHunk[];
+}
+
 interface RuntimeApprovalView {
   requestId: string;
   sessionId: string;
@@ -191,6 +239,14 @@ interface RuntimeApprovalView {
   agentId: string;
   call: { id: string; name: string; arguments: Record<string, unknown> };
   preview?: unknown;
+}
+
+/** Narrows an approval preview to a reviewable, hunk-level file diff. */
+function asFileDiff(preview: unknown): FileDiffPreview | undefined {
+  const candidate = preview as FileDiffPreview | undefined;
+  return candidate?.kind === "file_diff" && Array.isArray(candidate.hunks)
+    ? candidate
+    : undefined;
 }
 
 interface RuntimeStatusView {
@@ -390,14 +446,71 @@ function IconButton({
   );
 }
 
+/**
+ * Matches a workspace-relative path, optionally suffixed with `:line` or
+ * `:start-end`. The extension allow-list keeps ordinary prose ("v1.2", "e.g.")
+ * from being rendered as a file tag.
+ */
+const FILE_REFERENCE_PATTERN =
+  /((?:[\w.-]+\/)*[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|scss|html|htm|py|rs|go|java|rb|php|c|h|cpp|hpp|cs|sh|yml|yaml|toml|sql|txt|ini|env))(?::(\d+)(?:-(\d+))?)?/gu;
+
+/**
+ * Renders chat text with every file reference turned into a button that opens
+ * the file and scrolls to the referenced lines, satisfying clickable tagging in
+ * the output chat as well as the input box.
+ */
+function MessageBody({
+  text,
+  onOpenReference,
+}: {
+  text: string;
+  onOpenReference: (path: string, range?: LineRange) => void;
+}) {
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  FILE_REFERENCE_PATTERN.lastIndex = 0;
+  for (
+    let match = FILE_REFERENCE_PATTERN.exec(text);
+    match;
+    match = FILE_REFERENCE_PATTERN.exec(text)
+  ) {
+    const [tag, path, startLine, endLine] = match;
+    if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
+    const range = startLine
+      ? {
+          startLine: Number(startLine),
+          endLine: Number(endLine ?? startLine),
+        }
+      : undefined;
+    nodes.push(
+      <button
+        key={`${match.index}-${tag}`}
+        type="button"
+        onClick={() => onOpenReference(path!, range)}
+        className="rounded-sm bg-indigo-400/10 px-1 font-mono text-[10px] text-indigo-300 hover:bg-indigo-400/20"
+        title={`Open ${tag}`}
+      >
+        {tag}
+      </button>,
+    );
+    cursor = match.index + tag.length;
+  }
+  nodes.push(text.slice(cursor));
+  return <div className="whitespace-pre-wrap">{nodes}</div>;
+}
+
 function MonacoPane({
   file,
+  reveal,
   onPosition,
+  onSelection,
   onChange,
   onSave,
 }: {
   file?: OpenFileView;
+  reveal?: RevealTarget;
   onPosition: (line: number, column: number) => void;
+  onSelection: (range?: LineRange) => void;
   onChange: (content: string) => void;
   onSave: () => void;
 }) {
@@ -405,14 +518,16 @@ function MonacoPane({
   const editor = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const models = useRef(new Map<string, monaco.editor.ITextModel>());
   const onPositionRef = useRef(onPosition);
+  const onSelectionRef = useRef(onSelection);
   const onChangeRef = useRef(onChange);
   const onSaveRef = useRef(onSave);
 
   useEffect(() => {
     onPositionRef.current = onPosition;
+    onSelectionRef.current = onSelection;
     onChangeRef.current = onChange;
     onSaveRef.current = onSave;
-  }, [onChange, onPosition, onSave]);
+  }, [onChange, onPosition, onSelection, onSave]);
 
   useEffect(() => {
     if (!host.current) return;
@@ -433,6 +548,19 @@ function MonacoPane({
     const subscription = editor.current.onDidChangeCursorPosition((event) =>
       onPositionRef.current(event.position.lineNumber, event.position.column),
     );
+    const selectionSubscription = editor.current.onDidChangeCursorSelection(
+      (event) => {
+        const { selection } = event;
+        onSelectionRef.current(
+          selection.isEmpty()
+            ? undefined
+            : {
+                startLine: selection.startLineNumber,
+                endLine: selection.endLineNumber,
+              },
+        );
+      },
+    );
     const changeSubscription = editor.current.onDidChangeModelContent(() => {
       onChangeRef.current(editor.current?.getValue() ?? "");
     });
@@ -442,6 +570,7 @@ function MonacoPane({
     const currentModels = models.current;
     return () => {
       subscription.dispose();
+      selectionSubscription.dispose();
       changeSubscription.dispose();
       editor.current?.dispose();
       currentModels.forEach((model) => model.dispose());
@@ -463,6 +592,20 @@ function MonacoPane({
     if (model.getValue() !== file.content) model.setValue(file.content);
     editor.current.setModel(model);
   }, [file]);
+
+  // Scroll to and highlight a line the user clicked in the chat transcript.
+  useEffect(() => {
+    if (!reveal || !editor.current || reveal.path !== file?.path) return;
+    const endLine = reveal.endLine ?? reveal.startLine;
+    editor.current.revealLineNearTop(reveal.startLine);
+    editor.current.setSelection({
+      startLineNumber: reveal.startLine,
+      startColumn: 1,
+      endLineNumber: endLine,
+      endColumn: Number.MAX_SAFE_INTEGER,
+    });
+    editor.current.focus();
+  }, [file?.path, reveal]);
 
   return <div ref={host} className="h-full min-h-0 w-full bg-canvas" />;
 }
@@ -489,6 +632,16 @@ export function App() {
   const [pendingApproval, setPendingApproval] = useState<RuntimeApprovalView>();
   const [composerText, setComposerText] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [selection, setSelection] = useState<LineRange>();
+  const [reveal, setReveal] = useState<RevealTarget>();
+  const [isolated, setIsolated] = useState<IsolatedExchange[]>([]);
+  const [fileClipboard, setFileClipboard] = useState<{
+    path: string;
+    mode: "copy" | "cut";
+  }>();
+  const submissionInFlight = useRef(false);
+  const openFilesRef = useRef<OpenFileView[]>([]);
+  const folderPathRef = useRef(".");
 
   const appendThinking = useCallback((taskId: string, detail: string) => {
     setLiveTurns((current) =>
@@ -531,6 +684,14 @@ export function App() {
     }
   }, []);
 
+  useEffect(() => {
+    openFilesRef.current = openFiles;
+  }, [openFiles]);
+
+  useEffect(() => {
+    folderPathRef.current = folderPath;
+  }, [folderPath]);
+
   const loadFolder = useCallback(async (path: string) => {
     try {
       const body = await requestJson<{ entries: FileEntry[] }>(
@@ -542,6 +703,198 @@ export function App() {
       setNotice(error instanceof Error ? error.message : String(error));
     }
   }, []);
+
+  /** Creates a file or folder under the folder currently shown in the tree. */
+  const createEntry = async (type: "file" | "directory") => {
+    const name = window.prompt(
+      type === "directory" ? "New folder name" : "New file name",
+    );
+    if (!name?.trim()) return;
+    const target =
+      folderPath === "." ? name.trim() : `${folderPath}/${name.trim()}`;
+    try {
+      const body = await requestJson<{ path: string }>("/api/files/entry", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: target, type }),
+      });
+      await loadFolder(folderPath);
+      setNotice(`Created ${body.path}`);
+      if (type === "file") await openFile(body.path);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const renameEntry = async (entry: FileEntry) => {
+    const name = window.prompt(`Rename ${entry.name} to`, entry.name);
+    if (!name?.trim() || name.trim() === entry.name) return;
+    const parent = entry.path.split("/").slice(0, -1).join("/");
+    const target = parent ? `${parent}/${name.trim()}` : name.trim();
+    try {
+      const body = await requestJson<{ path: string }>("/api/files/entry", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: entry.path, to: target }),
+      });
+      // Keep an open editor tab pointing at the file the user still sees.
+      setOpenFiles((current) =>
+        current.map((file) =>
+          file.path === entry.path ? { ...file, path: body.path } : file,
+        ),
+      );
+      setActivePath((current) =>
+        current === entry.path ? body.path : current,
+      );
+      await loadFolder(folderPath);
+      setNotice(`Renamed to ${body.path}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  /**
+   * Writes to the system clipboard, falling back to a hidden textarea because
+   * the async Clipboard API is unavailable outside a secure context.
+   */
+  const copyText = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const element = document.createElement("textarea");
+      element.value = value;
+      element.style.position = "fixed";
+      element.style.opacity = "0";
+      document.body.append(element);
+      element.select();
+      document.execCommand("copy");
+      element.remove();
+    }
+    setNotice(`Copied ${label}: ${value}`);
+  };
+
+  const copyEntryTo = async (from: string, to: string, verb: string) => {
+    try {
+      const body = await requestJson<{ path: string }>("/api/files/copy", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from, to }),
+      });
+      await loadFolder(folderPath);
+      setNotice(`${verb} to ${body.path}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const pasteClipboardEntry = async (targetFolder: string) => {
+    const source = fileClipboard;
+    if (!source) return;
+    const name = source.path.split("/").at(-1) ?? source.path;
+    const destination = targetFolder === "." ? name : `${targetFolder}/${name}`;
+    if (source.mode === "cut") {
+      try {
+        const body = await requestJson<{ path: string }>("/api/files/entry", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ from: source.path, to: destination }),
+        });
+        setFileClipboard(undefined);
+        await loadFolder(folderPath);
+        setNotice(`Moved to ${body.path}`);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    await copyEntryTo(source.path, destination, "Pasted");
+  };
+
+  const deleteEntry = async (entry: FileEntry) => {
+    const confirmed = window.confirm(
+      entry.type === "directory"
+        ? `Delete the folder ${entry.name} and everything inside it? This cannot be undone.`
+        : `Delete ${entry.name}? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    try {
+      await requestJson(
+        `/api/files/entry?path=${encodeURIComponent(entry.path)}`,
+        { method: "DELETE" },
+      );
+      setOpenFiles((current) =>
+        current.filter(
+          (file) =>
+            file.path !== entry.path && !file.path.startsWith(`${entry.path}/`),
+        ),
+      );
+      setActivePath((current) =>
+        current === entry.path || current?.startsWith(`${entry.path}/`)
+          ? undefined
+          : current,
+      );
+      await loadFolder(folderPath);
+      setNotice(`Deleted ${entry.path}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  /**
+   * Reloads a file that changed on disk, but only when the editor copy is
+   * clean. Silently replacing unsaved edits with the agent's version would lose
+   * the user's work, so a dirty buffer is left alone and flagged instead.
+   */
+  const syncChangedFiles = useCallback(async (changed: readonly string[]) => {
+    const paths = new Set(changed);
+    const targets = openFilesRef.current.filter((file) => paths.has(file.path));
+    for (const file of targets) {
+      if (file.content !== file.savedContent) {
+        setNotice(
+          `${file.path} changed on disk; your unsaved edits were kept. Close the tab to load the new version.`,
+        );
+        continue;
+      }
+      try {
+        const body = await requestJson<{ content: string; hash: string }>(
+          `/api/files/content?path=${encodeURIComponent(file.path)}`,
+        );
+        setOpenFiles((current) =>
+          current.map((candidate) =>
+            candidate.path === file.path
+              ? {
+                  ...candidate,
+                  content: body.content,
+                  savedContent: body.content,
+                  hash: body.hash,
+                }
+              : candidate,
+          ),
+        );
+      } catch {
+        // The file was deleted or moved; the explorer refresh below reflects it.
+      }
+    }
+  }, []);
+
+  // Live workspace updates. Without this the tree only reflects agent writes
+  // after the folder is reopened, which makes the IDE feel disconnected from
+  // the work the agent is doing in it.
+  useEffect(() => {
+    const source = new EventSource("/api/workspace/events");
+    source.onmessage = (message) => {
+      try {
+        const change = JSON.parse(message.data) as { paths?: string[] };
+        if (!Array.isArray(change.paths) || change.paths.length === 0) return;
+        void loadFolder(folderPathRef.current);
+        void syncChangedFiles(change.paths);
+      } catch {
+        // Ignore malformed frames; the next change re-synchronises the tree.
+      }
+    };
+    source.onerror = () => undefined;
+    return () => source.close();
+  }, [loadFolder, syncChangedFiles]);
 
   useEffect(() => {
     void refreshWorkbench();
@@ -829,22 +1182,69 @@ export function App() {
     });
   };
 
-  const addActiveFileToContext = async () => {
-    if (!activePath) return;
+  /**
+   * Pins a whole file or a single selected block to the session context. The
+   * range is optional so the same call serves the "add file" button, the "add
+   * selection" button, and an @-mention picked in the composer.
+   */
+  const addToContext = async (path: string, range?: LineRange) => {
     try {
       const sessionId = selectedSessionId ?? (await createSession());
       await requestJson("/api/context", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sessionId,
-          path: activePath,
-        }),
+        body: JSON.stringify({ sessionId, path, ...range }),
       });
       await loadContext(sessionId);
-      setNotice(`Pinned ${activePath} to session context`);
+      setNotice(
+        range
+          ? `Pinned ${path}:${range.startLine}-${range.endLine} to session context`
+          : `Pinned ${path} to session context`,
+      );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  /** Opens a file tagged in the chat transcript and scrolls to its lines. */
+  const openReference = async (path: string, range?: LineRange) => {
+    await openFile(path);
+    setReveal({
+      path,
+      startLine: range?.startLine ?? 1,
+      ...(range?.endLine === undefined ? {} : { endLine: range.endLine }),
+      nonce: Date.now(),
+    });
+  };
+
+  /**
+   * Runs one question with no prior context and no transcript mutation, then
+   * leaves the ongoing task exactly as it was.
+   */
+  const askIsolated = async (question: string) => {
+    const id = `bytheway-${Date.now()}`;
+    setIsolated((current) => [...current, { id, question }]);
+    try {
+      const sessionId = selectedSessionId ?? (await createSession());
+      const body = await requestJson<{ text: string }>("/api/bytheway", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, prompt: question }),
+      });
+      setIsolated((current) =>
+        current.map((item) =>
+          item.id === id ? { ...item, answer: body.text } : item,
+        ),
+      );
+      setNotice("Answered an isolated /bytheway question");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setIsolated((current) =>
+        current.map((item) =>
+          item.id === id ? { ...item, error: message } : item,
+        ),
+      );
+      setNotice(message);
     }
   };
 
@@ -871,7 +1271,26 @@ export function App() {
 
   const startTask = async () => {
     const prompt = composerText.trim();
-    if (!prompt || submitting) return;
+    if (!prompt || submitting || submissionInFlight.current) return;
+    const isolatedQuestion = /^\/bytheway\b\s*(.*)$/su.exec(prompt);
+    if (isolatedQuestion) {
+      const question = (isolatedQuestion[1] ?? "").trim();
+      if (!question) {
+        setNotice("Usage: /bytheway <isolated question>");
+        return;
+      }
+      setComposerText("");
+      submissionInFlight.current = true;
+      setSubmitting(true);
+      try {
+        await askIsolated(question);
+      } finally {
+        submissionInFlight.current = false;
+        setSubmitting(false);
+      }
+      return;
+    }
+    submissionInFlight.current = true;
     setSubmitting(true);
     try {
       const sessionId = selectedSessionId ?? (await createSession());
@@ -910,7 +1329,37 @@ export function App() {
       setNotice(message);
       setRuntimeError(message);
     } finally {
+      submissionInFlight.current = false;
       setSubmitting(false);
+    }
+  };
+
+  /** Continues an interrupted task from its last durable checkpoint. */
+  const resumeTask = async (task: TaskView) => {
+    try {
+      const body = await requestJson<{ sessionId: string; taskId: string }>(
+        `/api/tasks/${encodeURIComponent(task.id)}/resume`,
+        { method: "POST" },
+      );
+      setSelectedSessionId(body.sessionId);
+      setLiveTurns((current) =>
+        current.some((turn) => turn.taskId === body.taskId)
+          ? current
+          : [
+              ...current,
+              {
+                taskId: body.taskId,
+                sessionId: body.sessionId,
+                prompt: task.prompt,
+                thinking: [],
+                status: "running",
+              },
+            ],
+      );
+      setNotice("Resumed the task from its last saved stage");
+      await loadRuntimeStatus();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -925,7 +1374,15 @@ export function App() {
     }
   };
 
-  const resolveApproval = async (approved: boolean) => {
+  /**
+   * Resolves an approval. A boolean is the all-or-nothing answer; a hunk split
+   * accepts part of a diff and returns the rest to the agent so it can continue
+   * the task around what was rejected.
+   */
+  const resolveApproval = async (
+    decision:
+      boolean | { acceptedHunkIds: string[]; rejectedHunkIds: string[] },
+  ) => {
     if (!pendingApproval) return;
     try {
       await requestJson(
@@ -933,11 +1390,21 @@ export function App() {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ approved }),
+          body: JSON.stringify(
+            typeof decision === "boolean" ? { approved: decision } : decision,
+          ),
         },
       );
       setPendingApproval(undefined);
-      setNotice(approved ? "Tool action approved" : "Tool action denied");
+      setNotice(
+        typeof decision === "boolean"
+          ? decision
+            ? "Tool action approved"
+            : "Tool action denied"
+          : `Applied ${decision.acceptedHunkIds.length} of ${
+              decision.acceptedHunkIds.length + decision.rejectedHunkIds.length
+            } changes; the agent continues around the rest`,
+      );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     }
@@ -979,7 +1446,11 @@ export function App() {
             type="button"
             onClick={() => void openFolder()}
             className="truncate text-neutral-500 hover:text-neutral-300"
-            title="Open another folder"
+            title={
+              workbench?.project.rootPath
+                ? `Agent writes go to ${workbench.project.rootPath} — click to open another folder`
+                : "Open another folder"
+            }
           >
             {workbench?.project.name ?? "workspace"}
           </button>
@@ -1057,6 +1528,21 @@ export function App() {
               onOpen={openFile}
               onFolder={loadFolder}
               onOpenFolder={() => void openFolder()}
+              onCreate={(type) => void createEntry(type)}
+              onRename={(entry) => void renameEntry(entry)}
+              onDelete={(entry) => void deleteEntry(entry)}
+              onRefresh={() => void loadFolder(folderPath)}
+              projectRootPath={workbench?.project.rootPath ?? ""}
+              clipboard={fileClipboard}
+              onClipboard={(path, mode) => {
+                setFileClipboard({ path, mode });
+                setNotice(`${mode === "cut" ? "Cut" : "Copied"} ${path}`);
+              }}
+              onPaste={(folder) => void pasteClipboardEntry(folder)}
+              onDuplicate={(entry) =>
+                void copyEntryTo(entry.path, entry.path, "Duplicated")
+              }
+              onCopyText={(value, label) => void copyText(value, label)}
             />
           )}
           {section === "search" && <SearchPanel onOpen={openFile} />}
@@ -1064,14 +1550,22 @@ export function App() {
             <AgentsPanel agents={workbench?.agents ?? []} />
           )}
           {section === "dashboard" && (
-            <TaskList tasks={workbench?.tasks ?? []} />
+            <TaskList
+              tasks={workbench?.tasks ?? []}
+              onResume={(task) => void resumeTask(task)}
+            />
           )}
           {section === "settings" && <SettingsSummary />}
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col bg-canvas">
           {section === "dashboard" ? (
-            <Dashboard tasks={workbench?.tasks ?? []} />
+            <Dashboard
+              tasks={workbench?.tasks ?? []}
+              liveTaskId={
+                liveTurns.find((turn) => turn.status === "running")?.taskId
+              }
+            />
           ) : section === "settings" ? (
             <ProviderSettings />
           ) : (
@@ -1122,10 +1616,12 @@ export function App() {
                 {activeFile ? (
                   <MonacoPane
                     file={activeFile}
+                    reveal={reveal}
                     onPosition={(nextLine, nextColumn) => {
                       setLine(nextLine);
                       setColumn(nextColumn);
                     }}
+                    onSelection={setSelection}
                     onChange={(content) =>
                       updateOpenFile(activeFile.path, content)
                     }
@@ -1173,19 +1669,27 @@ export function App() {
           submitting={submitting}
           onSubmit={() => void startTask()}
           onCancel={(taskId) => void cancelTask(taskId)}
-          onApprove={(approved) => void resolveApproval(approved)}
+          onApprove={(decision) => void resolveApproval(decision)}
           context={context}
           activePath={activePath}
-          onAddContext={() => void addActiveFileToContext()}
+          selection={selection}
+          isolated={isolated}
+          onAddContext={(path, range) => void addToContext(path, range)}
           onRemoveContext={(id) => void removeContext(id)}
+          onOpenReference={(path, range) => void openReference(path, range)}
         />
       </div>
 
       <footer className="flex h-6 shrink-0 items-center justify-between border-t border-white/5 bg-[#0d0d0d] px-2 font-mono text-[10px] text-neutral-600">
         <div className="flex items-center gap-4">
           <span className="flex items-center gap-1.5">
-            <ShieldCheck size={11} className="text-emerald-500/80" /> workspace
-            sandboxed
+            <ShieldCheck size={11} className="text-emerald-500/80" />
+            <span
+              className="max-w-[420px] truncate"
+              title={`Every agent file write is sandboxed to ${workbench?.project.rootPath ?? "the open workspace"}`}
+            >
+              {workbench?.project.rootPath ?? "no folder open"}
+            </span>
           </span>
           <span
             className={connectionError ? "text-rose-400" : "text-neutral-500"}
@@ -1247,6 +1751,16 @@ function ExplorerPanel({
   onOpen,
   onFolder,
   onOpenFolder,
+  onCreate,
+  onRename,
+  onDelete,
+  onRefresh,
+  projectRootPath,
+  clipboard,
+  onClipboard,
+  onPaste,
+  onDuplicate,
+  onCopyText,
 }: {
   entries: FileEntry[];
   path: string;
@@ -1254,16 +1768,125 @@ function ExplorerPanel({
   onOpen: (path: string) => void;
   onFolder: (path: string) => void;
   onOpenFolder: () => void;
+  onCreate: (type: "file" | "directory") => void;
+  onRename: (entry: FileEntry) => void;
+  onDelete: (entry: FileEntry) => void;
+  onRefresh: () => void;
+  projectRootPath: string;
+  clipboard?: { path: string; mode: "copy" | "cut" };
+  onClipboard: (path: string, mode: "copy" | "cut") => void;
+  onPaste: (folder: string) => void;
+  onDuplicate: (entry: FileEntry) => void;
+  onCopyText: (value: string, label: string) => void;
 }) {
   const parent = path.split(/[\\/]/).slice(0, -1).join("/") || ".";
+  // `entry` is undefined for the background menu, which offers only the actions
+  // that make sense with nothing selected, exactly as the editor does.
+  const [menu, setMenu] = useState<{
+    entry?: FileEntry;
+    x: number;
+    y: number;
+  }>();
+  const [selected, setSelected] = useState<FileEntry>();
+
+  // Keyboard parity with the editor: the shortcuts shown in the menu have to
+  // work, and they must not fire while the user is typing somewhere else.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      if (event.key === "F2" && selected) {
+        event.preventDefault();
+        onRename(selected);
+        return;
+      }
+      if (event.key === "Delete" && selected) {
+        event.preventDefault();
+        onDelete(selected);
+        return;
+      }
+      if (!event.ctrlKey && !event.metaKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "c" && selected) {
+        event.preventDefault();
+        onClipboard(selected.path, "copy");
+      } else if (key === "x" && selected) {
+        event.preventDefault();
+        onClipboard(selected.path, "cut");
+      } else if (key === "v" && clipboard) {
+        event.preventDefault();
+        onPaste(selected?.type === "directory" ? selected.path : path);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [clipboard, onClipboard, onDelete, onPaste, onRename, path, selected]);
+
+  // Any click or Escape anywhere dismisses the context menu, matching the
+  // behaviour of the editor menus people already expect.
+  useEffect(() => {
+    if (!menu) return;
+    const close = (): void => setMenu(undefined);
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto pb-3 text-xs">
+    <div
+      className="relative min-h-0 flex-1 overflow-y-auto pb-3 text-xs"
+      onContextMenu={(event) => {
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        setSelected(undefined);
+        setMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       <div className="flex h-7 items-center gap-1.5 border-y border-white/5 px-2 font-medium uppercase text-neutral-400">
         <ChevronUp size={12} /> {projectName}
         <button
           type="button"
-          onClick={onOpenFolder}
+          onClick={() => onCreate("file")}
           className="ml-auto rounded-sm p-1 text-neutral-600 hover:bg-white/5 hover:text-indigo-300"
+          aria-label="New File"
+          title="New File"
+        >
+          <FileCode2 size={12} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onCreate("directory")}
+          className="rounded-sm p-1 text-neutral-600 hover:bg-white/5 hover:text-indigo-300"
+          aria-label="New Folder"
+          title="New Folder"
+        >
+          <Folder size={12} />
+        </button>
+        <button
+          type="button"
+          onClick={onRefresh}
+          className="rounded-sm p-1 text-neutral-600 hover:bg-white/5 hover:text-indigo-300"
+          aria-label="Refresh Explorer"
+          title="Refresh Explorer"
+        >
+          <RefreshCw size={12} />
+        </button>
+        <button
+          type="button"
+          onClick={onOpenFolder}
+          className="rounded-sm p-1 text-neutral-600 hover:bg-white/5 hover:text-indigo-300"
           aria-label="Open Folder"
           title="Open Folder"
         >
@@ -1283,12 +1906,21 @@ function ExplorerPanel({
         <button
           type="button"
           key={entry.path}
-          onClick={() =>
-            entry.type === "directory"
-              ? onFolder(entry.path)
-              : onOpen(entry.path)
-          }
-          className="tree-row"
+          onClick={() => {
+            setSelected(entry);
+            if (entry.type === "directory") onFolder(entry.path);
+            else onOpen(entry.path);
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setSelected(entry);
+            setMenu({ entry, x: event.clientX, y: event.clientY });
+          }}
+          className={`tree-row ${
+            selected?.path === entry.path ? "bg-white/5 text-neutral-200" : ""
+          } ${clipboard?.mode === "cut" && clipboard.path === entry.path ? "opacity-50" : ""}`}
+          title={`${entry.path} — right-click for rename and delete`}
         >
           {entry.type === "directory" ? (
             <Folder size={14} className="text-neutral-500" />
@@ -1303,6 +1935,387 @@ function ExplorerPanel({
           )}
         </button>
       ))}
+      {menu && (
+        <ExplorerContextMenu
+          menu={menu}
+          folder={path}
+          projectRootPath={projectRootPath}
+          canPaste={Boolean(clipboard)}
+          onClose={() => setMenu(undefined)}
+          onOpen={onOpen}
+          onFolder={onFolder}
+          onCreate={onCreate}
+          onRename={onRename}
+          onDelete={onDelete}
+          onRefresh={onRefresh}
+          onClipboard={onClipboard}
+          onPaste={onPaste}
+          onDuplicate={onDuplicate}
+          onCopyText={onCopyText}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Human-in-the-loop review of a proposed change.
+ *
+ * A file diff is reviewed hunk by hunk: each block can be accepted or rejected
+ * independently, with accept-all and reject-all as shortcuts. Partial approval
+ * applies only the accepted blocks and hands the rejected ones back to the
+ * agent, which then continues the task around them. Anything that is not a file
+ * diff (a command, a push) has no blocks to split, so it keeps the plain
+ * approve/deny choice.
+ */
+function ApprovalReview({
+  approval,
+  fallbackPreview,
+  onApprove,
+}: {
+  approval: RuntimeApprovalView;
+  fallbackPreview: string;
+  onApprove: (
+    decision:
+      boolean | { acceptedHunkIds: string[]; rejectedHunkIds: string[] },
+  ) => void;
+}) {
+  const diff = asFileDiff(approval.preview);
+  const hunks = diff?.hunks ?? [];
+  const [accepted, setAccepted] = useState<Set<string>>(new Set());
+
+  // Default to accepting everything, and reset whenever a new request arrives.
+  // Keyed on the request id rather than the hunk array, which is a fresh object
+  // on every render and would reset the user's selections as they clicked.
+  const { requestId, preview } = approval;
+  useEffect(() => {
+    setAccepted(
+      new Set((asFileDiff(preview)?.hunks ?? []).map((hunk) => hunk.id)),
+    );
+  }, [requestId, preview]);
+
+  const toggle = (id: string): void =>
+    setAccepted((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const acceptedIds = hunks
+    .map((hunk) => hunk.id)
+    .filter((id) => accepted.has(id));
+  const rejectedIds = hunks
+    .map((hunk) => hunk.id)
+    .filter((id) => !accepted.has(id));
+
+  return (
+    <div className="mt-4 border border-amber-400/20 bg-amber-500/5 p-3">
+      <div className="flex items-center gap-2 text-[11px] font-medium text-amber-200/90">
+        <ShieldCheck size={13} /> Approval required
+      </div>
+      <div className="mt-2 flex items-center gap-2 text-xs text-neutral-300">
+        <span>{approval.call.name}</span>
+        {diff && (
+          <span className="truncate font-mono text-[10px] text-neutral-600">
+            {diff.path}
+          </span>
+        )}
+      </div>
+
+      {hunks.length === 0 ? (
+        <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/25 p-2 font-mono text-[9px] leading-4 text-neutral-500">
+          {fallbackPreview}
+        </pre>
+      ) : (
+        <>
+          <div className="mt-2 flex items-center gap-2 text-[9px] text-neutral-500">
+            <span>
+              {acceptedIds.length} of {hunks.length} blocks selected
+            </span>
+            <button
+              type="button"
+              onClick={() => setAccepted(new Set(hunks.map((hunk) => hunk.id)))}
+              className="ml-auto text-emerald-400/80 hover:text-emerald-300"
+            >
+              Accept all
+            </button>
+            <button
+              type="button"
+              onClick={() => setAccepted(new Set())}
+              className="text-rose-400/80 hover:text-rose-300"
+            >
+              Reject all
+            </button>
+          </div>
+          <div className="mt-2 max-h-64 space-y-2 overflow-auto">
+            {hunks.map((hunk) => {
+              const isAccepted = accepted.has(hunk.id);
+              return (
+                <label
+                  key={hunk.id}
+                  className={`block cursor-pointer rounded border p-2 transition ${
+                    isAccepted
+                      ? "border-emerald-400/25 bg-emerald-500/[0.04]"
+                      : "border-white/5 bg-black/20 opacity-60"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-[9px] text-neutral-500">
+                    <input
+                      type="checkbox"
+                      checked={isAccepted}
+                      onChange={() => toggle(hunk.id)}
+                      className="accent-emerald-500"
+                    />
+                    <span className="font-mono">
+                      lines {hunk.startLine}-{hunk.endLine}
+                    </span>
+                    <span
+                      className={`ml-auto ${isAccepted ? "text-emerald-400/80" : "text-rose-400/80"}`}
+                    >
+                      {isAccepted ? "accept" : "reject"}
+                    </span>
+                  </div>
+                  <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[9px] leading-4">
+                    {hunk.original && (
+                      <span className="text-rose-300/70">
+                        {prefixLines(hunk.original, "-")}
+                      </span>
+                    )}
+                    {hunk.replacement && (
+                      <span className="text-emerald-300/70">
+                        {prefixLines(hunk.replacement, "+")}
+                      </span>
+                    )}
+                  </pre>
+                </label>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      <div className="mt-2 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => onApprove(false)}
+          className="rounded border border-white/10 px-2 py-1 text-[10px] text-neutral-400 hover:text-rose-300"
+        >
+          Deny
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            onApprove(
+              hunks.length === 0 || rejectedIds.length === 0
+                ? true
+                : {
+                    acceptedHunkIds: acceptedIds,
+                    rejectedHunkIds: rejectedIds,
+                  },
+            )
+          }
+          disabled={hunks.length > 0 && acceptedIds.length === 0}
+          className="rounded bg-amber-400/15 px-2 py-1 text-[10px] text-amber-200 hover:bg-amber-400/20 disabled:text-amber-200/30"
+        >
+          {hunks.length === 0 || rejectedIds.length === 0
+            ? "Approve"
+            : `Apply ${acceptedIds.length} block${acceptedIds.length === 1 ? "" : "s"}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Renders each line of a hunk side with a unified-diff marker. */
+function prefixLines(value: string, marker: "+" | "-"): string {
+  const lines = value.replace(/\n$/u, "").split("\n");
+  return `${lines.map((line) => `${marker}${line}`).join("\n")}\n`;
+}
+
+function MenuItem({
+  label,
+  shortcut,
+  danger,
+  disabled,
+  onSelect,
+}: {
+  label: string;
+  shortcut?: string;
+  danger?: boolean;
+  disabled?: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onSelect}
+      className={`flex w-full items-center gap-3 px-3 py-1 text-left text-[11px] disabled:text-neutral-700 disabled:hover:bg-transparent ${
+        danger
+          ? "text-rose-300/80 hover:bg-rose-500/10 hover:text-rose-300"
+          : "text-neutral-400 hover:bg-white/5 hover:text-neutral-200"
+      }`}
+    >
+      <span className="flex-1 truncate">{label}</span>
+      {shortcut && (
+        <span className="font-mono text-[9px] text-neutral-600">
+          {shortcut}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function MenuSeparator() {
+  return <div className="my-1 h-px bg-white/5" />;
+}
+
+/**
+ * The explorer context menu. Right-clicking an entry offers the actions that
+ * apply to it; right-clicking empty space offers only the ones that make sense
+ * with nothing selected. Positioning is clamped so a menu opened near the
+ * bottom or right edge stays on screen.
+ */
+function ExplorerContextMenu({
+  menu,
+  folder,
+  projectRootPath,
+  canPaste,
+  onClose,
+  onOpen,
+  onFolder,
+  onCreate,
+  onRename,
+  onDelete,
+  onRefresh,
+  onClipboard,
+  onPaste,
+  onDuplicate,
+  onCopyText,
+}: {
+  menu: { entry?: FileEntry; x: number; y: number };
+  folder: string;
+  projectRootPath: string;
+  canPaste: boolean;
+  onClose: () => void;
+  onOpen: (path: string) => void;
+  onFolder: (path: string) => void;
+  onCreate: (type: "file" | "directory") => void;
+  onRename: (entry: FileEntry) => void;
+  onDelete: (entry: FileEntry) => void;
+  onRefresh: () => void;
+  onClipboard: (path: string, mode: "copy" | "cut") => void;
+  onPaste: (folder: string) => void;
+  onDuplicate: (entry: FileEntry) => void;
+  onCopyText: (value: string, label: string) => void;
+}) {
+  const { entry } = menu;
+  const width = 216;
+  const height = entry ? 300 : 150;
+  const left = Math.min(menu.x, Math.max(8, window.innerWidth - width - 8));
+  const top = Math.min(menu.y, Math.max(8, window.innerHeight - height - 8));
+  const run = (action: () => void) => () => {
+    onClose();
+    action();
+  };
+  const separator = projectRootPath.includes("\\") ? "\\" : "/";
+  const absolutePath = entry
+    ? `${projectRootPath.replace(/[/\\]$/u, "")}/${entry.path}`
+        .split("/")
+        .join(separator)
+    : projectRootPath;
+
+  return (
+    <div
+      className="fixed z-50 rounded-md border border-white/10 bg-panel py-1 shadow-2xl shadow-black/60"
+      style={{ left, top, width }}
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {entry ? (
+        <>
+          <div className="truncate px-3 pb-1 font-mono text-[9px] text-neutral-600">
+            {entry.path}
+          </div>
+          <MenuItem
+            label={entry.type === "directory" ? "Open Folder" : "Open"}
+            onSelect={run(() =>
+              entry.type === "directory"
+                ? onFolder(entry.path)
+                : onOpen(entry.path),
+            )}
+          />
+          <MenuSeparator />
+          <MenuItem
+            label="Cut"
+            shortcut="Ctrl X"
+            onSelect={run(() => onClipboard(entry.path, "cut"))}
+          />
+          <MenuItem
+            label="Copy"
+            shortcut="Ctrl C"
+            onSelect={run(() => onClipboard(entry.path, "copy"))}
+          />
+          <MenuItem
+            label="Paste"
+            shortcut="Ctrl V"
+            disabled={!canPaste}
+            onSelect={run(() =>
+              onPaste(entry.type === "directory" ? entry.path : folder),
+            )}
+          />
+          <MenuSeparator />
+          <MenuItem
+            label="Copy Path"
+            onSelect={run(() => onCopyText(absolutePath, "path"))}
+          />
+          <MenuItem
+            label="Copy Relative Path"
+            onSelect={run(() => onCopyText(entry.path, "relative path"))}
+          />
+          <MenuSeparator />
+          <MenuItem
+            label="Duplicate"
+            onSelect={run(() => onDuplicate(entry))}
+          />
+          <MenuItem
+            label="Rename…"
+            shortcut="F2"
+            onSelect={run(() => onRename(entry))}
+          />
+          <MenuItem
+            label="Delete"
+            shortcut="Del"
+            danger
+            onSelect={run(() => onDelete(entry))}
+          />
+        </>
+      ) : (
+        <>
+          <div className="truncate px-3 pb-1 font-mono text-[9px] text-neutral-600">
+            {folder}
+          </div>
+          <MenuItem label="New File…" onSelect={run(() => onCreate("file"))} />
+          <MenuItem
+            label="New Folder…"
+            onSelect={run(() => onCreate("directory"))}
+          />
+          <MenuSeparator />
+          <MenuItem
+            label="Paste"
+            shortcut="Ctrl V"
+            disabled={!canPaste}
+            onSelect={run(() => onPaste(folder))}
+          />
+          <MenuItem
+            label="Copy Path"
+            onSelect={run(() => onCopyText(absolutePath, "path"))}
+          />
+          <MenuSeparator />
+          <MenuItem label="Refresh Explorer" onSelect={run(onRefresh)} />
+        </>
+      )}
     </div>
   );
 }
@@ -1379,7 +2392,23 @@ function AgentsPanel({ agents }: { agents: AgentView[] }) {
   );
 }
 
-function TaskList({ tasks }: { tasks: TaskView[] }) {
+/**
+ * Persisted tasks, with a resume action on the ones that were interrupted.
+ *
+ * A long task can outlive the window that started it. Its stage checkpoints are
+ * durable, so resuming continues from the last completed stage rather than
+ * repeating finished work; without an affordance here that capability was
+ * unreachable from the IDE.
+ */
+function TaskList({
+  tasks,
+  onResume,
+}: {
+  tasks: TaskView[];
+  onResume: (task: TaskView) => void;
+}) {
+  const resumable = (status: string): boolean =>
+    status === "paused" || status === "failed" || status === "pending";
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       {tasks.length === 0 ? (
@@ -1391,9 +2420,21 @@ function TaskList({ tasks }: { tasks: TaskView[] }) {
               <StatusDot status={task.status} />
               <span className="truncate">{task.prompt}</span>
             </div>
-            <div className="mt-1 flex justify-between text-[9px] uppercase tracking-wide text-neutral-700">
+            <div className="mt-1 flex items-center justify-between text-[9px] uppercase tracking-wide text-neutral-700">
               <span>{task.currentStage}</span>
-              <span>{shortDate(task.updatedAt)}</span>
+              <div className="flex items-center gap-2">
+                <span>{shortDate(task.updatedAt)}</span>
+                {resumable(task.status) && (
+                  <button
+                    type="button"
+                    onClick={() => onResume(task)}
+                    className="rounded-sm bg-indigo-500/15 px-1.5 py-0.5 uppercase tracking-wide text-indigo-300 hover:bg-indigo-500/25"
+                    title="Continue this task from its last saved stage"
+                  >
+                    Resume
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         ))
@@ -1706,8 +2747,11 @@ function AssistantPanel({
   onApprove,
   context,
   activePath,
+  selection,
+  isolated,
   onAddContext,
   onRemoveContext,
+  onOpenReference,
 }: {
   sessions: SessionView[];
   selectedSessionId?: string;
@@ -1726,12 +2770,71 @@ function AssistantPanel({
   submitting: boolean;
   onSubmit: () => void;
   onCancel: (taskId: string) => void;
-  onApprove: (approved: boolean) => void;
+  onApprove: (
+    decision:
+      boolean | { acceptedHunkIds: string[]; rejectedHunkIds: string[] },
+  ) => void;
   context: ContextItem[];
   activePath?: string;
-  onAddContext: () => void;
+  selection?: LineRange;
+  isolated: IsolatedExchange[];
+  onAddContext: (path: string, range?: LineRange) => void;
   onRemoveContext: (id: string) => void;
+  onOpenReference: (path: string, range?: LineRange) => void;
 }) {
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [mentionQuery, setMentionQuery] = useState<string>();
+  const [mentionPaths, setMentionPaths] = useState<string[]>([]);
+  const [mentionIndex, setMentionIndex] = useState(0);
+
+  // Load @-mention candidates for the token currently under the caret.
+  useEffect(() => {
+    if (mentionQuery === undefined) {
+      setMentionPaths([]);
+      return;
+    }
+    let cancelled = false;
+    void requestJson<{ paths: string[] }>(
+      `/api/files/lookup?q=${encodeURIComponent(mentionQuery)}`,
+    )
+      .then((body) => {
+        if (!cancelled) setMentionPaths(body.paths);
+      })
+      .catch(() => {
+        if (!cancelled) setMentionPaths([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mentionQuery]);
+
+  /** Updates the draft and opens the picker for an `@path` token at the caret. */
+  const handleComposerChange = (
+    event: React.ChangeEvent<HTMLTextAreaElement>,
+  ): void => {
+    const { value, selectionStart } = event.target;
+    onComposerText(value);
+    const match = /@([\w./-]*)$/u.exec(value.slice(0, selectionStart));
+    setMentionQuery(match ? (match[1] ?? "") : undefined);
+    setMentionIndex(0);
+  };
+
+  /** Completes the caret's `@` token and pins the chosen file to context. */
+  const applyMention = (path: string): void => {
+    const element = composerRef.current;
+    const caret = element?.selectionStart ?? composerText.length;
+    const before = composerText.slice(0, caret).replace(/@[\w./-]*$/u, "");
+    const next = `${before}@${path} ${composerText.slice(caret)}`;
+    onComposerText(next);
+    setMentionQuery(undefined);
+    onAddContext(path);
+    requestAnimationFrame(() => {
+      const position = before.length + path.length + 2;
+      element?.focus();
+      element?.setSelectionRange(position, position);
+    });
+  };
+
   const session = sessions.find((item) => item.id === selectedSessionId);
   const messages = (session?.messages ?? []).filter(
     (message) => message.role === "user" || message.role === "assistant",
@@ -1872,13 +2975,19 @@ function AssistantPanel({
               {message.role === "assistant" && (
                 <ThinkingDisclosure items={message.metadata?.thinking ?? []} />
               )}
-              <div className="whitespace-pre-wrap">{message.content}</div>
+              <MessageBody
+                text={message.content}
+                onOpenReference={onOpenReference}
+              />
             </div>
           ))}
           {liveTurns.map((turn) => (
             <div key={turn.taskId} className="space-y-3">
               <div className="ml-6 rounded-md bg-indigo-500/10 px-3 py-2 text-xs leading-5 text-indigo-100/80">
-                {turn.prompt}
+                <MessageBody
+                  text={turn.prompt}
+                  onOpenReference={onOpenReference}
+                />
               </div>
               <div
                 className={`mr-2 border-l pl-3 text-xs leading-5 ${
@@ -1891,7 +3000,12 @@ function AssistantPanel({
                   items={turn.thinking}
                   active={!turn.response}
                 />
-                {turn.response ?? (
+                {turn.response ? (
+                  <MessageBody
+                    text={turn.response}
+                    onOpenReference={onOpenReference}
+                  />
+                ) : (
                   <span className="flex items-center gap-2 text-indigo-300/70">
                     <RefreshCw size={11} className="animate-spin" /> Agent is
                     working…
@@ -1900,37 +3014,44 @@ function AssistantPanel({
               </div>
             </div>
           ))}
+          {isolated.map((exchange) => (
+            <div
+              key={exchange.id}
+              className="border border-dashed border-amber-400/20 bg-amber-500/[0.03] p-2"
+            >
+              <div className="text-[9px] uppercase tracking-[0.12em] text-amber-300/60">
+                /bytheway · isolated, not added to this task's context
+              </div>
+              <div className="mt-1 text-xs leading-5 text-amber-100/70">
+                {exchange.question}
+              </div>
+              <div className="mt-2 border-t border-amber-400/10 pt-2 text-xs leading-5 text-neutral-400">
+                {exchange.error ? (
+                  <span className="text-rose-300/80">{exchange.error}</span>
+                ) : exchange.answer ? (
+                  <MessageBody
+                    text={exchange.answer}
+                    onOpenReference={onOpenReference}
+                  />
+                ) : (
+                  <span className="flex items-center gap-2 text-amber-300/70">
+                    <RefreshCw size={11} className="animate-spin" /> Answering…
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
 
         {pendingApproval && (
-          <div className="mt-4 border border-amber-400/20 bg-amber-500/5 p-3">
-            <div className="flex items-center gap-2 text-[11px] font-medium text-amber-200/90">
-              <ShieldCheck size={13} /> Approval required
-            </div>
-            <div className="mt-2 text-xs text-neutral-300">
-              {pendingApproval.call.name}
-            </div>
-            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/25 p-2 font-mono text-[9px] leading-4 text-neutral-500">
-              {approvalPreview ??
-                JSON.stringify(pendingApproval.call.arguments, null, 2)}
-            </pre>
-            <div className="mt-2 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => onApprove(false)}
-                className="rounded border border-white/10 px-2 py-1 text-[10px] text-neutral-400 hover:text-rose-300"
-              >
-                Deny
-              </button>
-              <button
-                type="button"
-                onClick={() => onApprove(true)}
-                className="rounded bg-amber-400/15 px-2 py-1 text-[10px] text-amber-200 hover:bg-amber-400/20"
-              >
-                Approve
-              </button>
-            </div>
-          </div>
+          <ApprovalReview
+            approval={pendingApproval}
+            fallbackPreview={
+              approvalPreview ??
+              JSON.stringify(pendingApproval.call.arguments, null, 2)
+            }
+            onApprove={onApprove}
+          />
         )}
 
         <div className="my-4 h-px bg-white/5" />
@@ -1939,10 +3060,10 @@ function AssistantPanel({
             Active context ·{" "}
             {context.reduce((sum, item) => sum + item.tokenEstimate, 0)} tokens
           </span>
-          {activePath && selectedSessionId && (
+          {activePath && (
             <button
               type="button"
-              onClick={onAddContext}
+              onClick={() => onAddContext(activePath)}
               className="text-indigo-400 hover:text-indigo-300"
             >
               + current file
@@ -1961,10 +3082,23 @@ function AssistantPanel({
                 className="flex items-center gap-2 border border-white/5 bg-black/10 px-2 py-1.5 text-[10px] text-neutral-500"
               >
                 <File size={11} className="shrink-0 text-indigo-400/70" />
-                <span className="truncate">
+                <button
+                  type="button"
+                  className="truncate text-left hover:text-indigo-300"
+                  title={`Open ${item.filePath}`}
+                  onClick={() =>
+                    item.filePath &&
+                    onOpenReference(
+                      item.filePath,
+                      item.startLine && item.endLine
+                        ? { startLine: item.startLine, endLine: item.endLine }
+                        : undefined,
+                    )
+                  }
+                >
                   {item.filePath}
                   {item.startLine ? `:${item.startLine}-${item.endLine}` : ""}
-                </span>
+                </button>
                 <button
                   type="button"
                   onClick={() => onRemoveContext(item.id)}
@@ -1979,12 +3113,61 @@ function AssistantPanel({
         </div>
       </div>
       <div className="border-t border-white/5 p-2">
-        <div className="rounded-md border border-white/5 bg-black/25 p-2 shadow-2xl shadow-black/30 transition focus-within:border-indigo-400/20">
+        <div className="relative rounded-md border border-white/5 bg-black/25 p-2 shadow-2xl shadow-black/30 transition focus-within:border-indigo-400/20">
+          {mentionQuery !== undefined && mentionPaths.length > 0 && (
+            <div className="absolute bottom-full left-0 z-20 mb-1 max-h-56 w-full overflow-y-auto rounded-md border border-white/10 bg-panel p-1 shadow-2xl shadow-black/50">
+              {mentionPaths.map((path, index) => (
+                <button
+                  key={path}
+                  type="button"
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    applyMention(path);
+                  }}
+                  className={`flex w-full items-center gap-1.5 truncate px-2 py-1 text-left font-mono text-[10px] ${
+                    index === mentionIndex
+                      ? "bg-indigo-500/15 text-indigo-200"
+                      : "text-neutral-500 hover:text-neutral-300"
+                  }`}
+                >
+                  <File size={10} className="shrink-0" /> {path}
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
+            ref={composerRef}
             rows={3}
             value={composerText}
-            onChange={(event) => onComposerText(event.target.value)}
+            onChange={handleComposerChange}
+            onBlur={() => setMentionQuery(undefined)}
             onKeyDown={(event) => {
+              const menuOpen =
+                mentionQuery !== undefined && mentionPaths.length > 0;
+              if (menuOpen) {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setMentionIndex((current) =>
+                    Math.min(current + 1, mentionPaths.length - 1),
+                  );
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setMentionIndex((current) => Math.max(current - 1, 0));
+                  return;
+                }
+                if (event.key === "Enter" || event.key === "Tab") {
+                  event.preventDefault();
+                  applyMention(mentionPaths[mentionIndex] ?? mentionPaths[0]!);
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setMentionQuery(undefined);
+                  return;
+                }
+              }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 if (canSubmit) onSubmit();
@@ -2004,7 +3187,7 @@ function AssistantPanel({
             <button
               type="button"
               disabled={!activePath}
-              onClick={onAddContext}
+              onClick={() => activePath && onAddContext(activePath)}
               className="flex items-center gap-1 text-[10px] text-neutral-500 hover:text-indigo-300 disabled:text-neutral-700"
               title={
                 activePath
@@ -2012,7 +3195,25 @@ function AssistantPanel({
                   : "Open a file before adding context"
               }
             >
-              <Plus size={12} /> Context
+              <Plus size={12} /> File
+            </button>
+            <button
+              type="button"
+              disabled={!activePath || !selection}
+              onClick={() =>
+                activePath && selection && onAddContext(activePath, selection)
+              }
+              className="ml-3 flex items-center gap-1 text-[10px] text-neutral-500 hover:text-indigo-300 disabled:text-neutral-700"
+              title={
+                selection
+                  ? `Add lines ${selection.startLine}-${selection.endLine} to agent context`
+                  : "Select lines in the editor to add a code block"
+              }
+            >
+              <Code2 size={12} />{" "}
+              {selection
+                ? `Lines ${selection.startLine}-${selection.endLine}`
+                : "Selection"}
             </button>
             {activeTurn ? (
               <button
@@ -2042,40 +3243,79 @@ function AssistantPanel({
         >
           {composerText.trim() && submitBlockedReason
             ? submitBlockedReason
-            : "Enter to send · Shift+Enter for a new line"}
+            : "Enter to send · @ to tag a file · /bytheway for an isolated question"}
         </div>
       </div>
     </aside>
   );
 }
 
-function Dashboard({ tasks }: { tasks: TaskView[] }) {
+function Dashboard({
+  tasks,
+  liveTaskId,
+}: {
+  tasks: TaskView[];
+  liveTaskId?: string;
+}) {
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [spans, setSpans] = useState<TraceSpan[]>([]);
+  const [spend, setSpend] = useState<TaskSpendView>();
   const [selectedSpanId, setSelectedSpanId] = useState<string>();
   useEffect(() => {
-    setSelectedTaskId((current) => current ?? tasks[0]?.id);
-  }, [tasks]);
+    setSelectedTaskId((current) => current ?? liveTaskId ?? tasks[0]?.id);
+  }, [liveTaskId, tasks]);
+
+  // Follow a task that starts while the dashboard is open, so the running and
+  // finished views are the same view rather than two separate modes.
+  useEffect(() => {
+    if (liveTaskId) setSelectedTaskId(liveTaskId);
+  }, [liveTaskId]);
+
+  const refresh = useCallback(async (taskId: string) => {
+    try {
+      const [traces, cost] = await Promise.all([
+        requestJson<{ spans: TraceSpan[] }>(
+          `/api/tasks/${encodeURIComponent(taskId)}/traces`,
+        ),
+        requestJson<{ spend: TaskSpendView }>(
+          `/api/tasks/${encodeURIComponent(taskId)}/spend`,
+        ).catch(() => undefined),
+      ]);
+      setSpans(traces.spans);
+      setSpend(cost?.spend);
+      setSelectedSpanId((current) =>
+        current && traces.spans.some((span) => span.spanId === current)
+          ? current
+          : traces.spans[0]?.spanId,
+      );
+    } catch {
+      setSpans([]);
+    }
+  }, []);
+
   useEffect(() => {
     if (!selectedTaskId) {
       setSpans([]);
+      setSpend(undefined);
       return;
     }
-    void requestJson<{ spans: TraceSpan[] }>(
-      `/api/tasks/${encodeURIComponent(selectedTaskId)}/traces`,
-    )
-      .then((body) => {
-        setSpans(body.spans);
-        setSelectedSpanId(body.spans[0]?.spanId);
-      })
-      .catch(() => setSpans([]));
-  }, [selectedTaskId]);
+    void refresh(selectedTaskId);
+    // While the selected task is running, keep polling so the hierarchy, token
+    // counts, and spend grow in place instead of appearing only at the end.
+    if (selectedTaskId !== liveTaskId) return;
+    const timer = window.setInterval(() => {
+      void refresh(selectedTaskId);
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [liveTaskId, refresh, selectedTaskId]);
   const selected = spans.find((span) => span.spanId === selectedSpanId);
   const totalDuration = spans.reduce(
     (total, span) => total + (span.durationMs ?? 0),
     0,
   );
-  const totalCost = spans.reduce((total, span) => total + (span.cost ?? 0), 0);
+  const totalCost =
+    spend?.costUsd ??
+    spans.reduce((total, span) => total + (span.cost ?? 0), 0);
   const modelCalls = spans.filter((span) => span.kind === "model").length;
   const toolCalls = spans.filter((span) => span.kind === "tool").length;
   return (
@@ -2086,7 +3326,14 @@ function Dashboard({ tasks }: { tasks: TaskView[] }) {
             Observability
           </h2>
           <p className="mt-0.5 text-[10px] text-neutral-600">
-            Persisted task hierarchy and exact recorded payloads
+            {selectedTaskId && selectedTaskId === liveTaskId ? (
+              <span className="flex items-center gap-1.5 text-emerald-400/80">
+                <RefreshCw size={9} className="animate-spin" /> Live · updating
+                while the task runs
+              </span>
+            ) : (
+              "Persisted task hierarchy and exact recorded payloads"
+            )}
           </p>
         </div>
         <select

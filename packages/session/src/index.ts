@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Dirent } from "node:fs";
 import {
   existsSync,
   mkdirSync,
@@ -7,7 +8,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import matter from "gray-matter";
 import type {
@@ -874,11 +875,68 @@ export function createTaskCheckpointStore(
   };
 }
 
+/** Directories never worth walking when looking for nested rule files. */
+const INSTRUCTION_SCAN_IGNORES: ReadonlySet<string> = new Set([
+  ".git",
+  ".agentic",
+  ".runtime-data",
+  ".pnpm-store",
+  "node_modules",
+  "dist",
+  "dist-tests",
+  "build",
+  "out",
+  "target",
+  ".next",
+  ".turbo",
+  ".cache",
+  "coverage",
+  "vendor",
+]);
+
+const MAX_INSTRUCTION_DEPTH = 4;
+const MAX_INSTRUCTION_FILES = 24;
+
+/**
+ * Collects every `AGENTS.md` in the project, nearest-to-root first.
+ *
+ * The protocol is scoped: a rule file applies to the directory it sits in and
+ * everything under it, so a monorepo package can state conventions that differ
+ * from the root. Each file keeps its path as a heading, which is what lets an
+ * agent tell which rules govern the file it is editing. The walk is bounded in
+ * depth and count so a deep tree cannot flood the system prompt.
+ */
 export function loadProjectInstructions(rootPath: string): string[] {
-  const path = join(rootPath, "AGENTS.md");
-  return existsSync(path)
-    ? [`## ${path}\n\n${readFileSync(path, "utf8")}`]
-    : [];
+  const found: string[] = [];
+  const walk = (directory: string, depth: number): void => {
+    if (
+      depth > MAX_INSTRUCTION_DEPTH ||
+      found.length >= MAX_INSTRUCTION_FILES
+    ) {
+      return;
+    }
+    const path = join(directory, "AGENTS.md");
+    if (existsSync(path)) {
+      const scope = relative(rootPath, directory).replaceAll("\\", "/") || ".";
+      found.push(
+        `## AGENTS.md (applies to ${scope === "." ? "the whole project" : `${scope}/ and below`})\n\n${readFileSync(path, "utf8")}`,
+      );
+    }
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || INSTRUCTION_SCAN_IGNORES.has(entry.name)) {
+        continue;
+      }
+      walk(join(directory, entry.name), depth + 1);
+    }
+  };
+  walk(rootPath, 0);
+  return found;
 }
 
 export function loadProjectAgents(rootPath: string): AgentDefinition[] {

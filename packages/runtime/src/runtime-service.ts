@@ -14,8 +14,11 @@ import {
   type ConversationMessage,
   type MultiAgentEvent,
   type MultiAgentResult,
+  type ModelRoutePolicy,
+  type ModelUsage,
   type OrchestrationEvent,
   type OrchestrationPlan,
+  type OrchestrationStep,
   type ToolApprovalResponse,
   type ToolCall,
   type ToolPreview,
@@ -53,6 +56,7 @@ import {
   type RuntimeIsolatedQuestionHandle,
   type RuntimeIsolatedQuestionResult,
   type RuntimeLimits,
+  type RuntimeTaskSpend,
   type RuntimeModelSelection,
   type RuntimeSettingsStore,
   type RuntimeTaskHandle,
@@ -125,6 +129,8 @@ export class HeadlessRuntimeService {
   private readonly executionContext =
     new AsyncLocalStorage<RuntimeExecutionContext>();
   private readonly activeSessionIds = new Set<string>();
+  private readonly spendByTask = new Map<string, RuntimeTaskSpend>();
+  private readonly exceededBudgetTaskIds = new Set<string>();
   private readonly activeAgentSpans = new Map<string, string>();
   private readonly activeStepSpans = new Map<string, string>();
   private readonly activeModelSpans = new Map<string, string>();
@@ -490,6 +496,80 @@ export class HeadlessRuntimeService {
     });
   }
 
+  /** Current spend for a task, or a zeroed record when nothing was billed. */
+  taskSpend(taskId: string): RuntimeTaskSpend {
+    return (
+      this.spendByTask.get(taskId) ?? {
+        taskId,
+        costUsd: 0,
+        budgetUsd: this.limits.maxTaskCostUsd,
+        inputTokens: 0,
+        outputTokens: 0,
+        modelCalls: 0,
+      }
+    );
+  }
+
+  /**
+   * Adds one model call to a task's running total and publishes it.
+   *
+   * The evaluation halts any task that exceeds its dollar budget and scores it
+   * as a total failure, so the system must notice first. Spend is summed from
+   * real provider usage rather than the pre-call estimate used for routing,
+   * because only the former reflects what was actually billed.
+   */
+  private recordSpend(
+    sessionId: string,
+    taskId: string,
+    cost: number | undefined,
+    usage: ModelUsage | undefined,
+  ): void {
+    const previous = this.taskSpend(taskId);
+    const spend: RuntimeTaskSpend = {
+      taskId,
+      budgetUsd: this.limits.maxTaskCostUsd,
+      costUsd: previous.costUsd + (cost ?? 0),
+      inputTokens: previous.inputTokens + (usage?.inputTokens ?? 0),
+      outputTokens: previous.outputTokens + (usage?.outputTokens ?? 0),
+      modelCalls: previous.modelCalls + 1,
+    };
+    this.spendByTask.set(taskId, spend);
+    const exceeded = spend.costUsd >= spend.budgetUsd;
+    const warning =
+      !exceeded &&
+      spend.costUsd >= spend.budgetUsd * this.limits.taskCostWarningRatio;
+    if (exceeded) this.exceededBudgetTaskIds.add(taskId);
+    this.store.appendEvent({
+      sessionId,
+      taskId,
+      type: "task_spend",
+      payload: { spend, ...(exceeded || warning ? {} : {}) },
+    });
+    void this.emit({
+      type: "task_spend",
+      sessionId,
+      taskId,
+      spend,
+      ...(exceeded
+        ? { level: "exceeded" as const }
+        : warning
+          ? { level: "warning" as const }
+          : {}),
+      occurredAt: Date.now(),
+    });
+  }
+
+  /** Throws when a task has spent its budget, stopping it before the next call. */
+  private assertWithinBudget(taskId: string): void {
+    if (!this.exceededBudgetTaskIds.has(taskId)) return;
+    const spend = this.taskSpend(taskId);
+    throw new Error(
+      `Task halted: it reached its $${spend.budgetUsd.toFixed(2)} budget ` +
+        `after ${spend.modelCalls} model calls ($${spend.costUsd.toFixed(4)} spent). ` +
+        "Raise maxTaskCostUsd or narrow the task before retrying.",
+    );
+  }
+
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
@@ -602,12 +682,10 @@ export class HeadlessRuntimeService {
         task.id,
         this.limits.contextCharacterBudget,
       );
-      const standaloneCodeAnswer = shouldAnswerWithCode(task.prompt);
       const verificationOnly = shouldUseVerificationOnly(agentId, task.prompt);
       const conversationOnly = shouldUseConversationAgent(agentId, task.prompt);
       const directAgentId =
-        (conversationOnly || standaloneCodeAnswer) &&
-        this.store.getAgent(CONVERSATION_AGENT_ID)
+        conversationOnly && this.store.getAgent(CONVERSATION_AGENT_ID)
           ? CONVERSATION_AGENT_ID
           : agentId;
       const result: MultiAgentResult = verificationOnly
@@ -623,9 +701,7 @@ export class HeadlessRuntimeService {
             undefined,
             false,
           )
-        : this.retrieval &&
-            !standaloneCodeAnswer &&
-            shouldUsePipeline(agentId, task.prompt)
+        : this.retrieval && shouldUsePipeline(agentId, task.prompt)
           ? await this.executePipeline(session, task, context, history, signal)
           : await this.executeAgent(
               session.id,
@@ -635,7 +711,7 @@ export class HeadlessRuntimeService {
               conversationOnly ? "" : context,
               history,
               signal,
-              !conversationOnly && !standaloneCodeAnswer,
+              !conversationOnly,
             );
       runId = result.runId;
       const thinking = taskThinkingSummary(
@@ -828,6 +904,11 @@ export class HeadlessRuntimeService {
     allowHandoffs: boolean,
     beforeModelRequest?: () => void,
     enforceWorkflowCompletion = allowHandoffs,
+    stopAfterMutationCount = 0,
+    rejectIncompleteMutations = false,
+    toolAllowlist?: readonly string[],
+    workflowMode?: "mutation" | "verification",
+    routePolicy?: ModelRoutePolicy,
   ): Promise<MultiAgentResult> {
     let runId = "";
     let activeAgentId = agentId;
@@ -845,7 +926,15 @@ export class HeadlessRuntimeService {
         maxDurationMs: this.limits.maxDurationMs,
         allowHandoffs,
         enforceWorkflowCompletion,
-        beforeModelRequest,
+        stopAfterMutationCount,
+        rejectIncompleteMutations,
+        toolAllowlist,
+        workflowMode,
+        routePolicy,
+        beforeModelRequest: () => {
+          this.assertWithinBudget(taskId);
+          beforeModelRequest?.();
+        },
         signal,
         requestApproval: async (call, preview) => {
           const request = this.createApprovalRequest(
@@ -877,6 +966,57 @@ export class HeadlessRuntimeService {
   ): Promise<MultiAgentResult> {
     if (!this.retrieval)
       throw new Error("Semantic retrieval is not configured.");
+    const greenfieldArtifact = isGreenfieldArtifactRequest(task.prompt);
+    const producedFiles = new Set<string>();
+    let lastVerifierFinding: string | undefined;
+    const requestedVariants = requestedVariantLabels(task.prompt);
+    // "in 5 different languages" gives a count; "in Python and Rust" gives the
+    // languages instead. Either form has to produce one file per variant.
+    const artifactCount = greenfieldArtifact
+      ? Math.min(
+          Math.max(
+            requestedArtifactCount(task.prompt),
+            requestedVariants.length,
+          ),
+          10,
+        )
+      : 1;
+    // A 7B model cannot reliably emit five mutation calls from one prompt: asked
+    // for all of them at once it answers with prose and changes nothing. Each
+    // artifact therefore gets its own coding step with a single-file objective,
+    // which is the decomposition the whole system is built around.
+    const codingSteps: OrchestrationStep[] =
+      artifactCount === 1
+        ? [
+            {
+              id: "code",
+              role: "coder",
+              title: "Implement",
+              prompt: greenfieldArtifact
+                ? "Create one complete, self-contained artifact file that satisfies the objective exactly. Use native HTML/CSS/JavaScript when suitable. The file must contain the full implementation: no placeholders, ellipses, TODOs, template markers, or tutorial prose. Call create_file for a new path or write_file when the path already exists. Stop after the successful mutation; the verifier will inspect the saved file."
+                : "Implement the plan using the retrieved evidence. Satisfy every acceptance item exactly; never substitute an easier artifact or explain what could be built instead of creating it. After mutation, re-read every changed file and compare its actual contents with the original acceptance checklist.",
+              dependsOn: ["retrieve"],
+            },
+          ]
+        : Array.from({ length: artifactCount }, (_, index) => {
+            const variant = requestedVariants[index];
+            return {
+              id: `code-${index + 1}`,
+              role: "coder" as const,
+              title: `Implement ${index + 1} of ${artifactCount}${variant ? ` (${variant})` : ""}`,
+              prompt:
+                `Create exactly ONE file: artifact ${index + 1} of ${artifactCount} for the objective` +
+                (variant ? `, implemented in ${variant}.` : ".") +
+                ` Do not create the other ${artifactCount - 1} artifacts; separate steps handle those.` +
+                (variant
+                  ? ""
+                  : " Pick a language that none of the earlier steps listed above already used.") +
+                " Give the file a clear workspace-relative path whose extension matches its language." +
+                " The file must contain the full working implementation: no placeholders, ellipses, TODOs, or tutorial prose." +
+                " Call create_file once with the complete content, then stop.",
+              dependsOn: [index === 0 ? "retrieve" : `code-${index}`],
+            };
+          });
     const plan: OrchestrationPlan = {
       objective: task.prompt,
       steps: [
@@ -894,21 +1034,14 @@ export class HeadlessRuntimeService {
           prompt: "Retrieve compact semantic context for the plan.",
           dependsOn: ["plan"],
         },
-        {
-          id: "code",
-          role: "coder",
-          title: "Implement",
-          prompt:
-            "Implement the plan using the retrieved evidence. Satisfy every acceptance item exactly; never substitute an easier artifact or explain what could be built instead of creating it. After mutation, re-read every changed file and compare its actual contents with the original acceptance checklist.",
-          dependsOn: ["retrieve"],
-        },
+        ...codingSteps,
         {
           id: "verify",
           role: "verifier",
           title: "Verify",
           prompt:
-            "Run relevant checks and report VERIFICATION_PASSED only when all checks pass.",
-          dependsOn: ["code"],
+            "Verify the saved files against every objective requirement. Call read_file on each changed artifact and use a relevant automated check when supported; for a standalone HTML/CSS artifact, a detailed static behavior review of the actual file is acceptable. Report VERIFICATION_PASSED only when all checks pass.",
+          dependsOn: [codingSteps.at(-1)!.id],
         },
         {
           id: "review",
@@ -927,6 +1060,7 @@ export class HeadlessRuntimeService {
         : 0;
     const consumeModelRequest = (): void => {
       if (signal.aborted) throw new Error("Pipeline was cancelled.");
+      this.assertWithinBudget(task.id);
       if (Date.now() - startedAt >= this.limits.maxDurationMs) {
         throw new Error("Pipeline exceeded its time budget.");
       }
@@ -947,7 +1081,12 @@ export class HeadlessRuntimeService {
       (
         agentId: string,
         includeHistory = false,
-        enforceWorkflowCompletion = agentId === CODING_AGENT_ID,
+        enforceWorkflowCompletion = agentId === CODING_AGENT_ID ||
+          agentId === VERIFIER_AGENT_ID,
+        requireWorkspaceMutation = agentId === CODING_AGENT_ID,
+        stopAfterMutationCount = 0,
+        rejectIncompleteMutations = false,
+        toolAllowlist?: readonly string[],
       ) =>
       async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
         const previous = request.previousResults
@@ -964,45 +1103,111 @@ export class HeadlessRuntimeService {
           false,
           consumeModelRequest,
           enforceWorkflowCompletion,
+          stopAfterMutationCount,
+          rejectIncompleteMutations,
+          toolAllowlist,
+          agentId === VERIFIER_AGENT_ID
+            ? "verification"
+            : agentId === CODING_AGENT_ID
+              ? "mutation"
+              : undefined,
+          JUDGEMENT_AGENT_IDS.has(agentId) ? JUDGEMENT_ROUTE_POLICY : undefined,
         );
+        for (const message of result.messages ?? []) {
+          if (message.role !== "tool" || message.metadata?.isError === true) {
+            continue;
+          }
+          const changedFiles = message.metadata?.changedFiles;
+          if (!Array.isArray(changedFiles)) continue;
+          for (const file of changedFiles) {
+            const path = stringValue(recordValue(file)?.path);
+            if (path) producedFiles.add(path);
+          }
+        }
         const completedMutation = (result.messages ?? []).some(
           (message) =>
             message.role === "tool" &&
             typeof message.toolName === "string" &&
-            [
+            message.metadata?.isError !== true &&
+            (([
               "apply_patch",
               "write_file",
               "create_file",
               "delete_file",
-              "run_command",
-            ].includes(message.toolName),
+            ].includes(message.toolName) &&
+              message.metadata?.changed === true) ||
+              (message.toolName === "run_command" &&
+                message.metadata?.exitCode === 0)),
         );
-        const success =
-          result.status === "completed" &&
-          (!enforceWorkflowCompletion || completedMutation);
+        const success = enforceWorkflowCompletion
+          ? requireWorkspaceMutation
+            ? completedMutation
+            : result.status === "completed"
+          : result.status === "completed";
         const summary =
-          enforceWorkflowCompletion && !completedMutation
+          requireWorkspaceMutation && !completedMutation
             ? "The coding model did not call a workspace mutation tool. No files were changed."
             : result.text;
+        const verifierEvidence =
+          request.step.role === "verifier"
+            ? (result.messages ?? []).some(
+                (message) =>
+                  message.role === "tool" &&
+                  message.metadata?.isError !== true &&
+                  VERIFICATION_TOOLS.has(String(message.toolName)),
+              )
+            : true;
+        const fabricatedTools =
+          request.step.role === "verifier" && !verifierEvidence
+            ? describeFabricatedTools(result.text)
+            : undefined;
+        if (request.step.role === "verifier" && !success) {
+          lastVerifierFinding = summary;
+        }
+        const verifierSummary = !verifierEvidence
+          ? "The verifier reported results without running any verification tool" +
+            `${fabricatedTools ? `, naming tools that do not exist (${fabricatedTools})` : ""}. ` +
+            `Call read_file on each changed path, then run_command, compile_code, or syntax_check. Available tools: ${[...VERIFICATION_TOOLS].join(", ")}.`
+          : summary;
         return {
-          success,
-          summary,
-          output: summary,
-          progressKey: !success
-            ? `${agentId}:${normalizeFailure(summary)}`
-            : undefined,
+          success:
+            request.step.role === "verifier" ? verifierEvidence : success,
+          summary: verifierSummary,
+          output: verifierSummary,
+          progressKey: !verifierEvidence
+            ? "verifier:unverified"
+            : !success
+              ? `${agentId}:${normalizeFailure(summary)}`
+              : undefined,
+          retryable:
+            requireWorkspaceMutation && !completedMutation ? false : undefined,
           passed:
             request.step.role === "verifier"
-              ? /(?:^|\n)VERIFICATION_PASSED\s*$/u.test(result.text.trim())
+              ? verifierEvidence &&
+                /(?:^|\n)VERIFICATION_PASSED\s*$/u.test(result.text.trim())
               : undefined,
         };
       };
     const workers = {
-      planner: runAgentWorker(DEFAULT_AGENT_ID, true),
+      planner: greenfieldArtifact
+        ? async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
+            const summary = [
+              "Greenfield artifact plan:",
+              `- Preserve the objective verbatim: ${request.objective}`,
+              artifactCount === 1
+                ? "- Create one complete self-contained file at a clear workspace-relative path."
+                : `- Create ${artifactCount} complete self-contained files in ${artifactCount} separate coding steps, one file per step${requestedVariants.length > 0 ? `: ${requestedVariants.join(", ")}` : "."}`,
+              "- Include every requested behavior and control; do not substitute a simpler artifact.",
+              "- Reject placeholders, ellipses, TODOs, missing assets, and tutorial-only output.",
+              "- Verify the saved file's syntax and interactive behavior against the objective.",
+            ].join("\n");
+            return { success: true, summary, output: summary };
+          }
+        : runAgentWorker(DEFAULT_AGENT_ID, true),
       retriever: async (
         request: AgentWorkRequest,
       ): Promise<AgentWorkResult> => {
-        if (isGreenfieldArtifactRequest(request.objective)) {
+        if (greenfieldArtifact) {
           const summary =
             "Greenfield artifact: no existing project code is required. Create the requested file at a clear workspace-relative path using a self-contained implementation and the original acceptance criteria.";
           return {
@@ -1025,8 +1230,28 @@ export class HeadlessRuntimeService {
           progressKey: `retrieval:${retrieval.results.map((slice) => `${slice.path}:${slice.startLine}-${slice.endLine}`).join("|")}`,
         };
       },
-      coder: runAgentWorker(CODING_AGENT_ID),
-      verifier: runAgentWorker(VERIFIER_AGENT_ID),
+      coder: greenfieldArtifact
+        ? runAgentWorker(CODING_AGENT_ID, false, true, true, 1, true, [
+            "create_file",
+            "write_file",
+          ])
+        : runAgentWorker(CODING_AGENT_ID),
+      verifier: async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
+        const changed = [...producedFiles];
+        return runAgentWorker(VERIFIER_AGENT_ID)(
+          changed.length === 0
+            ? request
+            : {
+                ...request,
+                step: {
+                  ...request.step,
+                  prompt:
+                    `${request.step.prompt}\n\nThis task changed ${changed.length} file(s). Call read_file on every one before judging: ` +
+                    changed.join(", "),
+                },
+              },
+        );
+      },
       reviewer: runAgentWorker(REVIEWER_AGENT_ID),
     };
     const orchestrator = new TaskOrchestrator(workers, {
@@ -1037,6 +1262,12 @@ export class HeadlessRuntimeService {
       checkpoint: createTaskCheckpointStore(this.store, task.id),
       recoverStep: async (request, failure) => {
         if (request.step.role !== "verifier") return undefined;
+        // A verifier that answered from imagination has told us nothing about
+        // the artifact, so rolling the workspace back would discard good work
+        // on no evidence. Send it back to run real tools instead.
+        if (failure.progressKey?.startsWith("verifier:unverified")) {
+          return undefined;
+        }
         return this.recoverVerifierFailure(
           session,
           task,
@@ -1049,9 +1280,30 @@ export class HeadlessRuntimeService {
     });
     const state = await orchestrator.run(plan, context);
     const final =
-      state.results.review ?? state.results.verify ?? state.results.code;
-    const text =
-      final?.summary ?? state.failure ?? "Pipeline produced no result.";
+      state.results.review ??
+      state.results.verify ??
+      state.results[codingSteps.at(-1)!.id] ??
+      state.results.code;
+    // A failed verification does not undo the implementation. Reporting the run
+    // as a plain failure hides files that exist on disk and invites the user to
+    // re-run work that is already done, so an unverified-but-written result is
+    // surfaced as paused for a human decision, with the artifacts named.
+    const unverifiedArtifacts =
+      state.stage !== "completed" && producedFiles.size > 0;
+    const text = unverifiedArtifacts
+      ? [
+          `Implementation finished, but verification did not pass. ${producedFiles.size} file(s) were written and kept:`,
+          ...[...producedFiles].map((path) => `- ${path}`),
+          "",
+          "Unresolved verification findings:",
+          lastVerifierFinding ??
+            state.results.verify?.summary ??
+            state.failure ??
+            "The verifier did not report a specific finding.",
+          "",
+          "Review the files above, then either accept them or ask for the specific fix.",
+        ].join("\n")
+      : (final?.summary ?? state.failure ?? "Pipeline produced no result.");
     return {
       runId: state.runId,
       agentId: REVIEWER_AGENT_ID,
@@ -1059,7 +1311,7 @@ export class HeadlessRuntimeService {
       status:
         state.stage === "completed"
           ? "completed"
-          : state.stage === "paused"
+          : state.stage === "paused" || unverifiedArtifacts
             ? "paused"
             : "failed",
       handoffs: 0,
@@ -1080,6 +1332,10 @@ export class HeadlessRuntimeService {
       agentId: string,
       includeHistory?: boolean,
       enforceWorkflowCompletion?: boolean,
+      requireWorkspaceMutation?: boolean,
+      stopAfterMutationCount?: number,
+      rejectIncompleteMutations?: boolean,
+      toolAllowlist?: readonly string[],
     ) => (request: AgentWorkRequest) => Promise<AgentWorkResult>,
   ): Promise<AgentWorkResult> {
     let recovery = this.getWorkspaceRecovery(task.id);
@@ -1106,7 +1362,11 @@ export class HeadlessRuntimeService {
     const workspace = new WorkspaceFileService(this.projectRoot);
     const rolledBack: Array<{ path: string; status: string }> = [];
     for (const mutation of [...recovery.mutations].reverse()) {
-      const result = await workspace.rollbackMutation(mutation);
+      // Undoing a creation would delete the only copy of the work. Edits to
+      // pre-existing files are still reverted so a bad patch cannot survive.
+      const result = await workspace.rollbackMutation(mutation, {
+        preserveCreatedFiles: true,
+      });
       rolledBack.push({ path: mutation.path, status: result.status });
       if (result.status === "conflict") {
         recovery = { ...recovery, phase: "conflicted", rolledBack };
@@ -1127,27 +1387,37 @@ export class HeadlessRuntimeService {
       untrackedSideEffects: [],
     };
     this.saveWorkspaceRecovery(task.id, recovery);
+    const greenfieldArtifact = isGreenfieldArtifactRequest(request.objective);
     await this.retrieval?.indexProject();
-    const replanned = await runAgentWorker(
-      DEFAULT_AGENT_ID,
-      true,
-    )({
-      ...request,
-      step: {
-        id: `replan-${recovery.cycle}`,
-        role: "planner",
-        title: "Replan after verification failure",
-        prompt:
-          "Produce a materially revised plan after rollback. Do not repeat the failed approach. " +
-          `Verifier evidence:\n${failure.summary}\nRollback report:\n${JSON.stringify(rolledBack)}`,
-      },
-    });
+    const replanned = greenfieldArtifact
+      ? {
+          success: true,
+          summary:
+            "Rebuild the standalone artifact from scratch and correct every verifier finding. " +
+            `Do not repeat the rejected implementation. Verifier evidence:\n${failure.summary}`,
+        }
+      : await runAgentWorker(
+          DEFAULT_AGENT_ID,
+          true,
+        )({
+          ...request,
+          step: {
+            id: `replan-${recovery.cycle}`,
+            role: "planner",
+            title: "Replan after verification failure",
+            prompt:
+              "Produce a materially revised plan after rollback. Do not repeat the failed approach. " +
+              `Verifier evidence:\n${failure.summary}\nRollback report:\n${JSON.stringify(rolledBack)}`,
+          },
+        });
     if (!replanned.success) return replanned;
-    const retrieved = await this.retrieval!.query({
-      query: `${request.objective}\n${replanned.summary}\n${failure.summary}`,
-      limit: 10,
-      maxSliceLines: 40,
-    });
+    const retrieved = greenfieldArtifact
+      ? { results: [], query: request.objective }
+      : await this.retrieval!.query({
+          query: `${request.objective}\n${replanned.summary}\n${failure.summary}`,
+          limit: 10,
+          maxSliceLines: 40,
+        });
     recovery = {
       ...this.getWorkspaceRecovery(task.id),
       phase: "recoding",
@@ -1157,7 +1427,11 @@ export class HeadlessRuntimeService {
     const corrected = await runAgentWorker(
       CODING_AGENT_ID,
       false,
-      false,
+      true,
+      true,
+      greenfieldArtifact ? 1 : 0,
+      greenfieldArtifact,
+      greenfieldArtifact ? ["create_file", "write_file"] : undefined,
     )({
       ...request,
       context: [
@@ -1176,7 +1450,15 @@ export class HeadlessRuntimeService {
           "Implement the revised plan against the rolled-back workspace. All mutations require fresh approval.",
       },
     });
-    if (!corrected.success) return corrected;
+    if (!corrected.success) {
+      return {
+        ...corrected,
+        summary: corrected.summary.includes("did not call a workspace mutation")
+          ? "The verifier did not identify a concrete, actionable defect, so no corrective edit could be made. " +
+            `Verifier report:\n${failure.summary}`
+          : corrected.summary,
+      };
+    }
     recovery = {
       ...this.getWorkspaceRecovery(task.id),
       phase: "ready_to_verify",
@@ -1498,6 +1780,13 @@ export class HeadlessRuntimeService {
     if (agentEvent.type === "model_response" && agentEvent.callId) {
       const route = this.latestRouteForModelSpan(taskId, agentEvent.callId);
       const usage = agentEvent.response?.usage;
+      const callCost =
+        agentEvent.response?.cost ??
+        estimateActualCost(
+          this.model,
+          usage,
+          agentEvent.response?.providerId ?? route?.providerId,
+        );
       this.finishTraceSpan(trace.traceId, agentEvent.callId, {
         status: "completed",
         output: agentEvent.response,
@@ -1507,14 +1796,9 @@ export class HeadlessRuntimeService {
         providerId: agentEvent.response?.providerId ?? route?.providerId,
         modelId: agentEvent.response?.model ?? route?.modelId,
         agentId: event.agentId,
-        cost:
-          agentEvent.response?.cost ??
-          estimateActualCost(
-            this.model,
-            usage,
-            agentEvent.response?.providerId ?? route?.providerId,
-          ),
+        cost: callCost,
       });
+      this.recordSpend(sessionId, taskId, callCost, usage);
       return;
     }
     if (agentEvent.type === "tool_requested" && agentEvent.spanId) {
@@ -1765,7 +2049,12 @@ function taskThinkingSummary(
 function stageLabel(event: Record<string, unknown> | undefined): string {
   const role = stringValue(event?.role);
   const stepId = stringValue(event?.stepId);
-  return titleCase(role ?? stepId ?? "Pipeline stage");
+  const label = titleCase(role ?? stepId ?? "Pipeline stage");
+  // Repeated stages share a role, and the client de-duplicates identical
+  // progress lines. Without the ordinal, five coding steps collapse into one
+  // "Coder started" and the run looks stuck when it is making progress.
+  const ordinal = /-(\d+)$/u.exec(stepId ?? "")?.[1];
+  return ordinal ? `${label} ${ordinal}` : label;
 }
 
 function agentLabel(event: Record<string, unknown> | undefined): string {
@@ -1788,6 +2077,50 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+/**
+ * Stages that judge someone else's work. Running these on a weaker model than
+ * the one that produced the work makes the judgement worthless, so they never
+ * fall back to a local route while a hosted one is configured.
+ */
+const JUDGEMENT_AGENT_IDS: ReadonlySet<string> = new Set([
+  VERIFIER_AGENT_ID,
+  REVIEWER_AGENT_ID,
+]);
+
+const JUDGEMENT_ROUTE_POLICY: ModelRoutePolicy = {
+  excludeProviders: ["ollama"],
+  // Provider rate limits clear in seconds. Waiting beats demoting the check.
+  maxCooldownWaitMs: 45_000,
+  reason: "verification and review must not run on a weaker local model",
+};
+
+/** Tools whose successful execution counts as real verification evidence. */
+const VERIFICATION_TOOLS: ReadonlySet<string> = new Set([
+  "read_file",
+  "run_command",
+  "compile_code",
+  "syntax_check",
+  "git_diff",
+  "list_directory",
+  "find_files",
+]);
+
+/**
+ * Small models routinely invent plausible tool names ("py_verify", "go_verify")
+ * and narrate their output. Naming the invented tools back to the model makes
+ * the corrective retry far more likely to call a real one.
+ */
+function describeFabricatedTools(text: string): string | undefined {
+  const named = new Set<string>();
+  for (const match of text.matchAll(
+    /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b(?=\s*(?:\(|tool\b))/giu,
+  )) {
+    const name = match[1]!.toLowerCase();
+    if (!VERIFICATION_TOOLS.has(name)) named.add(name);
+  }
+  return named.size > 0 ? [...named].slice(0, 6).join(", ") : undefined;
+}
+
 function shouldUseVerificationOnly(agentId: string, prompt: string): boolean {
   if (agentId !== DEFAULT_AGENT_ID && agentId !== CODING_AGENT_ID) return false;
   const verificationRequest =
@@ -1805,32 +2138,168 @@ function shouldUseVerificationOnly(agentId: string, prompt: string): boolean {
   );
 }
 
-function shouldUsePipeline(agentId: string, prompt: string): boolean {
-  if (agentId !== DEFAULT_AGENT_ID && agentId !== CODING_AGENT_ID) return false;
+/**
+ * Nouns naming something the user expects to exist when the turn ends.
+ *
+ * `code`, `script`, and `program` are deliberately included. In an agentic
+ * coding IDE, "write a calculator program" is answered by creating a file the
+ * user can run, not by printing a fence into the chat transcript. Routing those
+ * requests to a tool-less chat agent is what made the IDE look like a chatbot.
+ */
+const ARTIFACT_NOUN_PATTERN =
+  "files?|folders?|director(?:y|ies)|pages?|documents?|components?|websites?|web ?pages?|apps?|applications?|scripts?|programs?|code|codebase|snippets?|examples?|implementations?|modules?|packages?|librar(?:y|ies)|projects?|games?|servers?|apis?|clis?|classes?|functions?|tests?|suites?|readmes?|demos?|prototypes?";
+
+/** Verbs asking for something new to exist. */
+const PRODUCE_VERB_PATTERN =
+  "add|build|code|create|draft|generate|implement|make|produce|scaffold|set ?up|write";
+
+/** Verbs asking for something that already exists to change. */
+const MUTATE_VERB_PATTERN =
+  "change|debug|delete|edit|fix|migrate|modify|patch|refactor|remove|rename|replace|update|upgrade";
+
+const LANGUAGE_PATTERN =
+  "languages?|bash|shell|powershell|c|c\\+\\+|c#|csharp|css|dart|elixir|go|golang|haskell|html|java|javascript|js|jsx|kotlin|lua|matlab|perl|php|python|ruby|rust|scala|sql|swift|typescript|tsx?";
+
+const produceArtifactPattern = new RegExp(
+  `\\b(?:${PRODUCE_VERB_PATTERN})\\b[^.!?\\n]{0,120}\\b(?:${ARTIFACT_NOUN_PATTERN})\\b`,
+  "iu",
+);
+
+const produceInLanguagePattern = new RegExp(
+  `\\b(?:${PRODUCE_VERB_PATTERN})\\b[^.!?\\n]{0,120}\\b(?:in|using|with|for)\\b[^.!?\\n]{0,60}\\b(?:${LANGUAGE_PATTERN})\\b`,
+  "iu",
+);
+
+const mutateArtifactPattern = new RegExp(
+  `\\b(?:${MUTATE_VERB_PATTERN}|save|commit|stage|run|test)\\b`,
+  "iu",
+);
+
+const explicitPathPattern =
+  /(?:^|\s)(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?:\s|$|[:;,])/u;
+
+const existingWorkPattern =
+  /\b(?:existing|current|opened|this)\s+(?:file|page|document|component|website|webpage|app|application|project|workspace|repo|repository|codebase)\b/iu;
+
+/**
+ * True when the user asked for code or another artifact to be produced. Such a
+ * request is workspace work: the agent must call a mutation tool, and therefore
+ * ask for approval, instead of answering with a chat-only code fence.
+ */
+function requestsCodeArtifact(prompt: string): boolean {
   return (
-    /\b(add|build|change|create|debug|delete|edit|fix|implement|migrate|modify|patch|refactor|remove|rename|save|test|update|write)\b/i.test(
-      prompt,
-    ) ||
-    /\b(?:make|generate)\b[^.!?\n]{0,100}\b(?:file|page|document|component|website|webpage|app|application)\b/iu.test(
-      prompt,
-    )
+    produceArtifactPattern.test(prompt) || produceInLanguagePattern.test(prompt)
   );
 }
 
-function shouldUseConversationAgent(agentId: string, prompt: string): boolean {
-  return agentId === DEFAULT_AGENT_ID && !hasWorkspaceReference(prompt);
+/** True for questions that only want an explanation, never a new artifact. */
+function isExplanationRequest(prompt: string): boolean {
+  if (requestsCodeArtifact(prompt)) return false;
+  if (mutateArtifactPattern.test(prompt)) return false;
+  return /^\s*(?:what|why|who|when|where|which|how\s+(?:do|does|did|can|could|would|should)|explain|describe|tell me|compare)\b/iu.test(
+    prompt,
+  );
 }
 
-function shouldAnswerWithCode(prompt: string): boolean {
-  const requestsCodeOutput =
-    /\b(?:write|show|give|provide|generate)\b[^.!?\n]{0,100}\b(?:code|snippet|example|program)\b/iu.test(
-      prompt,
-    ) ||
-    /\b(?:code|implementation)\b[^.!?\n]{0,80}\b(?:in|using|for)\b[^.!?\n]{0,100}\b(?:languages?|javascript|typescript|python|java|c\+\+|rust|go|ruby|php|swift|kotlin)\b/iu.test(
+const NUMBER_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
+
+/**
+ * How many separate artifacts the request asks for. A greenfield run stops after
+ * its first successful mutation by default; "in 5 different languages" has to
+ * keep the coder alive for five files instead of one.
+ */
+function requestedArtifactCount(prompt: string): number {
+  const match =
+    /\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:different\s+|separate\s+|distinct\s+|various\s+)*(?:programming\s+)?(?:languages?|files?|versions?|variants?|implementations?|examples?|scripts?|programs?)\b/iu.exec(
       prompt,
     );
-  if (!requestsCodeOutput) return false;
-  return !hasWorkspaceReference(prompt);
+  if (!match) return 1;
+  const token = match[1]!.toLowerCase();
+  const value = NUMBER_WORDS[token] ?? Number.parseInt(token, 10);
+  return Number.isFinite(value) ? Math.min(Math.max(value, 1), 10) : 1;
+}
+
+const bareActionPattern = new RegExp(
+  `\\b(?:${PRODUCE_VERB_PATTERN}|${MUTATE_VERB_PATTERN}|save|commit|stage|install|run|test)\\b`,
+  "iu",
+);
+
+/**
+ * True when the turn should end with the workspace in a different state. Both
+ * the pipeline check and the chat check read this one predicate so a prompt can
+ * never be classified as workspace work and casual conversation at once.
+ */
+function requestsWorkspaceWork(prompt: string): boolean {
+  if (isExplanationRequest(prompt)) return false;
+  return (
+    requestsCodeArtifact(prompt) ||
+    hasWorkspaceReference(prompt) ||
+    bareActionPattern.test(prompt)
+  );
+}
+
+const KNOWN_LANGUAGES: readonly string[] = [
+  "python",
+  "javascript",
+  "typescript",
+  "java",
+  "c++",
+  "c#",
+  "c",
+  "go",
+  "rust",
+  "ruby",
+  "php",
+  "swift",
+  "kotlin",
+  "scala",
+  "haskell",
+  "lua",
+  "perl",
+  "dart",
+  "elixir",
+  "bash",
+  "sql",
+  "html",
+];
+
+/**
+ * Languages the user named explicitly, in the order they appear. When the
+ * request only says "5 different languages" this is empty and each coding step
+ * picks a language the earlier steps did not use.
+ */
+function requestedVariantLabels(prompt: string): string[] {
+  const lowered = prompt.toLowerCase();
+  const found: string[] = [];
+  for (const language of KNOWN_LANGUAGES) {
+    // Only `+` is a regex metacharacter here; escaping `#` is an invalid escape
+    // under the `u` flag, so the name is escaped rather than pattern-built.
+    const escaped = language.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    if (new RegExp(`(?:^|[^\\w+#])${escaped}(?![\\w+#])`, "iu").test(prompt)) {
+      found.push(language);
+    }
+  }
+  return found.sort((a, b) => lowered.indexOf(a) - lowered.indexOf(b));
+}
+
+function shouldUsePipeline(agentId: string, prompt: string): boolean {
+  if (agentId !== DEFAULT_AGENT_ID && agentId !== CODING_AGENT_ID) return false;
+  return requestsWorkspaceWork(prompt);
+}
+
+function shouldUseConversationAgent(agentId: string, prompt: string): boolean {
+  return agentId === DEFAULT_AGENT_ID && !requestsWorkspaceWork(prompt);
 }
 
 function hasWorkspaceReference(prompt: string): boolean {
@@ -1838,31 +2307,21 @@ function hasWorkspaceReference(prompt: string): boolean {
     /\b(?:this|the|current|existing|opened)\s+(?:project|workspace|repository|repo|codebase|file|folder|app|application)\b/iu.test(
       prompt,
     ) ||
-    /\b(?:create|edit|modify|update|patch|save|add|remove|delete)\b[^.!?\n]{0,80}\b(?:file|folder|project|workspace|repository|repo|codebase)\b/iu.test(
-      prompt,
-    ) ||
-    /\b(?:make|generate|build|write)\b[^.!?\n]{0,100}\b(?:file|page|document|component|website|webpage|app|application)\b/iu.test(
-      prompt,
-    ) ||
-    /(?:^|\s)(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?:\s|$|[:;,])/u.test(
-      prompt,
-    )
+    requestsCodeArtifact(prompt) ||
+    new RegExp(
+      `\\b(?:${MUTATE_VERB_PATTERN})\\b[^.!?\\n]{0,120}\\b(?:${ARTIFACT_NOUN_PATTERN})\\b`,
+      "iu",
+    ).test(prompt) ||
+    explicitPathPattern.test(prompt)
   );
 }
 
 function isGreenfieldArtifactRequest(prompt: string): boolean {
-  const createsArtifact =
-    /\b(?:make|create|generate|build|write)\b[^.!?\n]{0,100}\b(?:file|page|document|component|website|webpage|app|application)\b/iu.test(
-      prompt,
-    );
-  const targetsExistingWork =
-    /\b(?:existing|current|opened|this)\s+(?:file|page|document|component|website|webpage|app|application|project|workspace|repo|repository|codebase)\b/iu.test(
-      prompt,
-    ) ||
-    /(?:^|\s)(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?:\s|$|[:;,])/u.test(
-      prompt,
-    );
-  return createsArtifact && !targetsExistingWork;
+  return (
+    requestsCodeArtifact(prompt) &&
+    !existingWorkPattern.test(prompt) &&
+    !explicitPathPattern.test(prompt)
+  );
 }
 
 function waitForApproval(

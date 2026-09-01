@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "./events.js";
 import type { ConversationMessage } from "./messages.js";
 import { AgentRunner } from "./agent.js";
-import type { LanguageModel } from "./model.js";
+import type { LanguageModel, ModelRoutePolicy } from "./model.js";
 import type { Tool, ToolResult } from "./tools.js";
 import { ToolRegistry } from "./tool-registry.js";
 
@@ -82,6 +82,11 @@ export interface MultiAgentOptions {
   maxDurationMs?: number;
   allowHandoffs?: boolean;
   enforceWorkflowCompletion?: boolean;
+  stopAfterMutationCount?: number;
+  routePolicy?: ModelRoutePolicy;
+  rejectIncompleteMutations?: boolean;
+  toolAllowlist?: readonly string[];
+  workflowMode?: "mutation" | "verification";
   beforeModelRequest?: () => void;
   signal?: AbortSignal;
   onEvent?: (event: MultiAgentEvent) => void | Promise<void>;
@@ -216,6 +221,11 @@ export class MultiAgentOrchestrator {
         this.options.beforeModelRequest?.();
       },
       enforceWorkflowCompletion: this.options.enforceWorkflowCompletion,
+      stopAfterMutationCount: this.options.stopAfterMutationCount,
+      routePolicy: this.options.routePolicy,
+      rejectIncompleteMutations: this.options.rejectIncompleteMutations,
+      mutationObjective: task,
+      workflowMode: this.options.workflowMode,
       onEvent: async (event) => {
         await this.options.onEvent?.({
           type: "agent_event",
@@ -261,12 +271,12 @@ export class MultiAgentOrchestrator {
       const tool = available.get(definition.name);
       if (!tool) continue;
       if (
-        !agent.allowedTools ||
-        agent.allowedTools.includes(definition.name) ||
-        definition.name === "handoff_agent"
+        (!this.options.toolAllowlist ||
+          this.options.toolAllowlist.includes(definition.name)) &&
+        (!agent.allowedTools || agent.allowedTools.includes(definition.name))
       ) {
         scoped.register(tool);
-      } else if (agent.delegatesTo) {
+      } else if (!this.options.toolAllowlist && agent.delegatesTo) {
         scoped.registerHidden(
           this.createDelegationProxy(
             tool,

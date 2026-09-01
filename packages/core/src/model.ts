@@ -3,10 +3,33 @@ import type { ToolDefinition } from "./tools.js";
 
 export const DEFAULT_MAX_TOOL_STEPS = 8;
 
+/**
+ * Per-request routing constraints.
+ *
+ * Route ranking is global, so a provider cooldown during one stage silently
+ * pushes the next stage onto whatever route is left. That is correct for
+ * generation but wrong for judgement: a verifier is worthless if it runs on a
+ * weaker model than the coder it is checking. A policy lets a caller say which
+ * providers must not serve a request, and whether waiting out a cooldown is
+ * preferable to degrading.
+ */
+export interface ModelRoutePolicy {
+  /** Providers that must not serve this request while any alternative exists. */
+  excludeProviders?: readonly string[];
+  /**
+   * Wait up to this long for an excluded-set-free route to leave cooldown
+   * before considering the excluded providers. Zero disables waiting.
+   */
+  maxCooldownWaitMs?: number;
+  /** Human-readable justification, surfaced in routing events. */
+  reason?: string;
+}
+
 export interface ModelRequest {
   messages: readonly ConversationMessage[];
   tools: readonly ToolDefinition[];
   signal?: AbortSignal;
+  routePolicy?: ModelRoutePolicy;
 }
 
 export interface ModelUsage {

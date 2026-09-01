@@ -24,6 +24,13 @@ export interface OpenAIResponseOptions {
   baseURL?: string;
 }
 
+/**
+ * A whole source file has to fit in one completion. Provider defaults are far
+ * smaller than that, and a completion cut short at the default is written to
+ * disk as if it were finished, so the limit is stated explicitly.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
+
 export class OpenAIModel implements LanguageModel {
   private readonly client: OpenAI;
   private readonly model: string;
@@ -52,6 +59,7 @@ export class OpenAIModel implements LanguageModel {
           model: this.model,
           input: toResponseInput(request.messages),
           tools: request.tools.map(toFunctionTool),
+          max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
         },
         { signal: request.signal },
       );
@@ -131,6 +139,7 @@ export class OpenAICompatibleChatModel implements LanguageModel {
               parameters: tool.parameters,
             },
           })),
+          max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
         },
         { signal: request.signal },
       );

@@ -41,6 +41,14 @@ export interface RuntimeLimits {
   maxToolCalls: number;
   maxDurationMs: number;
   contextCharacterBudget: number;
+  /**
+   * Hard ceiling on real dollars spent across every model call in one task.
+   * The evaluation halts and scores a task that exceeds its budget as a total
+   * failure, so the system has to stop itself first and say why.
+   */
+  maxTaskCostUsd: number;
+  /** Fraction of the budget after which a warning is emitted. */
+  taskCostWarningRatio: number;
 }
 
 export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
@@ -51,7 +59,20 @@ export const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
   maxToolCalls: 128,
   maxDurationMs: 10 * 60_000,
   contextCharacterBudget: 20_000,
+  maxTaskCostUsd: 0.5,
+  taskCostWarningRatio: 0.75,
 };
+
+export interface RuntimeTaskSpend {
+  taskId: string;
+  /** Dollars actually spent, summed from per-call provider usage. */
+  costUsd: number;
+  /** The ceiling this task is held to. */
+  budgetUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  modelCalls: number;
+}
 
 export interface RuntimeApprovalRequest {
   requestId: string;
@@ -166,6 +187,13 @@ export type RuntimeEvent =
       type: "routing_event";
       taskId: string;
       event: GatewayEvent;
+    })
+  | (RuntimeEventBase & {
+      type: "task_spend";
+      taskId: string;
+      spend: RuntimeTaskSpend;
+      /** Set once the task crosses its warning ratio or its hard ceiling. */
+      level?: "warning" | "exceeded";
     })
   | (RuntimeEventBase & {
       type: "approval_requested";

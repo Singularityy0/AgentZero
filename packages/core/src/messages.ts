@@ -50,6 +50,11 @@ export interface ToolMessage {
   toolName?: string;
   content: string;
   metadata?: {
+    /** Whether the tool execution failed. Used by workflow completion checks. */
+    isError?: boolean;
+    /** Whether the tool changed workspace state. */
+    changed?: boolean;
+    exitCode?: number;
     changedFiles?: Array<{ path: string; hash?: string }>;
     contextArtifacts?: Array<{
       source: "file" | "retrieval" | "manual" | "tool";

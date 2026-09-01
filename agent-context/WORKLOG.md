@@ -342,6 +342,301 @@
   an exact JSON tool fallback, changed files must be re-read, and Verifier
   performs requirement-level static behavior checks. A live local-Mistral probe
   produced a native `create_file` call; all 55 tests and lint pass.
+- Traced the next cube-artifact failure to a successful placeholder write being
+  replayed after context overflow. Greenfield artifacts now use a deterministic
+  compact plan, expose only `create_file`/`write_file` to Coder, checkpoint and
+  end the coding node immediately after a successful mutation, distinguish
+  failed tool calls from real changes, and mark exhausted mutation recovery as
+  non-retryable. The GUI also has an immediate submission mutex. All 56 tests,
+  TypeScript compilation, lint, and changed-file formatting checks pass; the
+  repository-wide format check remains blocked only by pre-existing formatting
+  in `Design-Idea.md`.
+- Hardened the remaining local-Mistral artifact path. Mutation arguments are
+  rejected before execution when they contain placeholder markers, omit an
+  explicitly requested slider count, or substitute flat output for requested
+  3D HTML. Ollama fallback parsing now repairs observed line continuations and
+  invalid escapes in otherwise valid JSON tool calls. Verifier runs in an
+  explicit read-only workflow mode that requires workspace evidence, and
+  greenfield correction uses compact deterministic recovery instead of
+  replaying Architect and retrieval. The full 58-test suite, build, lint, and
+  changed-file formatting checks pass. An isolated live Mistral run entered
+  Coder exactly once but the single local generation exceeded several minutes;
+  provider speed remains hardware/model dependent.
+
+- Reversed the "standalone code answer" routing rule that made the IDE behave
+  like a chatbot. A prompt such as "make a calculator code for me in 5 different
+  languages" previously matched `shouldAnswerWithCode` and was handed to the
+  tool-free Chat agent, so the model printed five code fences into the transcript
+  and never requested approval or wrote a file. Routing is now decided by one
+  predicate, `requestsWorkspaceWork`, that both the pipeline check and the chat
+  check consume, so a prompt can no longer be classified as workspace work and
+  casual conversation at the same time. `code`, `script`, and `program` count as
+  artifact nouns; only genuine explanation questions (what/why/how does/explain,
+  with no production or mutation verb) still reach the Chat agent.
+- Taught greenfield runs to produce more than one artifact.
+  `AgentRunnerOptions.stopAfterSuccessfulMutation` (a boolean that ended the
+  coding node after the very first write) became `stopAfterMutationCount`, and
+  `requestedArtifactCount()` parses "5 different languages", "three files", and
+  similar phrasing into that budget. The planner summary, the coder step prompt,
+  and verifier recovery all carry the same count, so a five-language request now
+  produces five approved files instead of one.
+- Completed manual context control in the IDE (PS 7a/7b/7c):
+  - `GET /api/files/lookup` returns a ranked flat file list; typing `@` in the
+    composer opens a keyboard-navigable picker that completes the path and pins
+    the file to session context.
+  - Monaco selections are lifted into App state, so a highlighted block can be
+    pinned as an inclusive line range through the existing
+    `POST /api/context` range parameters.
+  - `MessageBody` renders every `path` and `path:line[-line]` reference in the
+    output chat as a button that opens the file and selects those lines; pinned
+    context entries are clickable the same way.
+  - `POST /api/bytheway` exposes the runtime's isolated-question path to the
+    GUI. `/bytheway <question>` in the composer answers with zero prior context
+    and no tools, renders in a visually distinct block, and never enters the
+    session transcript.
+- Regression coverage: a five-language request must reach the Coder and create
+  five distinct files without touching the Chat agent; the context endpoints must
+  pin whole files and line ranges, complete `@` lookups, and remove entries; and
+  `/bytheway` must send exactly one user message with no tools and leave the
+  transcript unchanged. The suite is 60 tests, all passing, with TypeScript
+  compilation, ESLint, and Prettier clean on the changed files.
+
+- Diagnosed a data-loss defect behind a "files were created but are missing"
+  report. A five-language run against an open workspace left four empty
+  directories and no files, while the transcript claimed all five were verified.
+  Two separate faults combined:
+  - The Verifier answered from imagination. It narrated calls to `js_verify`,
+    `py_verify`, `ts_verify`, `cs_verify`, and `go_verify` — none of which
+    exist — and reported "Verified (success)" for each without executing a
+    single tool. The runtime correctly refused the unproven result, but only
+    after the whole stage had run.
+  - Recovery then rolled the workspace back. `rollbackMutation` treats a
+    creation (`before === null`) as "undo by deleting", so the corrective cycle
+    deleted the only copy of the generated work and left the empty parent
+    directories behind.
+- Fixes:
+  - `rollbackMutation` takes `preserveCreatedFiles`, and verifier recovery now
+    passes it. Edits to pre-existing files are still reverted, so a bad patch
+    cannot survive, but a newly created artifact is kept for the corrective pass
+    to overwrite. A run that dies mid-recovery no longer destroys its own output.
+  - An explicit rollback of a creation also prunes the directories it made,
+    instead of leaving empty scaffolding.
+  - A verifier result is only accepted as evidence when a real verification tool
+    actually executed. Fabricated results now fail fast with `verifier:unverified`
+    and a corrective retry that names the invented tools back to the model along
+    with the real ones, rather than triggering a full rollback-and-replan cycle
+    on no evidence at all.
+  - The IDE header and status bar now show the absolute workspace root, since the
+    reported "I have no idea where" was the IDE having a different folder open
+    (`FAIITpkbts`) than the user assumed.
+- Considered and rejected: skipping the Reviewer stage for greenfield artifacts
+  to save wall clock. It removes a graded pipeline stage and the reviewer/resume
+  regression coverage, and it only saves one model call out of many — the
+  dominant cost is one full generation per requested file on a local 7B model,
+  which no pipeline change can remove.
+
+- Corrected the multi-artifact approach after it regressed into
+  `Step "code" failed: The coding model did not call a workspace mutation tool.`
+  The first attempt kept a single coding step and raised its mutation budget to
+  five, so the Coder prompt asked local Mistral to emit five `create_file` calls
+  from one turn. It answered with prose and changed nothing — the same failure
+  mode the whole project exists to avoid. Raising a budget is not decomposition.
+- The pipeline now builds one coding step per artifact (`code-1` … `code-N`),
+  chained so each sees what the earlier steps produced, each with a
+  single-file objective and a mutation budget of one. A one-file request keeps
+  the original `code` step id, so existing checkpoints and resume behavior are
+  unchanged. Corrective coding after a verifier failure is also one file at a
+  time.
+- Artifact count comes from either phrasing: "in 5 different languages" yields a
+  count, "in Python and Rust" yields the languages, and the larger of the two
+  wins (capped at ten). Named languages are passed to their step; when none are
+  named each step is told to pick one the earlier steps did not use.
+- Regression coverage asserts the five-language request starts coding steps
+  `code-1` through `code-5` and creates five distinct files — a single step
+  emitting five mutations no longer satisfies the test.
+
+- Fixed `Step "verify" failed after 2 attempts` discarding a run whose files
+  already existed. Verification failing does not undo an implementation, but the
+  pipeline reported the whole task as failed and named none of the artifacts, so
+  the work looked lost and invited a pointless re-run. The pipeline now tracks
+  every path reported through tool `changedFiles` metadata; when the orchestrator
+  stops without completing but artifacts were written, the task is reported as
+  `paused` with the files listed and the verifier's unresolved findings quoted.
+  It is deliberately not reported as `completed` — claiming unverified work
+  passed is the same dishonesty as the fabricated `py_verify` results.
+- Made repeated pipeline stages visible. The GUI drops duplicate progress lines,
+  and every coding step emitted the identical `Coder started`, so a five-step run
+  rendered as one and looked stuck. `stageLabel` now appends the step ordinal
+  (`Coder 1`, `Coder 2`, …) for ids ending in `-N`.
+- Added real explorer file management, previously absent entirely:
+  `WorkspaceFileService` gained `createEmptyFile`, `createDirectory`,
+  `renameEntry`, and `removeEntry`, all going through `resolvePath` and the
+  symlink guard so they cannot escape the workspace. `/api/files/entry`
+  exposes them over POST/PATCH/DELETE. The explorer has New File, New Folder,
+  and Refresh in its header plus a right-click menu with Open, Rename, and
+  Delete; renaming updates any open editor tab in place and deleting closes tabs
+  under the removed path. These are direct human actions, so unlike agent
+  mutations they are not approval-gated — the person clicking is the approver.
+- Regression coverage: explorer operations create, reject duplicates, rename,
+  delete recursively, and refuse a `../` escape.
+
+- Followed up on the first successful five-file run, which finished `paused`
+  with the artifacts kept but reported a useless finding:
+  `Recovery for step "verify" failed: The coding model did not call a workspace
+mutation tool.` Three separate faults were behind that one line.
+  - The verifier was never told which files the task produced. It called
+    `read_file` once against five artifacts and could not conclude. The verify
+    step now receives the tracked `producedFiles` list and is instructed to read
+    every one before judging.
+  - Recovery overwrote the verify step result, so the message surfaced to the
+    user was recovery plumbing rather than the defect. The verifier's own finding
+    is now captured when it fails and is what the paused summary quotes.
+  - When corrective coding changes nothing, that means the verifier named no
+    actionable defect — not that the coding model misbehaved. That case now says
+    so and quotes the verifier report, instead of blaming the model.
+- Observed but not changed: the Coder ran on `groq/qwen3-27b` while the Verifier
+  fell back to `ollama/mistral`. Route ranking is eligibility, then cooldown,
+  then preference, then cost, so a Groq rate-limit cooldown during the five
+  coding calls pushes the following verify call onto the local model. The
+  fallback is behaving as designed, but it puts the weakest model on the
+  judgement step. Worth revisiting as a routing-preference decision rather than a
+  silent code change.
+
+- Made the workspace live. Agent writes previously only appeared after the user
+  reopened the folder, because nothing watched the filesystem and the explorer
+  only refetched on navigation. Added `packages/gui-server/src/workspace-watcher.ts`:
+  a recursive `fs.watch` over the project root that filters generated
+  directories (`node_modules`, `.git`, `dist`, `.runtime-data`, build output) and
+  atomic-write temporaries, then coalesces raw notifications over a 120 ms window
+  so one save is one refresh.
+- The watcher is exposed on `GET /api/workspace/events` as its own SSE stream,
+  deliberately not session-scoped: the tree has to stay live before any session
+  exists, and has to reflect edits made outside the IDE (git checkout, another
+  editor) as well as agent writes.
+- The IDE subscribes once for the life of the window, reading current folder and
+  open-file state through refs so navigation and typing do not tear the stream
+  down. A change refreshes the tree and reloads affected editor tabs — but only
+  when the buffer is clean. A tab with unsaved edits is left untouched and the
+  user is told the file changed on disk, since silently replacing their work with
+  the agent's version is the one outcome worse than a stale tree.
+- Degradation is explicit: recursive watching is unavailable on some platforms
+  and filesystems, so a watch that cannot start, or that dies when the folder is
+  renamed or unmounted, leaves a no-op watcher rather than taking the server down.
+  Live updates stop; nothing else breaks.
+- Regression coverage: the ignore predicate rejects generated paths and accepts
+  real source files, and the SSE endpoint emits a `workspace_changed` frame
+  naming a newly written file. A live probe on Windows confirmed two writes
+  arriving as one coalesced batch with `node_modules` filtered out.
+
+- Stopped judgement stages degrading onto the local model. Route ranking was
+  global, so a Groq cooldown during the coding stages pushed the following
+  verify call onto `ollama/mistral` — the weakest model in the system checking
+  the strongest one's work. Added `ModelRoutePolicy` to `ModelRequest`:
+  `excludeProviders`, a bounded `maxCooldownWaitMs`, and a `reason` surfaced in
+  routing events. The gateway filters candidates by the policy before ranking,
+  and when every policy-allowed route is merely cooling down it waits out the
+  shortest cooldown (up to 45 s) instead of demoting the request. Verifier and
+  Reviewer carry `excludeProviders: ["ollama"]`.
+- The exclusion is deliberately not absolute: if filtering would empty the
+  candidate set the original list is used, so a local-only, offline
+  configuration still runs rather than failing closed. One Groq API key serves
+  every stage — key reuse was never the constraint, per-key rate limiting was —
+  so a second key is only worth adding if sustained 429s persist after this.
+- Completed the explorer to editor parity. `copyEntry` and `availablePath` in
+  `WorkspaceFileService` back Copy/Paste and Duplicate, resolving a collision by
+  suffixing (`app copy.ts`, `app copy 2.ts`) rather than overwriting, and
+  refusing to copy a directory into itself. `POST /api/files/copy` exposes it.
+- The context menu on an entry now offers Open, Cut, Copy, Paste, Copy Path,
+  Copy Relative Path, Duplicate, Rename (F2), and Delete (Del). Right-clicking
+  empty space offers New File, New Folder, Paste, Copy Path, and Refresh — only
+  the actions that make sense with nothing selected. Menu position is clamped to
+  the viewport, cut entries render at half opacity, and the selected row is
+  highlighted. Ctrl+C/X/V, F2, and Delete work from the tree and are suppressed
+  while focus is in a text field.
+- `Copy Path` yields a real absolute path using the host separator; `Copy
+Relative Path` yields the workspace-relative one. Clipboard writes fall back
+  to a hidden textarea because the async Clipboard API is unavailable outside a
+  secure context, which is the common case for a local Electron shell.
+- Regression coverage: duplicate suffixing, that the original is never
+  overwritten, recursive directory copy, a rejected `../` escape, and that
+  excluding every configured provider still leaves an offline setup a route.
+- Still missing for full editor parity: drag-and-drop, multi-select, a nested
+  tree (the explorer remains one folder at a time), Reveal in File Explorer, and
+  Open to the Side.
+
+- Found the cause of "bad code and bad verification": the generated artifact
+  was **truncated**, not badly written. The reported file ends mid-CSS rule,
+  inside `#controls`, with no closing brace, `</style>`, or `</html>`. The model
+  never finished writing it.
+- Root cause: **no output token limit was ever sent to any provider.** Neither
+  the OpenAI/Groq client nor Ollama passed `max_tokens` / `max_output_tokens` /
+  `num_predict`, so a whole source file had to fit inside whatever default the
+  provider chose. When it did not, generation stopped mid-character.
+- Compounding it, `finishReason` was captured from every provider
+  (`length` on truncation) and **never read**. The half-written content was
+  passed to `create_file` and committed to disk as though it were complete,
+  which is why verification then had nothing sensible to judge.
+- Fixes:
+  - Explicit output budgets: `DEFAULT_MAX_OUTPUT_TOKENS` (8192) on both OpenAI
+    paths, `DEFAULT_NUM_PREDICT` (4096) for Ollama.
+  - A response with `finishReason: "length"` carrying tool calls is discarded,
+    not executed. The runner tells the model its output was cut off and that
+    nothing was written, then retries up to twice before stopping cleanly.
+  - `findTruncatedMutation` rejects any `create_file`/`write_file`/`apply_patch`
+    whose content stops mid-structure — unbalanced braces, brackets, or
+    parentheses, or a missing `</html>`, `</style>`, `</script>`. This runs for
+    **every** mutation, not only greenfield ones, because writing half a file is
+    never the intended outcome. Comments and string literals are stripped first,
+    so a brace inside a CSS comment or a JS string does not read as truncation.
+- Verified against the reported file: it is rejected as "stops mid-structure
+  with 1 unclosed braces". A complete HTML file containing unbalanced braces in
+  both a comment and a string literal is accepted, as is complete Python; a
+  truncated Python function is rejected.
+
+### Problem-statement completion pass
+
+- **Web search (PS 8a).** `web_search` queries the DuckDuckGo HTML endpoint and
+  returns ranked titles, URLs, and snippets. Keyless deliberately: every
+  alternative (Brave, Serper, Google CSE) needs its own account, which would add
+  a provider the evaluator must configure before the agent can search at all.
+  Available to Architect and Coder; `ask` approval like the other web tools.
+- **Git merge (PS 8a).** `git_merge` completes the Git surface. A conflicted
+  merge returns the conflicted paths as a normal result rather than throwing, so
+  the agent can resolve them instead of treating a conflict as a crash.
+- **Per-task cost ceiling (PS 2, and the whole of PS 1's scoring formula).**
+  `recordSpend` sums the **actual billed** cost of every completed model call —
+  not the pre-call routing estimate, which is an input to ranking, not an amount
+  spent. `assertWithinBudget` runs at the model-call boundary, the only point
+  every path shares, so direct agent runs are covered as well as pipeline steps.
+  Default `maxTaskCostUsd` is 0.5, matching the evaluation ceiling; spend is
+  published live as `task_spend` events with `warning` and `exceeded` levels
+  and exposed on `GET /api/tasks/:id/spend`. Verified by test: a looping agent
+  billing $0.03 a call against a $0.10 budget is stopped after 4 calls with a
+  failure naming the spend and the budget.
+- **Block-level accept/reject (PS 10b).** The runtime and TUI already supported
+  per-hunk decisions; the IDE was all-or-nothing. `ApprovalReview` renders each
+  hunk with its own toggle and a unified-diff body, plus accept-all and
+  reject-all. Partial approval sends `acceptedHunkIds`/`rejectedHunkIds`, so the
+  accepted blocks apply and the rejected ones return to agent context for the
+  task to continue around. Non-diff approvals keep plain approve/deny.
+- **Live observability (PS 11).** The dashboard was fetch-once on mount. It now
+  follows a task that starts while it is open, refreshes the hierarchy and spend
+  in place at 1.5 s while that task runs, preserves the selected span across
+  refreshes, and labels itself Live. Running and finished are one view.
+- **Nested AGENTS.md (PS 9).** Discovery walked only the root. It now collects
+  every rule file nearest-to-root first, each labelled with the subtree it
+  governs — scoped rather than merged, because a package that contradicts the
+  root ("spaces, not tabs") is only resolvable if the agent knows which rule
+  applies where. Bounded to 4 levels and 24 files, skipping generated trees,
+  because flooding the system prompt is a context-budget problem in a system
+  built for small windows.
+- **Documentation.** Added `docs/DESIGN_DECISIONS.md`: ten decisions with the
+  alternative that was tried or rejected and the evidence that settled it,
+  including the four we got wrong first (two-classifier routing, budget-raising
+  instead of decomposition, symmetric rollback, unread `finishReason`). Added a
+  from-scratch Linux setup to the README with a per-provider API-key table.
+  Both include a plainly stated known-gaps section.
+- 70 tests pass; TypeScript, ESLint, and Prettier are clean across the repo.
 
 ## Next Steps
 

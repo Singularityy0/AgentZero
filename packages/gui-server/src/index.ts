@@ -12,7 +12,11 @@ import {
   validateStoredProvider,
   type ProviderFieldSpec,
 } from "@agentic-runtime/gateway";
-import { searchText } from "@agentic-runtime/search";
+import { findFiles, searchText } from "@agentic-runtime/search";
+import {
+  createWorkspaceWatcher,
+  type WorkspaceWatcher,
+} from "./workspace-watcher.js";
 import { SessionStore } from "@agentic-runtime/session";
 import { WorkspaceFileService } from "@agentic-runtime/workspace";
 import { RuntimeTransport } from "./runtime-transport.js";
@@ -60,6 +64,7 @@ export function startSettingsServer(
     }
   }
   const workspace = new WorkspaceFileService(store.project.rootPath);
+  const workspaceWatcher = createWorkspaceWatcher(store.project.rootPath);
   const runtimeTransport = new RuntimeTransport(store);
   const liveResponses = new Set<ServerResponse>();
   const staticDir =
@@ -74,6 +79,7 @@ export function startSettingsServer(
       response,
       store,
       workspace,
+      workspaceWatcher,
       runtimeTransport,
       liveResponses,
       staticDir,
@@ -95,6 +101,7 @@ export function startSettingsServer(
   const closeStore = (): void => {
     if (storeClosed) return;
     storeClosed = true;
+    workspaceWatcher.close();
     store.close();
   };
   const ready = new Promise<void>((resolve, reject) => {
@@ -143,6 +150,7 @@ async function handleRequest(
   response: ServerResponse,
   store: SessionStore,
   workspace: WorkspaceFileService,
+  workspaceWatcher: WorkspaceWatcher,
   runtimeTransport: RuntimeTransport,
   liveResponses: Set<ServerResponse>,
   staticDir: string | undefined,
@@ -184,6 +192,31 @@ async function handleRequest(
     const modelId = typeof body.modelId === "string" ? body.modelId : undefined;
     await runtimeTransport.configure(providerId, modelId);
     sendJson(response, 200, { runtime: runtimeTransport.status() });
+    return;
+  }
+
+  if (url.pathname === "/api/workspace/events" && method === "GET") {
+    response.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+    });
+    response.write(": connected\n\n");
+    liveResponses.add(response);
+    const unsubscribe = workspaceWatcher.subscribe((change) => {
+      if (response.destroyed) return;
+      response.write(`data: ${JSON.stringify(change)}\n\n`);
+    });
+    const keepAlive = setInterval(() => {
+      if (!response.destroyed) response.write(": keep-alive\n\n");
+    }, 15_000);
+    const cleanup = (): void => {
+      clearInterval(keepAlive);
+      unsubscribe();
+      liveResponses.delete(response);
+    };
+    request.once("close", cleanup);
+    response.once("close", cleanup);
     return;
   }
 
@@ -471,6 +504,123 @@ async function handleRequest(
     return;
   }
 
+  // Flat, ranked file list backing @-mention completion in the composer.
+  // Explorer file management. These are direct human actions, so unlike agent
+  // mutations they are not approval-gated - the person clicking is the approver.
+  if (url.pathname === "/api/files/entry" && method === "POST") {
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
+    const path = typeof body.path === "string" ? body.path.trim() : "";
+    const type = body.type === "directory" ? "directory" : "file";
+    if (!path) {
+      sendJson(response, 400, { error: "A path is required." });
+      return;
+    }
+    try {
+      const created =
+        type === "directory"
+          ? await workspace.createDirectory(path)
+          : await workspace.createEmptyFile(path);
+      sendJson(response, 201, { path: created, type });
+    } catch (error) {
+      sendJson(response, 400, {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not create the entry.",
+      });
+    }
+    return;
+  }
+
+  // Copy, paste, and duplicate. `to` is a desired path; a collision is resolved
+  // by suffixing rather than by overwriting whatever is already there.
+  if (url.pathname === "/api/files/copy" && method === "POST") {
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
+    const from = typeof body.from === "string" ? body.from.trim() : "";
+    const to = typeof body.to === "string" ? body.to.trim() : "";
+    if (!from || !to) {
+      sendJson(response, 400, { error: "Both from and to are required." });
+      return;
+    }
+    try {
+      sendJson(response, 201, { path: await workspace.copyEntry(from, to) });
+    } catch (error) {
+      sendJson(response, 400, {
+        error:
+          error instanceof Error ? error.message : "Could not copy the entry.",
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/files/entry" && method === "PATCH") {
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
+    const from = typeof body.from === "string" ? body.from.trim() : "";
+    const to = typeof body.to === "string" ? body.to.trim() : "";
+    if (!from || !to) {
+      sendJson(response, 400, { error: "Both from and to are required." });
+      return;
+    }
+    try {
+      sendJson(response, 200, { path: await workspace.renameEntry(from, to) });
+    } catch (error) {
+      sendJson(response, 400, {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not rename the entry.",
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/files/entry" && method === "DELETE") {
+    const path = (url.searchParams.get("path") ?? "").trim();
+    if (!path) {
+      sendJson(response, 400, { error: "A path is required." });
+      return;
+    }
+    try {
+      await workspace.removeEntry(path);
+      sendJson(response, 200, { deleted: path });
+    } catch (error) {
+      sendJson(response, 400, {
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not delete the entry.",
+      });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/files/lookup" && method === "GET") {
+    const query = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+    try {
+      const paths = await findFiles(store.project.rootPath);
+      const ranked = query
+        ? paths
+            .filter((path) => path.toLowerCase().includes(query))
+            .sort((a, b) => {
+              const aName = a.slice(a.lastIndexOf("/") + 1).toLowerCase();
+              const bName = b.slice(b.lastIndexOf("/") + 1).toLowerCase();
+              return (
+                Number(bName.startsWith(query)) -
+                  Number(aName.startsWith(query)) ||
+                a.length - b.length ||
+                a.localeCompare(b)
+              );
+            })
+        : paths;
+      sendJson(response, 200, { paths: ranked.slice(0, 25) });
+    } catch (error) {
+      sendJson(response, 400, {
+        error: error instanceof Error ? error.message : "Could not list files.",
+      });
+    }
+    return;
+  }
+
   if (url.pathname === "/api/workbench" && method === "GET") {
     sendJson(response, 200, {
       project: {
@@ -514,6 +664,46 @@ async function handleRequest(
     return;
   }
 
+  const resumeMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/resume$/);
+  if (resumeMatch && method === "POST") {
+    const taskId = decodeURIComponent(resumeMatch[1]!);
+    const task = store.getTask(taskId);
+    if (!task) {
+      sendJson(response, 404, { error: "Task not found." });
+      return;
+    }
+    if (task.status === "completed" || task.status === "running") {
+      sendJson(response, 409, {
+        error: `Task is ${task.status} and cannot be resumed.`,
+      });
+      return;
+    }
+    try {
+      const handle = await runtimeTransport.resumeTask(taskId);
+      sendJson(response, 202, {
+        sessionId: handle.sessionId,
+        taskId: handle.taskId,
+      });
+    } catch (error) {
+      sendJson(response, 500, {
+        error:
+          error instanceof Error ? error.message : "Could not resume the task.",
+      });
+    }
+    return;
+  }
+
+  const spendMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/spend$/);
+  if (spendMatch && method === "GET") {
+    const taskId = decodeURIComponent(spendMatch[1]!);
+    if (!store.getTask(taskId)) {
+      sendJson(response, 404, { error: "Task not found." });
+      return;
+    }
+    sendJson(response, 200, { spend: runtimeTransport.taskSpend(taskId) });
+    return;
+  }
+
   const taskTracesMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/traces$/);
   if (taskTracesMatch && method === "GET") {
     const taskId = decodeURIComponent(taskTracesMatch[1]!);
@@ -522,6 +712,34 @@ async function handleRequest(
       return;
     }
     sendJson(response, 200, { spans: store.listTraceSpans(taskId) });
+    return;
+  }
+
+  if (url.pathname === "/api/bytheway" && method === "POST") {
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+    const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+    if (!store.getSession(sessionId) || !prompt) {
+      sendJson(response, 400, {
+        error: "A valid sessionId and question are required.",
+      });
+      return;
+    }
+    try {
+      const text = await runtimeTransport.askIsolatedQuestion({
+        sessionId,
+        prompt,
+        ...(typeof body.agentId === "string" ? { agentId: body.agentId } : {}),
+      });
+      sendJson(response, 200, { text });
+    } catch (error) {
+      sendJson(response, 500, {
+        error:
+          error instanceof Error
+            ? error.message
+            : "The isolated question failed.",
+      });
+    }
     return;
   }
 
