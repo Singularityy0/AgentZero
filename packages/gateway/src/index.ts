@@ -331,7 +331,8 @@ export class ModelRegistry {
   }
 }
 
-export const DEFAULT_MAX_ROUTE_ATTEMPTS = 3;
+/** One bounded attempt for every eligible provider in the safe catalog. */
+export const DEFAULT_MAX_ROUTE_ATTEMPTS = 7;
 export const DEFAULT_ROUTE_COOLDOWN_MS = 30_000;
 export const DEFAULT_ESTIMATED_OUTPUT_TOKENS = 1_024;
 

@@ -328,7 +328,7 @@ async function applyReviewedChange(
       changed: result.changed,
       review: { acceptedHunkIds, rejectedHunks },
       changedFiles: [{ path: result.path, hash: result.hash }],
-      workspaceMutation: result.mutation,
+      ...(result.mutation ? { workspaceMutation: result.mutation } : {}),
     };
   }
   const result = await service.applyPreparedChange(
@@ -344,7 +344,7 @@ async function applyReviewedChange(
       rejectedHunks: result.rejectedHunks,
     },
     changedFiles: [{ path: result.path, hash: result.hash }],
-    workspaceMutation: result.mutation,
+    ...(result.mutation ? { workspaceMutation: result.mutation } : {}),
   };
 }
 

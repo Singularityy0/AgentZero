@@ -78,7 +78,11 @@ export interface FileMutationRecord {
 }
 
 export interface FileMutationResult extends FileChangeResult {
-  mutation: FileMutationRecord;
+  /**
+   * The rollback record for this change, or null when nothing was written.
+   * A no-op has no state to restore, so it must not enter the recovery journal.
+   */
+  mutation: FileMutationRecord | null;
 }
 
 export interface ReviewedFileChangeResult extends FileMutationResult {
@@ -329,6 +333,30 @@ export class WorkspaceFileService {
       oldContent,
       prepared.hunks.filter((hunk) => accepted.has(hunk.id)),
     );
+
+    // Creating a file out of an empty merge is never what anyone asked for.
+    // When the target does not exist yet and no hunk was accepted there is
+    // nothing to partially apply, and writing the empty merge would leave a
+    // 0-byte file on disk that looks like a successful creation. Report no
+    // change instead and leave the workspace untouched.
+    if (
+      current === undefined &&
+      prepared.hunks.length > 0 &&
+      accepted.size === 0
+    ) {
+      return {
+        path: prepared.path,
+        hash: hash(""),
+        diff: "",
+        changed: false,
+        additions: 0,
+        deletions: 0,
+        appliedHunkIds: [],
+        rejectedHunks: [...prepared.hunks],
+        mutation: null,
+      };
+    }
+
     const path = this.resolvePath(prepared.path);
     await this.assertNoSymlinkPath(path, prepared.path);
     const afterHash = hash(mergedContent);

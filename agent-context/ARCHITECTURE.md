@@ -92,6 +92,19 @@ pipeline are reserved for prompts that reference or mutate the opened
 workspace, preventing planning instructions and tool schemas from contaminating
 normal model behavior.
 
+Focused edits to one explicitly named file use a compact pipeline specialization:
+planning and retrieval are deterministic, Coder receives only local read/write
+and structural tools, and its node checkpoints and stops after one successful
+mutation. This prevents a fallback model from inventing web research or spending
+its full step budget on a change whose authoritative context is already the
+named file. An explicit approval denial pauses the durable orchestration state
+without another model call.
+
+The desktop preserves an explicitly selected primary provider. When Groq is the
+primary, its failover preference is OpenRouter/Nemotron first, then the other
+configured hosted providers, with Ollama last. Cooldowns and capability/context
+eligibility still apply inside that stable preference order.
+
 High-confidence artifact language (for example, making or generating a file,
 page, component, website, or application) is treated as workspace mutation even
 when the user does not say “current project.” Pipeline planning extracts an
@@ -201,6 +214,13 @@ back journaled file mutations in reverse order when current hashes match, then
 refresh retrieval, replan, and invoke the Coder with fresh approval. Default file
 tools do not yet return mutation records to this journal, so normal end-to-end
 rollback remains incomplete. A later user edit must never be overwritten.
+
+Verifier acceptance is scoped to the user's explicit objective plus established
+project rules. Missing demos, executable entry points, tests, documentation, or
+Git metadata are non-blocking unless that surrounding contract requires them.
+`VERIFICATION_PASSED` is treated as a line-oriented protocol token: Markdown
+decoration and a trailing checklist do not turn a reported pass into a false
+failure, while incidental prose that merely mentions the token does not pass.
 
 Trace persistence currently covers tasks, pipeline steps, agents, provider
 attempts, compaction, and isolated questions. The schema supports model and tool

@@ -73,6 +73,7 @@ export interface AgentRunnerOptions {
 export interface AgentRunResult {
   text: string;
   messages: ConversationMessage[];
+  stopReason?: "approval_denied" | "safety_limit";
 }
 
 export class AgentRunner {
@@ -126,7 +127,7 @@ export class AgentRunner {
             "The model's output was cut off by the token limit on every attempt, " +
             "so no complete file could be produced. Nothing was written.";
           await this.emit({ type: "agent_safety_limit", text });
-          return { text, messages };
+          return { text, messages, stopReason: "safety_limit" };
         }
         messages.push({
           role: "user",
@@ -153,7 +154,7 @@ export class AgentRunner {
         if (toolCallCount > this.maxToolCalls) {
           const text = `The run was stopped after reaching the ${this.maxToolCalls}-tool-call safety limit.`;
           await this.emit({ type: "agent_safety_limit", text });
-          return { text, messages };
+          return { text, messages, stopReason: "safety_limit" };
         }
         if (this.options.signal?.aborted) {
           throw new Error("Agent run cancelled.");
@@ -187,7 +188,7 @@ export class AgentRunner {
               "The model repeatedly requested cached tool calls without making progress. " +
               "The run was stopped before it could loop or exceed the provider token limit.";
             await this.emit({ type: "agent_safety_limit", text });
-            return { text, messages };
+            return { text, messages, stopReason: "safety_limit" };
           }
           continue;
         }
@@ -224,6 +225,13 @@ export class AgentRunner {
           result,
         });
         messages.push(this.toToolMessage(call, result));
+        if (result.denied === true) {
+          const text =
+            `The ${call.name} action was denied by the user. ` +
+            "The task was paused immediately and no further tools were called.";
+          await this.emit({ type: "agent_completed", text });
+          return { text, messages, stopReason: "approval_denied" };
+        }
       }
 
       const stopAfterMutations = this.options.stopAfterMutationCount ?? 0;
@@ -242,7 +250,7 @@ export class AgentRunner {
       ? `${lastResponseText}\n\n[Agent stopped after reaching the ${this.maxSteps}-step safety limit.]`
       : `[Agent stopped after reaching the ${this.maxSteps}-step safety limit. Tools executed: ${executedToolNames.join(", ") || "none"}]`;
     await this.emit({ type: "agent_safety_limit", text });
-    return { text, messages };
+    return { text, messages, stopReason: "safety_limit" };
   }
 
   private async requestModelWithContextRecovery(
@@ -566,7 +574,11 @@ export class AgentRunner {
 
       const response = await this.options.requestApproval(call, preview);
       if (response === false) {
-        return { output: "Tool execution denied by the user.", isError: true };
+        return {
+          output: "Tool execution denied by the user.",
+          isError: true,
+          denied: true,
+        };
       }
       let decision: ApprovalDecision;
       try {
@@ -636,6 +648,7 @@ export class AgentRunner {
       content: `${result.output}${suffix}${review}`,
       metadata: {
         isError: result.isError === true,
+        denied: result.denied === true,
         changed: result.changed,
         exitCode: result.exitCode,
         changedFiles: result.changedFiles,

@@ -22,14 +22,15 @@ import {
 } from "@agentic-runtime/runtime";
 import type { SessionStore } from "@agentic-runtime/session";
 
-const PROVIDER_IDS: RuntimeProviderId[] = [
-  "ollama",
+/** Hosted tool-capable routes are exhausted before the slower local fallback. */
+export const RUNTIME_PROVIDER_PRIORITY: readonly RuntimeProviderId[] = [
   "groq",
   "openrouter",
-  "mistral",
   "cerebras",
   "huggingface",
+  "mistral",
   "openai-compatible",
+  "ollama",
 ];
 
 const DEFAULT_MODELS: Record<RuntimeProviderId, string> = {
@@ -98,7 +99,9 @@ export class RuntimeTransport {
 
   status(): RuntimeTransportStatus {
     const providerId = this.selectedProvider();
-    const routes = PROVIDER_IDS.map((id) => this.describeRoute(id, providerId));
+    const routes = RUNTIME_PROVIDER_PRIORITY.map((id) =>
+      this.describeRoute(id, providerId),
+    );
     const selected = routes.find((route) => route.providerId === providerId)!;
     return {
       ready: selected.configured && Boolean(selected.modelId),
@@ -265,7 +268,9 @@ export class RuntimeTransport {
         `No model is configured for ${providerId}. Set a model ID in Provider Settings.`,
       );
     }
-    const fallbacks = PROVIDER_IDS.filter((id) => id !== providerId)
+    const fallbacks = RUNTIME_PROVIDER_PRIORITY.filter(
+      (id) => id !== providerId,
+    )
       .filter((id) => this.hasExplicitConfiguration(id))
       .map((id) => this.routeFor(id))
       .filter((route) => Boolean(route.modelId));
@@ -278,7 +283,7 @@ export class RuntimeTransport {
     const environment = process.env.MODEL_PROVIDER?.toLowerCase();
     if (isRuntimeProviderId(environment)) return environment;
     return (
-      PROVIDER_IDS.find((providerId) =>
+      RUNTIME_PROVIDER_PRIORITY.find((providerId) =>
         this.hasExplicitConfiguration(providerId),
       ) ?? "ollama"
     );
@@ -522,6 +527,6 @@ function delay(durationMs: number): Promise<void> {
 function isRuntimeProviderId(value: unknown): value is RuntimeProviderId {
   return (
     typeof value === "string" &&
-    PROVIDER_IDS.includes(value as RuntimeProviderId)
+    RUNTIME_PROVIDER_PRIORITY.includes(value as RuntimeProviderId)
   );
 }

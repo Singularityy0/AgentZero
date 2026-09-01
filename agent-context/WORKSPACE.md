@@ -6,7 +6,7 @@
 - Purpose: build an agentic AI runtime and coding IDE architecture fully in
   TypeScript
 - Current phase: core stabilization and hybrid architecture integration
-- Repository root: `C:\Users\anany\azero`
+- Repository root: `C:\MY_PROJECT\TAKNEEK-26\agent-0`
 
 ## Toolchain
 
@@ -184,8 +184,19 @@ Build artifacts are emitted under package `dist/` directories and
   mutation tool result.
 - No-op mutations are detected and do not count as a changed file when deciding
   whether a reread is required.
-- The default agent safety budget is 24 model steps to allow read, edit,
-  approval, verification, and final-response workflows.
+- Safety limits are layered: Coder may use at most 16 model turns, while the
+  task-wide pipeline permits 32 model calls. Focused single-file edits and
+  greenfield files stop immediately after their successful mutation instead of
+  consuming the remaining per-agent budget.
+- Denying an approval pauses the active agent and durable pipeline immediately;
+  the model does not receive more tool turns after an explicit human denial.
+- Verifier scope is limited to the explicit objective and existing project
+  rules. Its pass marker is recognized at the start of its own line even when a
+  provider adds Markdown or a trailing checklist, avoiding false recovery after
+  a successful check.
+- With Groq selected, configured fallbacks are ordered OpenRouter/Nemotron,
+  Cerebras, Hugging Face, hosted Mistral, custom OpenAI-compatible, then local
+  Ollama. The gateway can attempt all seven eligible provider families.
 - Gateway-created Ollama requests currently use the adapter's 300-second timeout;
   `OLLAMA_TIMEOUT_MS` is not wired into runtime composition.
 - Ollama availability checks normalize the implicit `:latest` tag and confirm

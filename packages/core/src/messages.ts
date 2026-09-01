@@ -52,6 +52,8 @@ export interface ToolMessage {
   metadata?: {
     /** Whether the tool execution failed. Used by workflow completion checks. */
     isError?: boolean;
+    /** Whether the human explicitly denied this tool call. */
+    denied?: boolean;
     /** Whether the tool changed workspace state. */
     changed?: boolean;
     exitCode?: number;

@@ -638,6 +638,56 @@ Relative Path` yields the workspace-relative one. Clipboard writes fall back
   Both include a plainly stated known-gaps section.
 - 70 tests pass; TypeScript, ESLint, and Prettier are clean across the repo.
 
+- Found the "file created but empty" defect. `applyPreparedChange` built the
+  new content by merging the accepted hunks into the old content. For a path
+  that does not exist the old content is `""`, so accepting **zero** hunks
+  merged to `""` — and the method still ran `mkdir` and `atomicWrite`, creating
+  a 0-byte file. It reported `changed: false` with no error, so the runtime
+  believed nothing had happened while the workspace watcher correctly showed a
+  new, empty file appearing instantly. Reproduced directly against the real
+  `create_file` tool before fixing: accepting all hunks wrote 22 bytes,
+  accepting none wrote a 0-byte file.
+- Fix: when the target does not exist and no hunk was accepted there is nothing
+  to partially apply, so the change is reported as a no-op and the workspace is
+  left untouched. An existing file with every hunk rejected is likewise left
+  exactly as it was, which was already correct and is now covered by test.
+- `FileMutationResult.mutation` became `FileMutationRecord | null`. A no-op has
+  no prior state to restore, so it must not enter the rollback journal —
+  previously every result carried a record whether or not anything was written.
+- Regression coverage asserts no file is created when every hunk of a new file
+  is rejected, that the no-op records no journal entry, and that an existing
+  file survives a fully rejected edit unchanged.
+
+- Traced the `singu.rs` failures from persisted runtime events. Groq returned
+  HTTP 413, the old fallback order sent Coder to `ollama/mistral` for the full
+  300-second timeout before OpenRouter/Nemotron, and a model-generated planner
+  invented unnecessary web research. Nemotron read and browsed successfully but
+  repeated cached reads without ever mutating the file.
+- Added a focused single-file edit path: deterministic plan/retrieval, local-only
+  Coder tools, one successful mutation checkpoint, and no web access. A named
+  new file such as `singu.rs` is now correctly treated as greenfield even though
+  the prompt contains its future path.
+- Reordered desktop failover so a Groq primary tries OpenRouter/Nemotron and
+  other configured hosted routes before local Ollama, and expanded the bounded
+  gateway attempt ceiling to cover all seven eligible provider families.
+- An explicit human denial now terminates the agent turn immediately and pauses
+  durable orchestration instead of feeding the denial back into another model
+  loop. The full 75-test suite and ESLint pass; changed files are Prettier-clean.
+  Repository-wide formatting remains blocked only by `Design-Idea.md`.
+
+- Traced the next successful `singu.rs` edit through its persisted task state.
+  The first verifier correctly saw insertion sort but invented requirements for
+  a `main` function, a new test suite, and Git metadata, causing an unnecessary
+  rollback/recode. The second verifier explicitly emitted a bold
+  `VERIFICATION_PASSED` and then a checklist, but the runtime required the marker
+  to be the absolute final line and falsely exhausted both verification attempts.
+- Verifier instructions now enforce the original acceptance scope and treat
+  absent unrequested scaffolding/tooling as a limitation. Pass detection accepts
+  the marker at the start of its own line with common Markdown decoration and
+  trailing detail, without accepting prose that merely mentions the token.
+  Regression coverage reproduces the hosted model's exact marker style; all 75
+  tests and ESLint pass.
+
 ## Next Steps
 
 - Refine the IDE Observability Dashboard to show full call hierarchy traces per the PS requirements.

@@ -967,6 +967,7 @@ export class HeadlessRuntimeService {
     if (!this.retrieval)
       throw new Error("Semantic retrieval is not configured.");
     const greenfieldArtifact = isGreenfieldArtifactRequest(task.prompt);
+    const focusedFileEdit = isFocusedFileEditRequest(task.prompt);
     const producedFiles = new Set<string>();
     let lastVerifierFinding: string | undefined;
     const requestedVariants = requestedVariantLabels(task.prompt);
@@ -994,7 +995,9 @@ export class HeadlessRuntimeService {
               title: "Implement",
               prompt: greenfieldArtifact
                 ? "Create one complete, self-contained artifact file that satisfies the objective exactly. Use native HTML/CSS/JavaScript when suitable. The file must contain the full implementation: no placeholders, ellipses, TODOs, template markers, or tutorial prose. Call create_file for a new path or write_file when the path already exists. Stop after the successful mutation; the verifier will inspect the saved file."
-                : "Implement the plan using the retrieved evidence. Satisfy every acceptance item exactly; never substitute an easier artifact or explain what could be built instead of creating it. After mutation, re-read every changed file and compare its actual contents with the original acceptance checklist.",
+                : focusedFileEdit
+                  ? "This is a focused local file edit. Read the explicitly named file once, make exactly the requested replacement with apply_patch or write_file, and stop after the successful mutation. Do not search or browse the web; the existing file and objective are the authoritative context."
+                  : "Implement the plan using the retrieved evidence. Satisfy every acceptance item exactly; never substitute an easier artifact or explain what could be built instead of creating it. After mutation, re-read every changed file and compare its actual contents with the original acceptance checklist.",
               dependsOn: ["retrieve"],
             },
           ]
@@ -1040,7 +1043,7 @@ export class HeadlessRuntimeService {
           role: "verifier",
           title: "Verify",
           prompt:
-            "Verify the saved files against every objective requirement. Call read_file on each changed artifact and use a relevant automated check when supported; for a standalone HTML/CSS artifact, a detailed static behavior review of the actual file is acceptable. Report VERIFICATION_PASSED only when all checks pass.",
+            "Verify the saved files against every explicit objective requirement and existing project rule, without inventing requirements. Call read_file on each changed artifact and use a relevant automated check when supported. Do not require a new executable entry point, demo, test suite, documentation, dependency, or Git repository unless the objective or surrounding project requires it. For a standalone source file that cannot be executed as-is, use a syntax/library-mode check when available or a detailed static behavior review, and report unavailable tooling as a limitation rather than an implementation failure. Report VERIFICATION_PASSED only when the requested behavior passes.",
           dependsOn: [codingSteps.at(-1)!.id],
         },
         {
@@ -1139,9 +1142,10 @@ export class HeadlessRuntimeService {
               (message.toolName === "run_command" &&
                 message.metadata?.exitCode === 0)),
         );
+        const approvalDenied = result.status === "paused";
         const success = enforceWorkflowCompletion
           ? requireWorkspaceMutation
-            ? completedMutation
+            ? completedMutation && !approvalDenied
             : result.status === "completed"
           : result.status === "completed";
         const summary =
@@ -1180,41 +1184,55 @@ export class HeadlessRuntimeService {
               ? `${agentId}:${normalizeFailure(summary)}`
               : undefined,
           retryable:
-            requireWorkspaceMutation && !completedMutation ? false : undefined,
+            approvalDenied || (requireWorkspaceMutation && !completedMutation)
+              ? false
+              : undefined,
+          paused: approvalDenied,
           passed:
             request.step.role === "verifier"
-              ? verifierEvidence &&
-                /(?:^|\n)VERIFICATION_PASSED\s*$/u.test(result.text.trim())
+              ? verifierEvidence && hasVerificationPassedMarker(result.text)
               : undefined,
         };
       };
     const workers = {
-      planner: greenfieldArtifact
-        ? async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
-            const summary = [
-              "Greenfield artifact plan:",
-              `- Preserve the objective verbatim: ${request.objective}`,
-              artifactCount === 1
-                ? "- Create one complete self-contained file at a clear workspace-relative path."
-                : `- Create ${artifactCount} complete self-contained files in ${artifactCount} separate coding steps, one file per step${requestedVariants.length > 0 ? `: ${requestedVariants.join(", ")}` : "."}`,
-              "- Include every requested behavior and control; do not substitute a simpler artifact.",
-              "- Reject placeholders, ellipses, TODOs, missing assets, and tutorial-only output.",
-              "- Verify the saved file's syntax and interactive behavior against the objective.",
-            ].join("\n");
-            return { success: true, summary, output: summary };
-          }
-        : runAgentWorker(DEFAULT_AGENT_ID, true),
+      planner:
+        greenfieldArtifact || focusedFileEdit
+          ? async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
+              const summary = focusedFileEdit
+                ? [
+                    "Focused file edit plan:",
+                    `- Preserve the objective verbatim: ${request.objective}`,
+                    "- Read the explicitly named local file.",
+                    "- Replace only the requested implementation with one workspace mutation.",
+                    "- Verify the saved file against the requested replacement.",
+                  ].join("\n")
+                : [
+                    "Greenfield artifact plan:",
+                    `- Preserve the objective verbatim: ${request.objective}`,
+                    artifactCount === 1
+                      ? "- Create one complete self-contained file at a clear workspace-relative path."
+                      : `- Create ${artifactCount} complete self-contained files in ${artifactCount} separate coding steps, one file per step${requestedVariants.length > 0 ? `: ${requestedVariants.join(", ")}` : "."}`,
+                    "- Include every requested behavior and control; do not substitute a simpler artifact.",
+                    "- Reject placeholders, ellipses, TODOs, missing assets, and tutorial-only output.",
+                    "- Verify the saved file's syntax and interactive behavior against the objective.",
+                  ].join("\n");
+              return { success: true, summary, output: summary };
+            }
+          : runAgentWorker(DEFAULT_AGENT_ID, true),
       retriever: async (
         request: AgentWorkRequest,
       ): Promise<AgentWorkResult> => {
-        if (greenfieldArtifact) {
-          const summary =
-            "Greenfield artifact: no existing project code is required. Create the requested file at a clear workspace-relative path using a self-contained implementation and the original acceptance criteria.";
+        if (greenfieldArtifact || focusedFileEdit) {
+          const summary = focusedFileEdit
+            ? "Focused local edit: no semantic or web retrieval is required. The Coder must read the explicitly named file and apply only the requested replacement."
+            : "Greenfield artifact: no existing project code is required. Create the requested file at a clear workspace-relative path using a self-contained implementation and the original acceptance criteria.";
           return {
             success: true,
             summary,
             output: summary,
-            progressKey: "retrieval:greenfield-artifact",
+            progressKey: focusedFileEdit
+              ? "retrieval:focused-file-edit"
+              : "retrieval:greenfield-artifact",
           };
         }
         const plannerOutput = request.previousResults.at(-1)?.summary ?? "";
@@ -1235,7 +1253,15 @@ export class HeadlessRuntimeService {
             "create_file",
             "write_file",
           ])
-        : runAgentWorker(CODING_AGENT_ID),
+        : focusedFileEdit
+          ? runAgentWorker(CODING_AGENT_ID, false, true, true, 1, true, [
+              "read_file",
+              "apply_patch",
+              "write_file",
+              "analyze_code_structure",
+              "compute_ast_diff",
+            ])
+          : runAgentWorker(CODING_AGENT_ID),
       verifier: async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
         const changed = [...producedFiles];
         return runAgentWorker(VERIFIER_AGENT_ID)(
@@ -2106,6 +2132,26 @@ const VERIFICATION_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Treat the verifier marker as a protocol token, not a formatting trick.
+ * Hosted models commonly bold the marker or append a short file/check label,
+ * even when instructed to place it at the very end. Requiring it to be the
+ * absolute final bytes turned an explicitly successful verification into a
+ * failed pipeline run. The marker must still begin its own line so prose such
+ * as "I cannot emit VERIFICATION_PASSED" cannot accidentally pass.
+ */
+function hasVerificationPassedMarker(text: string): boolean {
+  return text.split(/\r?\n/u).some((line) => {
+    const normalized = line
+      .trim()
+      .replace(/^#{1,6}\s*/u, "")
+      .replaceAll("**", "")
+      .replaceAll("__", "")
+      .trim();
+    return /^VERIFICATION_PASSED(?:\b|$)/u.test(normalized);
+  });
+}
+
+/**
  * Small models routinely invent plausible tool names ("py_verify", "go_verify")
  * and narrate their output. Naming the invented tools back to the model makes
  * the corrective retry far more likely to call a real one.
@@ -2317,11 +2363,16 @@ function hasWorkspaceReference(prompt: string): boolean {
 }
 
 function isGreenfieldArtifactRequest(prompt: string): boolean {
-  return (
-    requestsCodeArtifact(prompt) &&
-    !existingWorkPattern.test(prompt) &&
-    !explicitPathPattern.test(prompt)
-  );
+  return requestsCodeArtifact(prompt) && !existingWorkPattern.test(prompt);
+}
+
+/**
+ * A direct edit to one named file does not need open-ended planning, semantic
+ * retrieval, or internet research. Keeping this path local prevents a weak
+ * fallback model from turning a two-tool edit into a long browsing session.
+ */
+function isFocusedFileEditRequest(prompt: string): boolean {
+  return mutateArtifactPattern.test(prompt) && explicitPathPattern.test(prompt);
 }
 
 function waitForApproval(

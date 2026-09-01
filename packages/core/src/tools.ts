@@ -76,6 +76,8 @@ export interface ToolResult {
   output: string;
   changed?: boolean;
   isError?: boolean;
+  /** True only when execution stopped because the human rejected approval. */
+  denied?: boolean;
   exitCode?: number;
   timedOut?: boolean;
   truncated?: boolean;

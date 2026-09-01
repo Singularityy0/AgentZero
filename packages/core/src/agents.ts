@@ -239,10 +239,9 @@ export class MultiAgentOrchestrator {
       },
     });
     const result = await runner.run(messages);
+    const stopped = result.stopReason !== undefined;
     await this.emit({
-      type: result.text.includes("safety limit")
-        ? "agent_failed"
-        : "agent_completed",
+      type: stopped ? "agent_failed" : "agent_completed",
       runId: state.runId,
       agentId,
       parentAgentId,
@@ -253,7 +252,12 @@ export class MultiAgentOrchestrator {
       runId: state.runId,
       agentId,
       text: result.text,
-      status: result.text.includes("safety limit") ? "failed" : "completed",
+      status:
+        result.stopReason === "approval_denied"
+          ? "paused"
+          : stopped
+            ? "failed"
+            : "completed",
       handoffs: state.handoffs,
       messages,
     };

@@ -62,7 +62,10 @@ import {
   createWorkspaceWatcher,
   isIgnoredWorkspacePath,
 } from "../packages/gui-server/dist/workspace-watcher.js";
-import { hasOllamaModel } from "../packages/gui-server/dist/runtime-transport.js";
+import {
+  hasOllamaModel,
+  RUNTIME_PROVIDER_PRIORITY,
+} from "../packages/gui-server/dist/runtime-transport.js";
 import {
   initialTuiState,
   reduceTuiState,
@@ -372,13 +375,10 @@ test("AgentRunner executes a tool and continues to a final response", async () =
   assert.equal(result.messages.at(-2)?.role, "tool");
 });
 
-test("AgentRunner returns a denied tool result to the model", async () => {
+test("AgentRunner pauses immediately after the user denies a tool", async () => {
   const call = { id: "call-2", name: "echo", arguments: { value: "secret" } };
   const registry = new ToolRegistry().register(echoTool());
-  const model = new FakeModel([
-    assistantResponse("", [call]),
-    assistantResponse("I could not run the tool."),
-  ]);
+  const model = new FakeModel([assistantResponse("", [call])]);
   const messages = [{ role: "user" as const, content: "Run it." }];
 
   const result = await new AgentRunner(model, registry, {
@@ -386,10 +386,13 @@ test("AgentRunner returns a denied tool result to the model", async () => {
     requestApproval: async () => false,
   }).run(messages);
 
-  const toolMessage = result.messages.at(-2);
+  const toolMessage = result.messages.at(-1);
   assert.equal(toolMessage?.role, "tool");
   assert.match(toolMessage?.content ?? "", /denied by the user/);
   assert.equal(toolMessage?.metadata?.isError, true);
+  assert.equal(toolMessage?.metadata?.denied, true);
+  assert.equal(result.stopReason, "approval_denied");
+  assert.match(result.text, /paused immediately/);
 });
 
 test("AgentRunner auto-approves explicitly read-only tools", async () => {
@@ -795,6 +798,48 @@ test("TaskOrchestrator does not replay a terminal worker failure", async () => {
   assert.equal(attempts, 1);
   assert.equal(state.stage, "failed");
   assert.match(state.failure ?? "", /failed: model exhausted/);
+});
+
+test("TaskOrchestrator pauses instead of retrying a denied step", async () => {
+  let attempts = 0;
+  const events: string[] = [];
+  const orchestrator = new TaskOrchestrator(
+    {
+      verifier: async () => {
+        attempts += 1;
+        return {
+          success: false,
+          paused: true,
+          retryable: false,
+          summary: "Verification command was denied by the user.",
+        };
+      },
+    },
+    {
+      maxAttemptsPerStep: 2,
+      onEvent: (event) => {
+        events.push(event.type);
+      },
+    },
+  );
+
+  const state = await orchestrator.run({
+    objective: "Verify a Rust file.",
+    steps: [
+      {
+        id: "verify",
+        role: "verifier",
+        title: "Verify",
+        prompt: "Run the requested verification.",
+      },
+    ],
+  });
+
+  assert.equal(attempts, 1);
+  assert.equal(state.stage, "paused");
+  assert.match(state.failure ?? "", /denied by the user/);
+  assert.ok(events.includes("orchestration_paused"));
+  assert.equal(events.includes("step_retrying"), false);
 });
 
 test("TaskOrchestrator stops a repeated failure instead of looping", async () => {
@@ -1208,6 +1253,53 @@ test("Git guard rejects generated dependency output", () => {
   );
 });
 
+test("rejecting every hunk of a new file leaves no empty file behind", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-empty-"));
+  const service = new WorkspaceFileService(root);
+
+  try {
+    const change = {
+      path: "cube.html",
+      newContent: "<!doctype html><html><body>cube</body></html>\n",
+      expectedHash: null,
+    };
+    const prepared = await service.prepareChange(change);
+    assert.ok(prepared.hunks.length > 0);
+
+    // Accepting nothing for a path that does not exist yet has nothing to
+    // partially apply. Writing the empty merge would leave a 0-byte file that
+    // looks like a successful creation.
+    const result = await service.applyPreparedChange(change, prepared, []);
+
+    assert.equal(result.changed, false);
+    assert.equal(result.appliedHunkIds.length, 0);
+    assert.equal(result.mutation, null, "a no-op must not enter the journal");
+    assert.equal(
+      existsSync(join(root, "cube.html")),
+      false,
+      "no file may be created when every hunk was rejected",
+    );
+
+    // The same rejection against an existing file must preserve it untouched.
+    await writeFile(join(root, "existing.txt"), "keep me\n");
+    const edit = { path: "existing.txt", newContent: "replaced\n" };
+    const editPrepared = await service.prepareChange(edit);
+    const editResult = await service.applyPreparedChange(
+      edit,
+      editPrepared,
+      [],
+    );
+    assert.equal(editResult.changed, false);
+    assert.equal(
+      await readFile(join(root, "existing.txt"), "utf8"),
+      "keep me\n",
+      "an existing file must survive a fully rejected edit",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("WorkspaceFileService creates files, previews changes, and detects conflicts", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-runtime-"));
   try {
@@ -1458,6 +1550,18 @@ test("Ollama installed-model matching treats the latest tag as an alias", () => 
   assert.equal(hasOllamaModel(installed, "mistral"), true);
   assert.equal(hasOllamaModel(installed, "MISTRAL:LATEST"), true);
   assert.equal(hasOllamaModel(installed, "mistral:7b"), false);
+});
+
+test("desktop failover tries Nemotron before hosted alternatives and Ollama last", () => {
+  assert.deepEqual(RUNTIME_PROVIDER_PRIORITY, [
+    "groq",
+    "openrouter",
+    "cerebras",
+    "huggingface",
+    "mistral",
+    "openai-compatible",
+    "ollama",
+  ]);
 });
 
 test("HeadlessRuntimeService owns task lifecycle and persists IDE-ready events", async () => {
@@ -2126,6 +2230,123 @@ test("HeadlessRuntimeService routes casual conversation through the neutral chat
   }
 });
 
+test("HeadlessRuntimeService keeps a focused single-file edit local and stops after writing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-focused-edit-"));
+  const original = "fn merge_sort(values: &mut [i32]) { values.sort(); }\n";
+  await writeFile(join(root, "singu.rs"), original);
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+  const coderRequests: ModelRequest[] = [];
+  let plannerCalls = 0;
+  const insertionSort = `pub fn insertion_sort(values: &mut [i32]) {
+    for index in 1..values.len() {
+        let mut current = index;
+        while current > 0 && values[current] < values[current - 1] {
+            values.swap(current, current - 1);
+            current -= 1;
+        }
+    }
+}
+`;
+  const models = new Map<string, LanguageModel>([
+    [
+      DEFAULT_AGENT_ID,
+      {
+        respond: async () => {
+          plannerCalls += 1;
+          throw new Error("Focused edits must not invoke the planner model.");
+        },
+      },
+    ],
+    [
+      CODING_AGENT_ID,
+      {
+        respond: async (request) => {
+          coderRequests.push(request);
+          return coderRequests.length === 1
+            ? assistantResponse("", [
+                {
+                  id: "focused-read",
+                  name: "read_file",
+                  arguments: { path: "singu.rs" },
+                },
+              ])
+            : assistantResponse("", [
+                {
+                  id: "focused-write",
+                  name: "write_file",
+                  arguments: { path: "singu.rs", content: insertionSort },
+                },
+              ]);
+        },
+      },
+    ],
+    [
+      VERIFIER_AGENT_ID,
+      new FakeModel([
+        assistantResponse("", [
+          {
+            id: "focused-verify-read",
+            name: "read_file",
+            arguments: { path: "singu.rs" },
+          },
+        ]),
+        assistantResponse(
+          "Verified insertion sort.\n**VERIFICATION_PASSED** for singu.rs\n- Static review passed.",
+        ),
+      ]),
+    ],
+    [REVIEWER_AGENT_ID, new FakeModel([assistantResponse("Edit reviewed.")])],
+  ]);
+  const tools = new ToolRegistry();
+  for (const tool of createIdeTools()) tools.register(tool);
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "openrouter", modelId: "fake" },
+    resolveModel: (agent) => models.get(agent.id)!,
+    resolveTools: () => tools,
+    requestApproval: async () => true,
+    retrieval,
+  });
+
+  try {
+    const session = service.createSession("Focused edit");
+    const result = await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt:
+        "edit this file singu.rs and replace merge sort with insertion sort",
+    });
+
+    assert.equal(result.status, "completed");
+    assert.equal(plannerCalls, 0);
+    assert.equal(coderRequests.length, 2);
+    assert.deepEqual(
+      coderRequests[0]?.tools.map((tool) => tool.name),
+      ["read_file", "write_file", "apply_patch"],
+    );
+    assert.ok(
+      coderRequests[0]?.tools.every(
+        (tool) => tool.name !== "web_search" && tool.name !== "browse_url",
+      ),
+    );
+    const saved = await readFile(join(root, "singu.rs"), "utf8");
+    assert.match(saved, /insertion_sort/u);
+    assert.doesNotMatch(saved, /merge_sort/u);
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HeadlessRuntimeService writes every requested artifact instead of answering in chat", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-multi-artifact-"));
   const store = new SessionStore({
@@ -2723,14 +2944,14 @@ test("rolling back a created file preserves it by default and prunes empty paren
     assert.equal(await readFile(created, "utf8"), "print(2 + 2)\n");
 
     // Recovery must never delete the only copy of newly generated work.
-    const preserved = await service.rollbackMutation(written.mutation, {
+    const preserved = await service.rollbackMutation(written.mutation!, {
       preserveCreatedFiles: true,
     });
     assert.equal(preserved.status, "preserved");
     assert.equal(await readFile(created, "utf8"), "print(2 + 2)\n");
 
     // An explicit rollback still removes the file and the directories it made.
-    const removed = await service.rollbackMutation(written.mutation);
+    const removed = await service.rollbackMutation(written.mutation!);
     assert.equal(removed.status, "rolled_back");
     assert.equal(existsSync(created), false);
     assert.equal(
@@ -2854,7 +3075,7 @@ test("HeadlessRuntimeService checkpoints the five-stage pipeline in order", asyn
       sessionId: session.id,
       agentId: DEFAULT_AGENT_ID,
       prompt:
-        "make a html file with a 3d rotating cube, we must have 3 sliders of x,y,z axis",
+        "make a file named rotating_cube.html with a 3d rotating cube, we must have 3 sliders of x,y,z axis",
     });
     const roles = events
       .filter((event) => event.type === "pipeline_event")

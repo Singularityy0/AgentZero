@@ -43,6 +43,8 @@ export interface AgentWorkResult {
   passed?: boolean;
   /** False when repeating the same worker input cannot make progress. */
   retryable?: boolean;
+  /** Pause the durable pipeline instead of retrying after human intervention. */
+  paused?: boolean;
 }
 
 export interface StepResult extends AgentWorkResult {
@@ -347,6 +349,10 @@ export class TaskOrchestrator {
       }
 
       const reason = result.summary || "The worker did not complete the step.";
+      if (result.paused === true) {
+        await this.pause(state, reason);
+        return undefined;
+      }
       if (failureKey && failureKey === previousFailureKey) {
         await this.fail(
           state,
@@ -454,6 +460,22 @@ export class TaskOrchestrator {
     await this.save(state);
     await this.emit({
       type: "orchestration_failed",
+      runId: state.runId,
+      reason,
+    });
+    return state;
+  }
+
+  private async pause(
+    state: OrchestrationState,
+    reason: string,
+  ): Promise<OrchestrationState> {
+    state.stage = "paused";
+    state.failure = reason;
+    state.updatedAt = Date.now();
+    await this.save(state);
+    await this.emit({
+      type: "orchestration_paused",
       runId: state.runId,
       reason,
     });
