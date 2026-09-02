@@ -20,3 +20,8 @@ references/
 .agentic/data/
 
 problem-statement.md
+
+# Superseded internal working docs (kept locally as reference)
+docs/ARCHITECTURE_AND_STATUS.md
+docs/DESIGN_DECISIONS.md
+docs/RUNBOOK_AND_INTERFACE_REFERENCE.md

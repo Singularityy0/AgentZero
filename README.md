@@ -1,498 +1,341 @@
 # Agent Zero
 
-An agentic coding IDE built for small open-weight models. Every model it uses is
-80B parameters or fewer, on free-tier or pay-as-you-go APIs or local hardware.
+An agentic coding IDE built for small open-weight models.
 
-A single small model cannot carry a hard multi-step coding task, so the work is
-split across specialised agents and the system is designed around their limits:
+Every model the system uses has 80B total parameters or fewer, and runs on a
+free-tier API, a pay-as-you-go API, or local hardware. No subscription APIs are
+used anywhere.
 
-- **A planner that decides the plan's shape.** It may split one objective into
-  several narrowly scoped coding steps, each seeing only its own slice.
+## Why it is built this way
+
+A single small model cannot carry a hard multi-step coding task. It loses track
+of multi-file work, cannot reliably plan and implement and check itself in one
+pass, and produces unreliable structured output. Instead of asking one model to
+do all of that, the work is split across specialised agents, each given only the
+context its step needs.
+
+The parts that follow from that constraint:
+
+- **A planner that decides the plan's shape.** It can split one objective into
+  up to four narrowly scoped coding steps, each seeing only its own slice.
 - **Retrieval that reads code, not text.** TypeScript and JavaScript through the
-  compiler API; Python, Go, Rust, C, and C++ through tree-sitter in a Rust
-  sidecar. Ranking follows the project's call graph with personalised PageRank,
-  so a function several calls from a match still surfaces.
+  TypeScript compiler API, and Python, Go, Rust, C, and C++ through tree-sitter
+  in a Rust sidecar. Ranking follows the project's call graph with personalised
+  PageRank, so a function three calls away from a match still surfaces.
 - **Routing that explains itself.** Every request is placed on a provider by
-  task complexity, context fit, cost, spend so far, and rate-limit cooldown, and
-  the reason is visible live.
+  task complexity, context fit, cost, spend so far, and rate-limit cooldown.
+  The reason is visible live in the dashboard.
 - **Compaction with no model in the loop.** Context is folded into structured
   state deterministically, so it cannot hallucinate what it summarises.
-- **Twelve independent safeguards** against runaway or stuck tasks, including a
+- **Twelve independent safeguards** against stuck or runaway tasks, including a
   Merkle state tree that notices when the workspace returns to a state it has
   already occupied.
-- **A trace for everything.** Every agent, tool, and model call with its exact
-  input, output, context, tokens, and time - inspectable while running.
+- **A full trace.** Every agent, tool, and model call with its exact input,
+  output, context slices, tokens, and time, inspectable while the task runs and
+  after it finishes.
 
-Clients: a desktop IDE (Electron), the same workbench in a browser, and a TUI.
+Three clients share one headless runtime: a desktop IDE, the same workbench in a
+browser, and a terminal UI.
 
-## Requirements
+## Documentation
 
-- Node.js 22.5 or newer
-- pnpm 9 or newer
+- [Multi-agent architecture](docs/MULTI_AGENT_ARCHITECTURE.md), with diagrams of
+  the pipeline, routing, retrieval, compaction, recovery, and safeguards.
+- [Architectural decisions](docs/ARCHITECTURE_DECISIONS.md), covering the
+  tool-calling format, the alternatives that were rejected, and the real
+  problems hit while building the system.
 
-## Getting started
+---
 
-```sh
-pnpm install
-pnpm build
-```
+# Setup on Linux from scratch
 
-## Setup from scratch on Linux
+Written for a clean machine with nothing installed. Verified on Ubuntu 22.04 and
+24.04. For a different distribution, replace step 1 with the equivalent packages
+for your package manager; the rest is identical.
 
-Verified on Ubuntu 22.04 and 24.04. Every step starts from a clean machine.
+Total download is roughly 1.5 GB, mostly the Rust toolchain and Electron.
 
-### 1. System packages
+## 1. System packages
 
 ```sh
 sudo apt update
 sudo apt install -y curl git build-essential ripgrep
 ```
 
-`ripgrep` backs file and text search. If your distribution has no `ripgrep`
-package, install it any way you like and point the runtime at the binary:
+What each is for:
+
+- `curl` downloads the Node.js and Rust installers in the next steps.
+- `git` clones the repository, and the agent uses it for diffs and commits.
+- `build-essential` provides the C toolchain that the Rust crate and the native
+  SQLite module link against.
+- `ripgrep` backs file and text search.
+
+If your distribution has no `ripgrep` package, install it any other way and
+point the runtime at the binary:
 
 ```sh
 export AGENTIC_RIPGREP_PATH=/full/path/to/rg
 ```
 
-### 2. Node.js 22 and pnpm
+## 2. Node.js 22
+
+The project needs Node.js 22.5 or newer. Distribution packages are usually
+older, so install a version manager.
 
 ```sh
 curl -fsSL https://fnm.vercel.app/install | bash
 exec "$SHELL"
 fnm install 22
 fnm use 22
-corepack enable
-corepack prepare pnpm@9.15.5 --activate
-node --version   # expect v22.5 or newer
-pnpm --version   # expect 9.x
+fnm default 22
 ```
 
-### 3. Rust (for the native helper crate)
+Check it:
 
-`pnpm build` compiles a small Rust crate. It backs `analyze_code_structure`,
-`compute_ast_diff`, and signature pruning during context compaction; all three
-degrade to a readable tool error without it, so `pnpm start`, `pnpm tui`, and
-`pnpm settings` run either way. Use `pnpm build:ts` if you want the TypeScript
-packages alone.
+```sh
+node --version
+```
+
+Expect `v22.5.0` or newer.
+
+## 3. pnpm
+
+The repository is a pnpm workspace. npm and yarn will not resolve the internal
+package links correctly. Install pnpm through corepack, which ships with
+Node.js:
+
+```sh
+corepack enable
+corepack prepare pnpm@9.15.5 --activate
+```
+
+Check it:
+
+```sh
+pnpm --version
+```
+
+Expect `9.15.5`.
+
+## 4. Rust
+
+A small Rust crate provides tree-sitter parsing for five languages, the code
+property graph, BLAKE3 workspace hashing, and the AST diff tool.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 . "$HOME/.cargo/env"
 ```
 
-### 4. Build and test
+Check it:
 
 ```sh
-git clone <repository-url> agentic-runtime
-cd agentic-runtime
+rustc --version
+```
+
+Expect 1.85.0 or newer. The crate uses Rust edition 2024, which older
+toolchains cannot compile. If rustup installed an older version:
+
+```sh
+rustup update stable
+```
+
+Rust is required to build the project and to produce installers. It is optional
+at runtime: if the sidecar binary is missing, structural slicing, the AST diff
+tool, and signature pruning report a tool error and everything else works
+normally.
+
+## 5. Clone and build
+
+```sh
+git clone <repository-url> agent-zero
+cd agent-zero
 pnpm install
 pnpm build
+```
+
+`pnpm install` fetches Node dependencies. `pnpm build` compiles the Rust crate
+and then all TypeScript packages. First build takes a few minutes, mostly
+compiling tree-sitter grammars.
+
+Confirm the build is sound:
+
+```sh
 pnpm test
 ```
 
-### 5. Provider API keys
+Expect 114 TypeScript tests and 18 Rust tests passing.
 
-Keys can be set **either** in the Settings screen (recommended; stored in the
-global SQLite settings database and shared by the TUI and the IDE) **or** as
-environment variables in a `.env` file at the workspace root. The Settings
-screen takes precedence over the environment.
+## 6. Provider API keys
 
-To use the settings screen:
+Keys can be set two ways. The Settings screen is recommended and takes
+precedence over the environment.
+
+**Option A, the Settings screen.** Start the app and open Settings. Keys are
+stored in a global SQLite database on this machine and shared by the desktop
+IDE, the browser workbench, and the TUI. This screen also validates the key
+against the provider and lets you pick the model per provider.
 
 ```sh
-pnpm settings     # opens the loopback server; go to Settings in the UI
+pnpm settings
 ```
 
-To use environment variables instead:
+Open the URL it prints, go to Settings, paste a key, and press Validate.
+
+**Option B, environment variables.**
 
 ```sh
 cp .env.example .env
 ```
 
-| Provider           | Where to get a key                                   | Variables                                | Notes                                            |
-| ------------------ | ---------------------------------------------------- | ---------------------------------------- | ------------------------------------------------ |
-| **Groq**           | <https://console.groq.com/keys> — free tier          | `GROQ_API_KEY`, `GROQ_MODEL`             | Default hosted route. One key serves all stages. |
-| **OpenRouter**     | <https://openrouter.ai/keys> — free tier             | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Use a `:free` model id to stay on the free tier. |
-| **Mistral**        | <https://console.mistral.ai/api-keys> — free tier    | `MISTRAL_API_KEY`, `MISTRAL_MODEL`       | Pay-as-you-go beyond the free allowance.         |
-| **Cerebras**       | <https://cloud.cerebras.ai> — free tier              | `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`     |                                                  |
-| **Hugging Face**   | <https://huggingface.co/settings/tokens> — free tier | `HF_TOKEN`, `HUGGINGFACE_MODEL`          | Inference providers routing.                     |
-| **Ollama** (local) | no key                                               | `OLLAMA_ENDPOINT`, `OLLAMA_MODEL`        | Local fallback; see below.                       |
+Then edit `.env`.
 
-Every provider is rejected at registration unless it is on the free-tier /
-pay-as-you-go / local allowlist, and every model is rejected if its known total
-parameter count exceeds 80B.
+You need at least one provider. Groq is the default and has a free tier that
+needs no card.
 
-### 6. Local models with Ollama
+| Provider     | Get a key at                           | Environment variables                    | Notes                                              |
+| ------------ | -------------------------------------- | ---------------------------------------- | -------------------------------------------------- |
+| Groq         | https://console.groq.com/keys          | `GROQ_API_KEY`, `GROQ_MODEL`             | Default hosted route. Free tier, no card required. |
+| OpenRouter   | https://openrouter.ai/keys             | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Use a model id ending in `:free` to stay free.     |
+| Mistral      | https://console.mistral.ai/api-keys    | `MISTRAL_API_KEY`, `MISTRAL_MODEL`       | Free Studio tier, pay-as-you-go beyond it.         |
+| Cerebras     | https://cloud.cerebras.ai/platform     | `CEREBRAS_API_KEY`, `CEREBRAS_MODEL`     | Free trial requires account verification.          |
+| Hugging Face | https://huggingface.co/settings/tokens | `HF_TOKEN`, `HUGGINGFACE_MODEL`          | Inference Providers routing, small monthly credit. |
+| Ollama       | no key needed                          | `OLLAMA_ENDPOINT`, `OLLAMA_MODEL`        | Local models. See step 7.                          |
+
+There is also an `openai-compatible` entry in Settings for any self-hosted
+endpoint that speaks the OpenAI chat API. It takes a base URL, an optional key,
+and a model id.
+
+Two constraints are enforced in code, not by convention. A provider is refused
+at registration unless it is on the free-tier, pay-as-you-go, or local
+allowlist. A model is dropped if its known total parameter count exceeds 80B.
+
+Configuring more than one provider is worth doing. When a route hits a rate
+limit, the gateway cools it down and continues the same request on the next
+provider without losing task progress.
+
+## 7. Local models with Ollama
+
+Optional but recommended, because it gives the system a zero-cost fallback when
+hosted free tiers are rate limited.
 
 ```sh
 curl -fsSL https://ollama.com/install.sh | sh
-ollama serve &                       # if not already running as a service
-ollama pull qwen2.5-coder:7b         # ~4.7 GB, fits 8 GB VRAM
+ollama serve &
+ollama pull qwen2.5-coder:7b
 ```
 
-`qwen2.5-coder:7b` is the default local route and runs comfortably within
-16 GB RAM / 8 GB VRAM. Verification and review stages deliberately avoid the
-local route when a hosted one is configured; see
-[docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md#6-verification-requires-evidence-and-never-degrades-to-a-weaker-model).
+`qwen2.5-coder:7b` is about 4.7 GB and runs within 16 GB RAM and 8 GB VRAM. It
+is the default local route.
 
-### 7. Run
+Verification and review stages avoid the local route when a hosted one is
+configured, because running the stage that judges whether the work is correct on
+the weakest available model defeats the point of having that stage. The
+reasoning is in
+[ARCHITECTURE_DECISIONS.md](docs/ARCHITECTURE_DECISIONS.md#8-verification-requires-evidence-and-never-degrades-to-a-weaker-model).
 
-```sh
-pnpm start        # desktop IDE (Electron window)
-pnpm tui          # terminal interface
-pnpm settings     # loopback server only, open the printed URL in a browser
-```
-
-All three build what they need first, so a fresh clone needs no separate build
-step. They also try to build the Rust sidecar and continue with a warning if
-Cargo is missing: structural slicing, the AST diff tool, and signature pruning
-are then unavailable, but nothing else changes. `pnpm build` and
-`pnpm desktop:package` still fail hard without it, because an installer shipped
-without the sidecar is a silently reduced product.
-
-On a headless Linux box the Electron desktop needs an X or Wayland display. Use
-`pnpm settings` and open the printed URL in a browser instead.
-
-## Desktop application
-
-Start the complete workbench as a native desktop window from the repository
-root:
+## 8. Run
 
 ```sh
 pnpm start
 ```
 
-The desktop host builds the required TypeScript and GUI packages, starts its
-own loopback server on an available port, opens the React/Monaco workbench, and
-stops the server when the application exits. It therefore does not require a
-separate browser tab or server terminal. Startup is intentionally folderless;
-use **Open Folder** or **File → Open Folder** to select a codebase. A recent
-folder is used only as the native picker's starting location and is never
-opened automatically. The workbench includes editable Monaco tabs with
-conflict-safe saves — `Ctrl+S` from anywhere in the window, `Ctrl+Shift+S` for
-save-as, a Save/Save as/Auto control beside the tabs, and an optional debounced
-auto-save remembered per machine — and a workspace command terminal with discovered
-PowerShell, Command Prompt, Git Bash, and Bash profiles.
-A **Chat history** sidebar lists this project's previous conversations, newest
-first, titled from their opening prompt. Selecting one reopens its transcript
-and continues in the same session; conversations can be renamed or deleted, and
-deleting one removes its tasks, events, and traces with it. History is scoped to
-the opened codebase.
+This opens the desktop IDE. It builds anything missing first, so a fresh clone
+needs no separate build step.
 
-The assistant panel is connected to the headless runtime: it streams task
-progress, persists messages, supports cancellation, and surfaces tool approval
-requests. A usable model provider is still required. Configure and validate
-Ollama, Groq, OpenRouter, Mistral AI, Cerebras, Hugging Face, or an
-OpenAI-compatible endpoint from **Settings**. Keys and model choices are saved
-once on the machine. For Ollama, install the Windows application once and pull
-the selected model once; the desktop runtime starts the service automatically
-when a task needs it.
-
-After a successful build, `pnpm desktop:quick` skips compilation and opens the
-application immediately. Create an installer for the current operating system
-with:
+Other entry points:
 
 ```sh
-pnpm desktop:package
+pnpm tui        # terminal interface
+pnpm settings   # loopback server only, open the printed URL in a browser
 ```
 
-Installer artifacts are written under `packages/desktop/release/`.
+On a headless machine the Electron desktop needs an X or Wayland display. Use
+`pnpm settings` and open the printed URL in a browser instead.
 
-The workspace contains framework-neutral runtime contracts in
-`@agentic-runtime/core`, an `@agentic-runtime/openai` provider, a guarded
-cross-platform command backend in `@agentic-runtime/command`, separate IDE
-tools in `@agentic-runtime/tools`, a reusable headless application boundary in
-`@agentic-runtime/runtime`, and an interactive TUI.
+## 9. First task
 
-Detailed project references:
+1. Open a project folder from the IDE header.
+2. Type a task in the chat box. Use `@` to tag a specific file.
+3. Approve the diffs it proposes. Accept or reject individual blocks, not just
+   the whole change.
+4. Open the Observability tab to watch which model handled each step, what was
+   in its context, and what it cost.
 
-- [Architecture and implementation status](docs/ARCHITECTURE_AND_STATUS.md)
-- [Runbook and interface reference](docs/RUNBOOK_AND_INTERFACE_REFERENCE.md)
+Useful commands in the chat box:
 
-IDE tooling uses established libraries: `diff` for patches and diffs, `ajv` for
-tool argument validation, `@vscode/ripgrep` for fast search, and `execa` for
-process execution. The persistent retrieval package extracts in three tiers: the TypeScript
-compiler API for TypeScript and JavaScript (bindings resolved), tree-sitter
-grammars in the Rust sidecar for Python, Go, Rust, C, and C++, and a regex
-fallback for everything else. Ranking then follows the project's call graph via
-personalised PageRank over `FlatCPG`, so a function several calls from the match
-still surfaces; that graph is persisted between runs in the memory-mapped
-write-ahead log. Indexing is
-incremental and stat-gated: a file whose size and mtime match the index is not
-re-read at all, so the refresh that runs on every query stays cheap. File operations use the workspace service; command execution uses the
-host operating system's native shell.
+- `@path/to/file` tags a file. File and line references in the agent's replies
+  are clickable and open at the right line.
+- `/bytheway <question>` asks one isolated question with no prior context, then
+  returns to the ongoing task untouched.
 
-## Tool approval policy
+---
 
-The runtime uses a fail-safe tool approval policy. Read-only workspace tools
-(`list_directory`, `read_file`, `find_files`, and `search_text`) run
-automatically. File mutations, shell commands, builds, code execution, formatting, and syntax
-checks require approval. File previews are bound to a base hash and contain
-stable hunks, allowing accept-all, reject-all, or block-level decisions. Stale
-files fail closed and rejected hunks are returned to agent context. New tools require approval unless they explicitly declare
-`approval: "auto"` in their core tool definition.
+# Troubleshooting
 
-## Orchestration
+**`pnpm: command not found` after step 3.** Corepack shims are installed into
+the active Node version. Re-run `fnm use 22` in the new shell, or add
+`eval "$(fnm env --use-on-cd)"` to your shell profile.
 
-`TaskOrchestrator` in `@agentic-runtime/core` runs a bounded, sequential plan
-through role-specific workers. Steps can depend on earlier steps, and each
-worker receives the objective, scoped context, and completed results.
-The headless coding path executes planner, semantic retriever, coder, verifier,
-and read-only reviewer stages.
+**Rust build fails with an edition error.** The toolchain is older than 1.85.
+Run `rustup update stable`.
 
-The plan's shape is fixed but its length is not. The static plan carries one
-placeholder coding step; the planner may return a fenced `subtasks` block, and
-the orchestrator then replaces that placeholder with up to four narrowly scoped
-coding steps, rewiring dependencies so retrieval still runs first and
-verification still runs over the whole change. A missing or malformed block
-leaves the single step in place, so a model that cannot emit structured output
-loses nothing. Accepted rewrites are checkpointed and replayed on resume, and
-surface as `plan_expanded` events and `plan_expansion` trace spans. Failed verification rolls back journaled file-tool
-mutations only when hashes still match, refreshes retrieval, asks the planner for
-a revised approach, and requires fresh approval for corrective coding. It checkpoints before and after steps, invokes a
-corrective coder after verifier failure, stops repeated failure fingerprints,
-and enforces shared model-request, attempt, and time limits.
-`createTaskCheckpointStore` connects those checkpoints to a persisted SQLite
-task; `HeadlessRuntimeService.resumeTask()` skips already completed stages.
+**`pnpm build` fails after a `git pull`.** `tsc -b` skips files whose timestamps
+moved backwards during a git operation and can leave stale output. Run
+`pnpm build:force`.
 
-## Registry-driven agents
+**Search returns nothing.** ripgrep is missing. Install it, or set
+`AGENTIC_RIPGREP_PATH` to the binary.
 
-`MultiAgentOrchestrator` loads an `AgentDefinition` by ID from an injected
-`AgentRegistry`, resolves its model and tools, and runs its prompt through the
-generic `AgentRunner` tool loop. Each active agent receives a `handoff_agent`
-tool for delegating focused work to another enabled registry agent. Handoffs
-are bounded by depth, count, cancellation, and time limits and are returned to
-the parent as normalized tool results. Agents with restricted tool lists can
-declare `delegatesTo`; blocked tools then become automatic delegation proxies,
-so a model cannot bypass the meta-agent boundary by hallucinating a direct
-mutation tool call.
+**A task stops saying it reached its budget.** Expected behaviour. Each task has
+a $0.50 ceiling, a 48 model-request ceiling, and a 30 minute ceiling. The task
+is paused with its work intact and can be resumed from the task list.
 
-The session package stores agent definitions in the global SQLite database.
-Definitions contain the name, description, system prompt, capabilities,
-allowed tools, enabled state, and optional step limit. Provider routing is injected through the model resolver and is not embedded in
-the agent runtime. The gateway ranks configured routes by preference, tool
-support, context fit, estimated cost, and cooldown state, then visibly fails over
-on retryable provider failures.
+**Ollama routes fail.** Confirm the daemon is reachable with
+`curl http://localhost:11434/api/tags`, and that the model name in Settings
+matches a model in that list exactly, including the tag.
 
-Project-specific agents can also be shared with a codebase under
-`.agentic/agents/*.md`. Each file uses YAML frontmatter for its identity and
-tool permissions, followed by the agent's system prompt. The TUI imports these
-definitions into SQLite at startup. `AGENTS.md` remains project-wide coding
-guidance and is not an agent definition file.
+---
 
-## Web and Git tooling
+# Scripts
 
-`@agentic-runtime/tools` includes `browse_url` for readable HTTP(S) article
-extraction and `crawl_site` for bounded same-domain crawling. Web requests do
-not execute page scripts, reject non-HTTP protocols, cap responses at 2 MB, and
-limit crawls to 25 pages with per-page excerpt limits. The implementation uses
-Mozilla Readability, JSDOM, and Crawlee.
-
-The same package includes read-only `git_status`, `git_diff`, `git_log`, and
-`git_branches` tools, plus approval-gated `git_add`, `git_commit`,
-`git_checkout`, and `git_push` tools backed by `simple-git`.
-
-## Headless runtime boundary
-
-`@agentic-runtime/runtime` composes sessions, built-in/project agents, provider
-selection, concrete tools, approvals, cancellation, task state, manual context,
-isolated questions, recovery journals, and persisted trace spans behind
-`HeadlessRuntimeService`. `listTraceSpans(taskId)` returns the currently persisted
-trace hierarchy for IDE transport and dashboard clients. Model and tool span
-correlation is still incomplete, as documented in the architecture status. The
-TUI uses this service instead of owning runtime behavior. The desktop GUI hosts
-the same service behind a loopback HTTP/SSE adapter, including task start,
-cancellation, live events, and approval decisions.
-
-## Interactive TUI
-
-Copy `.env.example` to `.env`, set `MODEL_PROVIDER` and the matching model
-settings, then start the terminal chat interface:
-
-```powershell
-Copy-Item .env.example .env
-# Edit .env and set OLLAMA_MODEL to a model installed in Ollama.
-pnpm tui
-```
-
-To develop the runtime from this repository while sandboxing it to another
-workspace, pass the target directory after `--`:
-
-```powershell
-pnpm tui -- "D:\path\to\test-workspace"
-```
-
-In Git Bash, use a relative path or quoted forward slashes so backslashes are
-not consumed as escape characters:
-
-```sh
-pnpm tui -- ./tmp/python-manual-workspace
-pnpm tui -- "C:/path/to/test-workspace"
-```
-
-The target directory becomes the only workspace root for file, search, command,
-and Git tools. Its `.env` supplies provider configuration unless `ENV_FILE` is
-set explicitly.
-
-For a local Ollama server, `.env` should contain:
-
-```dotenv
-MODEL_PROVIDER=ollama
-OLLAMA_ENDPOINT=http://localhost:11434/api/chat
-OLLAMA_MODEL=your-local-model
-```
-
-## Code retrieval
-
-Each codebase gets its own SQLite index, keyed by the canonical project root, so
-retrieval and agent memory never cross between projects. Extraction runs in three
-tiers, strongest first:
-
-| Tier           | Languages                  | Produces                                           |
-| -------------- | -------------------------- | -------------------------------------------------- |
-| `typescript`   | TS, TSX, JS, JSX, MJS, CJS | Bindings-resolved symbols, imports, exports, calls |
-| `tree-sitter`  | Python, Go, Rust, C, C++   | Parsed symbols, multi-line spans, attributed calls |
-| `ripgrep-text` | everything else            | Regex declaration and import lines                 |
-
-TypeScript and JavaScript stay in-process on purpose: the compiler API resolves
-bindings, so its reference edges point at the declaration a name actually refers
-to, where a syntax tree can only match text. The middle tier gives each language
-its own visibility rule - Rust `pub`, Go's leading capital, C's `static`,
-Python's underscore - and a call graph attributed to the enclosing function.
-
-Ranking then widens by structure. A per-file expansion reaches a direct caller
-and stops; personalised PageRank over the project's symbol graph reaches the
-function three calls away that a change actually breaks, and leaves a
-disconnected file out. Every returned slice carries the reason it was chosen,
-and the dashboard shows it.
-
-Indexing is incremental and stat-gated: a file whose size and mtime match the
-index is not re-read at all, so the refresh that runs on every query stays cheap.
-
-## Rust sidecar
-
-A small Rust process, spawned on demand and shut down with the runtime, backs
-five things the TypeScript side does not do well:
-
-- **Symbol extraction** for the five non-JavaScript languages, over tree-sitter.
-- **The code property graph** in flat arrays, with personalised PageRank.
-- **A write-ahead log** that persists each project's graph as a
-  length-framed, memory-mapped record, so a restart adopts it instead of
-  rebuilding.
-- **A Merkle state tree** that hashes the changed files with the action that
-  produced them, catching a run that edits, reverts, and re-edits - which a
-  per-step failure fingerprint cannot see.
-- **Structural slicing and signature pruning** for the `analyze_code_structure`
-  tool and for context compaction.
-
-The sidecar is an enhancement, not a prerequisite. A missing or failing binary
-degrades each of these rather than failing the task, so a machine where the
-native build did not run still has a working IDE.
-
-## Provider Gateway
-
-`@agentic-runtime/gateway` separates provider configuration, discovered models,
-and execution routes. Routes are filtered by tool support, context fit, an
-optional per-stage context-window floor, and cooldown; the survivors are then
-ordered by the request's bias — `capacity` (largest known parameter count) for
-planning a complex task and for verification and review, `economy` (cheapest)
-for retrieval summarisation and plain chat, `balanced` (the operator's
-configured order) otherwise. Task complexity is classified syntactically from
-the prompt rather than with a model call. Every route decision is emitted with
-a human-readable reason. Credentials are read by reference from environment
-variables and are never included in task/session state or gateway events.
-The desktop settings screen persists credentials in the machine-local global
-SQLite database, so normal users do not need to create or repeatedly edit an
-`.env` file. The default provider presets are explicit models with published
-total parameter counts at or below the problem statement's 80B limit.
-
-OpenRouter can be configured with:
-
-```dotenv
-MODEL_PROVIDER=openrouter
-OPENROUTER_API_KEY=your-key
-OPENROUTER_MODEL=provider/model-id
-```
-
-The gateway discovers OpenRouter models dynamically from its `/models` API and
-normalizes their capability, context, and pricing metadata. Existing Ollama
-configuration continues to work through the same gateway. An OpenAI-compatible
-local endpoint can use `MODEL_PROVIDER=openai-compatible`,
-`OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_API_KEY` when required, and a
-model ID through `OPENAI_COMPATIBLE_MODEL`.
-
-The TUI persists conversation history in SQLite and shows model-requested tool
-calls for approval before execution. Current commands include `/help`, `/clear`,
-`/new`, `/sessions`, `/agents`, `/agent <id>`, `/settings`, `/context`,
-`/context add <file>[:line-range]`, `/context remove <file>`,
-`/bytheway <question>`, and `/exit`. See the runbook for exact syntax and current
-limitations.
-
-Session data is stored outside the repository under the platform's local
-application-data directory. Global settings use a global database, while each
-project has a separate database keyed by the canonical project path. Provider
-keys can be saved through `/settings` or `pnpm settings`; environment variables
-remain supported as fallback configuration.
-
-## Releases and CI
-
-Two workflows, doing different jobs.
-
-**`ci.yml`** runs on every push and pull request, on Ubuntu only: lint, format
-check, the Rust suite, the TypeScript suite, and the GUI bundle. It is the fast
-answer to "did I break something", and finishes in a few minutes because it
-builds no installers.
-
-**`release.yml`** builds installers on all three platforms and publishes them:
-
-| Trigger         | Result                                                                               |
-| --------------- | ------------------------------------------------------------------------------------ |
-| push to `main`  | Refreshes the `latest` prerelease, so one URL always holds a build of current `main` |
-| push a `v*` tag | Publishes a permanent versioned release with generated notes                         |
-| manual dispatch | Same, on demand                                                                      |
-
-Cutting a version:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-Each platform builds on its own native runner. Cross-building is refused on
-purpose: the bundled ripgrep binary and the Rust sidecar are both
-platform-specific, so a package built for another OS would ship executables that
-cannot run. `prepare-runtime-assets.mjs` fails loudly rather than producing one.
-
-The release job publishes whatever built: one platform failing does not withhold
-the ones that succeeded. A partial release says so — the notes carry a generated
-table marking any platform that was **not built in this run**, so the gap is
-stated rather than left for a reader to notice from the file list. The one case
-that publishes nothing is when no platform built at all, since replacing
-`latest` with an empty release would remove a working download and put nothing
-in its place.
-
-Builds are unsigned, which needs paid Apple and Windows certificates: on macOS,
-right-click → Open on first launch; on Windows, SmartScreen warns.
-
-## Scripts
-
-- `pnpm build` compiles all current packages (incremental)
-- `pnpm build:force` recompiles everything from scratch; run it after pulling,
-  because `tsc -b` has skipped files whose timestamps moved backwards during a
-  git operation and left stale JavaScript behind
+- `pnpm build` compiles the Rust crate and all TypeScript packages, incrementally
+- `pnpm build:force` recompiles everything from scratch
 - `pnpm typecheck` runs the TypeScript build in checking mode
-- `pnpm test` forces a full rebuild, runs the Rust suite, then the TypeScript
-  suite. It forces the rebuild deliberately: a green run must mean the current
-  sources are green, and `tsc -b` has silently skipped a file before
+- `pnpm test` forces a full rebuild, then runs the Rust and TypeScript suites
 - `pnpm test:rust` runs the Rust crate's tests alone
-- `pnpm tui` builds the workspace and starts the interactive agentic TUI
 - `pnpm start` builds and opens the desktop IDE
 - `pnpm desktop:quick` opens an already-built desktop IDE
-- `pnpm desktop:package` creates desktop installers for the current platform,
-  building the Rust sidecar in release mode first (13.5 MB against 39.5 MB
-  debug). Cross-building is refused: both bundled binaries are
-  platform-specific, so each platform builds on its own machine or CI runner
+- `pnpm tui` builds and starts the terminal interface
+- `pnpm settings` starts the loopback server only
+- `pnpm desktop:package` builds installers for the current platform, compiling
+  the Rust sidecar in release mode first. Cross-building is refused, because
+  both bundled binaries are platform-specific, so each platform builds on its
+  own machine or CI runner
 - `pnpm lint` runs ESLint
 - `pnpm format` formats supported files with Prettier
 - `pnpm format:check` checks formatting without changing files
+
+# Repository layout
+
+```
+packages/
+  core         runtime contracts, AgentRunner, orchestrators, compaction
+  gateway      provider discovery, routing, failover, cost governance
+  runtime      headless application service composing everything below
+  retrieval    per-project semantic index and query pipeline
+  workspace    workspace-bound file service with hashes and diffs
+  search       ripgrep-backed search service
+  command      cross-platform shell executor
+  tools        IDE, web, and Git tools built on the core contracts
+  session      SQLite persistence, global and per project
+  openai       OpenAI-compatible provider adapter
+  ollama       Ollama local provider adapter
+  gui          React workbench
+  gui-server   loopback HTTP and SSE boundary
+  desktop      thin Electron host
+  tui          terminal client
+rust/          tree-sitter parsing, code property graph, Merkle state, WAL, diff
+docs/          architecture and decision documentation
+tests/         runtime, routing, and retrieval test suites
+```
