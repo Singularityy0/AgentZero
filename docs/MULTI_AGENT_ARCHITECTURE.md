@@ -452,10 +452,10 @@ stateDiagram-v2
     [*] --> Running: task created
     Running --> Checkpointed: stage completed
     Checkpointed --> Running: next stage
-    Running --> Interrupted: IDE closed, crash, timeout
+    Running --> Interrupted: IDE closed / crash / timeout
     Running --> Paused: approval denied
-    Interrupted --> Running: resumeTask() replays the checkpoint
-    Paused --> Running: resumeTask()
+    Interrupted --> Running: resumeTask replays checkpoint
+    Paused --> Running: resumeTask
     Running --> Completed
     Completed --> [*]
 ```
