@@ -1,7 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, dialog, Menu, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  nativeImage,
+  shell,
+  type NativeImage,
+} from "electron";
 import {
   startSettingsServer,
   type SettingsServer,
@@ -67,6 +75,26 @@ async function resolveInitialWorkspace(): Promise<string | undefined> {
   return undefined;
 }
 
+/** Product name, used for the window, menus, dialogs, and the splash page. */
+const APP_NAME = "Agent Zero";
+
+/**
+ * The product mark as a data URI, or an empty string when it cannot be read.
+ *
+ * The folderless splash is loaded from a `data:` URL, so a relative image path
+ * has nothing to resolve against; the bytes have to travel with the markup. The
+ * file ships inside the GUI bundle, which is where both the packaged app and a
+ * source checkout already look for static assets.
+ */
+function logoDataUri(): string {
+  try {
+    const bytes = readFileSync(join(staticGuiDirectory(), "logo.jpeg"));
+    return `data:image/jpeg;base64,${bytes.toString("base64")}`;
+  } catch {
+    return "";
+  }
+}
+
 function staticGuiDirectory(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "gui")
@@ -123,9 +151,34 @@ async function startWorkspace(workspaceRoot: string): Promise<void> {
   saveDesktopState({ lastWorkspace: workspaceRoot });
 }
 
+/**
+ * Window and taskbar icon.
+ *
+ * Electron's `nativeImage` reads JPEG directly, so the same file the web app
+ * serves is reused here. electron-builder is stricter and takes the generated
+ * PNG/ICO under `build/` instead. An unreadable icon is not worth failing a
+ * launch over, so this degrades to Electron's default.
+ */
+function windowIcon(): NativeImage | undefined {
+  for (const candidate of [
+    join(staticGuiDirectory(), "logo.png"),
+    join(staticGuiDirectory(), "logo.jpeg"),
+  ]) {
+    try {
+      const image = nativeImage.createFromPath(candidate);
+      if (!image.isEmpty()) return image;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return undefined;
+}
+
 function createWindow(): BrowserWindow {
+  const icon = windowIcon();
   const window = new BrowserWindow({
-    title: "Agentic IDE",
+    title: APP_NAME,
+    ...(icon ? { icon } : {}),
     width: 1440,
     height: 900,
     minWidth: 1040,
@@ -166,21 +219,22 @@ async function loadWorkbench(): Promise<void> {
 
 async function loadFolderlessWelcome(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
+  const logo = logoDataUri();
   const html = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Agentic IDE</title>
+    <title>${APP_NAME}</title>
     <style>
       :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #090909; color: #d4d4d4; }
       * { box-sizing: border-box; }
       body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 50% 28%, rgba(99, 102, 241, .11), transparent 34%), #090909; }
       header { height: 36px; display: flex; align-items: center; gap: 9px; padding: 0 14px; border-bottom: 1px solid rgba(255,255,255,.06); background: #0d0d0d; font-size: 12px; }
-      .mark { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 4px; color: #818cf8; background: rgba(99,102,241,.12); }
+      .mark { width: 20px; height: 20px; border-radius: 4px; object-fit: cover; }
       main { min-height: calc(100vh - 36px); display: grid; place-items: center; padding: 32px; }
       section { width: min(560px, 90vw); }
-      .logo { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid rgba(129,140,248,.18); border-radius: 9px; background: rgba(99,102,241,.10); color: #a5b4fc; font-size: 22px; }
+      .logo { width: 52px; height: 52px; border-radius: 10px; object-fit: cover; }
       h1 { margin: 20px 0 8px; font-size: 26px; font-weight: 580; letter-spacing: -.03em; color: #ededed; }
       p { margin: 0; color: #777; font-size: 13px; line-height: 1.7; }
       a { margin-top: 24px; display: inline-flex; align-items: center; gap: 9px; min-width: 168px; justify-content: center; padding: 10px 16px; border-radius: 6px; color: #f1f1f1; background: #4f46e5; text-decoration: none; font-size: 13px; box-shadow: 0 8px 32px rgba(79,70,229,.2); }
@@ -189,12 +243,12 @@ async function loadFolderlessWelcome(): Promise<void> {
     </style>
   </head>
   <body>
-    <header><span class="mark">✦</span><span>Agentic IDE</span></header>
+    <header><img class="mark" src="${logo}" alt="" /><span>${APP_NAME}</span></header>
     <main>
       <section>
-        <div class="logo">⌁</div>
+        ${logo ? `<img class="logo" src="${logo}" alt="" />` : ""}
         <h1>Open a folder to start building.</h1>
-        <p>No project is opened automatically. Select a codebase and Agentic IDE will create an isolated workspace, index its files, and connect the agent runtime.</p>
+        <p>No project is opened automatically. Select a codebase and ${APP_NAME} will create an isolated workspace, index its files, and connect the agent runtime.</p>
         <a href="agentic-ide://open-folder">Open Folder…</a>
         <small>You can also use File → Open Folder or Ctrl+Shift+O.</small>
       </section>
@@ -298,12 +352,12 @@ function installApplicationMenu(): void {
       label: "Help",
       submenu: [
         {
-          label: "About Agentic IDE",
+          label: `About ${APP_NAME}`,
           click: () =>
             void dialog.showMessageBox({
               type: "info",
-              title: "About Agentic IDE",
-              message: "Agentic IDE",
+              title: `About ${APP_NAME}`,
+              message: APP_NAME,
               detail:
                 "A local-first coding workbench with agent orchestration, editable Monaco files, multiple terminal profiles, and observable runtime execution.",
             }),
@@ -359,7 +413,7 @@ async function bootstrap(): Promise<void> {
     } else {
       await dialog.showMessageBox({
         type: "error",
-        title: "Agentic IDE failed to start",
+        title: `${APP_NAME} failed to start`,
         message,
       });
       app.quit();

@@ -1,4 +1,4 @@
-# Agentic Runtime
+# Agent Zero
 
 Minimal TypeScript monorepo workspace for building an agent runtime.
 

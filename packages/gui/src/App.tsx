@@ -6,9 +6,9 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  Code2,
   CircleDot,
   Clock3,
-  Code2,
   Database,
   ExternalLink,
   File,
@@ -1597,10 +1597,12 @@ export function App() {
     <div className="flex h-screen w-full flex-col overflow-hidden bg-canvas text-neutral-300">
       <div className="flex h-9 shrink-0 items-center border-b border-white/5 bg-panel px-3 text-xs">
         <div className="flex w-[284px] items-center gap-2 font-medium text-neutral-300">
-          <div className="flex size-5 items-center justify-center rounded-sm bg-indigo-500/10 text-indigo-400">
-            <Sparkles size={13} />
-          </div>
-          <span>Agentic IDE</span>
+          <img
+            src="/logo.jpeg"
+            alt=""
+            className="size-5 shrink-0 rounded-sm object-cover"
+          />
+          <span>Agent Zero</span>
           <span className="text-neutral-700">/</span>
           <button
             type="button"
@@ -3156,12 +3158,17 @@ function Welcome({
   return (
     <div className="flex h-full items-center justify-center">
       <div className="w-[520px] max-w-[80%]">
-        <div className="mb-5 flex size-10 items-center justify-center rounded-md border border-indigo-400/10 bg-indigo-500/10 text-indigo-400">
-          <Code2 size={20} />
-        </div>
+        <img
+          src="/logo.jpeg"
+          alt="Agent Zero"
+          className="mb-5 size-12 rounded-md object-cover"
+        />
         <h1 className="text-xl font-medium tracking-tight text-neutral-200">
-          Build with a coordinated agent team.
+          Agent Zero
         </h1>
+        <p className="mt-1 text-sm text-neutral-500">
+          Build with a coordinated agent team.
+        </p>
         <p className="mt-2 text-sm leading-6 text-neutral-600">
           {project?.name ?? "This workspace"} is indexed, isolated, and ready
           for durable multi-stage tasks. Open a file to inspect code or review

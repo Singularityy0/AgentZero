@@ -1160,7 +1160,11 @@ const MIME_TYPES: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".json": "application/json; charset=utf-8",
   ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
   ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
 };
 
 function serveStatic(

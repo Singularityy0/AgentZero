@@ -1,4 +1,4 @@
-# Agentic IDE Workbench
+# Agent Zero Workbench
 
 React, Tailwind, and Monaco browser client for the agentic runtime workspace.
 The UI is served by `@agentic-runtime/gui-server` on loopback and never imports

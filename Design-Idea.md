@@ -1,4 +1,4 @@
-# Design System: Agentic IDE (Cursor-Style)
+# Design System: Agent Zero (Cursor-Style)
 
 ## Overview
 

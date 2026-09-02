@@ -2,7 +2,7 @@
   "name": "@agentic-runtime/desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Native desktop host for the Agentic IDE workbench",
+  "description": "Native desktop host for the Agent Zero workbench",
   "author": "Takneek Team",
   "type": "module",
   "main": "./dist/main.js",
@@ -22,15 +22,16 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "dev.agentic.runtime",
-    "productName": "Agentic IDE",
+    "appId": "dev.agentzero.app",
+    "productName": "Agent Zero",
     "asar": true,
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
-      "package.json"
+      "package.json",
+      "build/**/*"
     ],
     "extraResources": [
       {
@@ -46,20 +47,23 @@
       "target": [
         "nsis",
         "portable"
-      ]
+      ],
+      "icon": "build/icon.ico"
     },
     "mac": {
       "target": [
         "dmg"
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png"
     },
     "linux": {
       "target": [
         "AppImage",
         "deb"
       ],
-      "category": "Development"
+      "category": "Development",
+      "icon": "build/icon.png"
     }
   }
 }
