@@ -5,6 +5,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  ipcMain,
   Menu,
   nativeImage,
   shell,
@@ -176,6 +177,13 @@ function windowIcon(): NativeImage | undefined {
   return undefined;
 }
 
+/**
+ * On macOS, `titleBarStyle: "hiddenInset"` gives native traffic-light
+ * buttons with no separate title/menu row for free - nothing else to build.
+ * Windows and Linux have no such mode, so the window goes fully frameless
+ * and the renderer's own title bar (App.tsx) draws the menu and window
+ * controls, driven by the IPC bridge in preload.ts.
+ */
 function createWindow(): BrowserWindow {
   const icon = windowIcon();
   const window = new BrowserWindow({
@@ -187,11 +195,15 @@ function createWindow(): BrowserWindow {
     minHeight: 680,
     backgroundColor: "#0a0a0a",
     show: !smokeTest,
-    autoHideMenuBar: false,
+    frame: process.platform === "darwin",
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const }
+      : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: join(sourceDirectory, "preload.cjs"),
     },
   });
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -207,6 +219,12 @@ function createWindow(): BrowserWindow {
     event.preventDefault();
     void openWorkspace();
   });
+  window.on("maximize", () =>
+    window.webContents.send("window:maximized-changed", true),
+  );
+  window.on("unmaximize", () =>
+    window.webContents.send("window:maximized-changed", false),
+  );
   window.on("closed", () => {
     if (mainWindow === window) mainWindow = undefined;
   });
@@ -289,8 +307,13 @@ async function closeWorkspace(): Promise<void> {
   await loadFolderlessWelcome();
 }
 
-function installApplicationMenu(): void {
-  const template: Electron.MenuItemConstructorOptions[] = [
+/**
+ * Shared by the real (accelerator-bearing) application menu and by the
+ * renderer title bar's per-label popups, so "File"/"Edit"/etc. behave
+ * identically however they were opened.
+ */
+function buildMenuTemplate(): Electron.MenuItemConstructorOptions[] {
+  return [
     {
       label: "File",
       submenu: [
@@ -367,13 +390,54 @@ function installApplicationMenu(): void {
       ],
     },
   ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function installApplicationMenu(): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate()));
+}
+
+/** Pops a single top-level menu (by its label, case-insensitive) at a screen position. */
+function popupMenu(menuId: string, x: number, y: number): void {
+  if (!mainWindow) return;
+  const entry = buildMenuTemplate().find(
+    (item) => item.label?.toLowerCase() === menuId.toLowerCase(),
+  );
+  const submenu = entry?.submenu;
+  if (!Array.isArray(submenu)) return;
+  Menu.buildFromTemplate(submenu).popup({ window: mainWindow, x, y });
 }
 
 async function dispatchRendererEvent(name: string): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   await mainWindow.webContents.executeJavaScript(
     `window.dispatchEvent(new Event(${JSON.stringify(name)}))`,
+  );
+}
+
+/** Backs the frameless-window title bar the renderer draws on Windows/Linux. */
+function installWindowChromeIpc(): void {
+  ipcMain.on("window:minimize", () => mainWindow?.minimize());
+  ipcMain.on("window:toggle-maximize", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+  });
+  ipcMain.on("window:close", () => mainWindow?.close());
+  ipcMain.handle(
+    "window:is-maximized",
+    () => mainWindow?.isMaximized() ?? false,
+  );
+  ipcMain.on(
+    "menu:popup",
+    (_event, menuId: unknown, x: unknown, y: unknown) => {
+      if (
+        typeof menuId !== "string" ||
+        typeof x !== "number" ||
+        typeof y !== "number"
+      )
+        return;
+      popupMenu(menuId, x, y);
+    },
   );
 }
 
@@ -394,6 +458,7 @@ app.on("before-quit", () => {
 async function bootstrap(): Promise<void> {
   try {
     installApplicationMenu();
+    installWindowChromeIpc();
     const workspace = await resolveInitialWorkspace();
     if (!workspace) {
       await loadFolderlessWelcome();

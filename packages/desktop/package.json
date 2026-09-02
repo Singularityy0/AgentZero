@@ -16,7 +16,7 @@
   "type": "module",
   "main": "./dist/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').copyFileSync('src/preload.cjs','dist/preload.cjs')\"",
     "start": "electron .",
     "prepare:runtime": "node ./scripts/prepare-runtime-assets.mjs",
     "pack": "pnpm prepare:runtime && electron-builder --dir",

@@ -10,6 +10,7 @@ import {
   Code2,
   CircleDot,
   Clock3,
+  Copy,
   Database,
   ExternalLink,
   File,
@@ -21,6 +22,7 @@ import {
   KeyRound,
   Layers,
   LayoutDashboard,
+  Minus,
   PanelBottomClose,
   PanelBottomOpen,
   Plus,
@@ -55,6 +57,30 @@ self.MonacoEnvironment = {
     return new editorWorker();
   },
 };
+
+/**
+ * Bridge exposed by packages/desktop/src/preload.ts. Only present when this
+ * page is running inside the Electron shell (frameless on Windows/Linux) -
+ * everywhere else (plain browser, TUI web view) `window.agenticDesktop` is
+ * undefined and the title bar renders without menu/window-control buttons.
+ */
+interface AgenticDesktopBridge {
+  platform: string;
+  minimizeWindow: () => void;
+  toggleMaximizeWindow: () => void;
+  closeWindow: () => void;
+  isWindowMaximized: () => Promise<boolean>;
+  onWindowMaximizedChange: (
+    callback: (maximized: boolean) => void,
+  ) => () => void;
+  popupMenu: (menuId: string, x: number, y: number) => void;
+}
+
+declare global {
+  interface Window {
+    agenticDesktop?: AgenticDesktopBridge;
+  }
+}
 
 type Section =
   "explorer" | "search" | "history" | "agents" | "dashboard" | "settings";
@@ -458,6 +484,32 @@ function IconButton({
 }
 
 /**
+ * A "File"/"Edit"/… label in the in-window title bar. Opens the matching
+ * native Electron submenu anchored under itself, so it behaves exactly like
+ * a real menu bar despite being drawn by the renderer.
+ */
+function TitleBarMenuButton({
+  label,
+  onOpen,
+}: {
+  label: string;
+  onOpen: (x: number, y: number) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="rounded-sm px-1.5 py-1 [-webkit-app-region:no-drag] hover:bg-white/5 hover:text-neutral-200"
+      onClick={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        onOpen(Math.round(rect.left), Math.round(rect.bottom));
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
  * Matches a workspace-relative path, optionally suffixed with `:line` or
  * `:start-end`. The extension allow-list keeps ordinary prose ("v1.2", "e.g.")
  * from being rendered as a file tag.
@@ -767,7 +819,89 @@ function MonacoPane({
 /** Quiet period before an auto-save write, so typing is one save. */
 const AUTO_SAVE_DELAY_MS = 1_200;
 
+const PANEL_WIDTH_STORAGE_PREFIX = "agentic:panel-width:";
+
+/**
+ * A panel width that resizes by dragging and persists across reloads.
+ * `direction` is 1 when dragging right grows the panel (a left-docked panel)
+ * or -1 when dragging right shrinks it (a right-docked panel).
+ */
+function useResizableWidth(
+  key: string,
+  defaultWidth: number,
+  min: number,
+  max: number,
+  direction: 1 | -1,
+): [number, (event: React.PointerEvent) => void] {
+  const [width, setWidth] = useState(() => {
+    const stored = Number(
+      localStorage.getItem(`${PANEL_WIDTH_STORAGE_PREFIX}${key}`),
+    );
+    return stored >= min && stored <= max ? stored : defaultWidth;
+  });
+  const startResize = useCallback(
+    (event: React.PointerEvent) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = width;
+      const previousUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+      const onMove = (moveEvent: PointerEvent) => {
+        const delta = (moveEvent.clientX - startX) * direction;
+        const next = Math.min(max, Math.max(min, startWidth + delta));
+        setWidth(next);
+        localStorage.setItem(
+          `${PANEL_WIDTH_STORAGE_PREFIX}${key}`,
+          String(next),
+        );
+      };
+      const onUp = () => {
+        document.body.style.userSelect = previousUserSelect;
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    },
+    [width, min, max, direction, key],
+  );
+  return [width, startResize];
+}
+
+/** Thin draggable divider between a resizable panel and its neighbor. */
+function ResizeHandle({
+  onPointerDown,
+  label,
+}: {
+  onPointerDown: (event: React.PointerEvent) => void;
+  label: string;
+}) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      onPointerDown={onPointerDown}
+      className="w-1 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-indigo-400/40 active:bg-indigo-400/60"
+    />
+  );
+}
+
 export function App() {
+  const desktop = window.agenticDesktop;
+  const [isMaximized, setIsMaximized] = useState(false);
+  useEffect(() => {
+    if (!desktop) return;
+    void desktop.isWindowMaximized().then(setIsMaximized);
+    return desktop.onWindowMaximizedChange(setIsMaximized);
+  }, [desktop]);
+  const [explorerWidth, startExplorerResize] = useResizableWidth(
+    "explorer",
+    260,
+    180,
+    480,
+    1,
+  );
   const [section, setSection] = useState<Section>("explorer");
   const [workbench, setWorkbench] = useState<WorkbenchResponse>();
   const [connectionError, setConnectionError] = useState<string>();
@@ -1742,19 +1876,19 @@ export function App() {
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-canvas text-neutral-300">
-      <div className="flex h-9 shrink-0 items-center border-b border-white/5 bg-panel px-3 text-xs">
-        <div className="flex w-[284px] items-center gap-2 font-medium text-neutral-300">
+      <div className="grid h-9 shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center border-b border-white/5 bg-panel px-3 text-xs [-webkit-app-region:drag]">
+        <div className="flex min-w-0 items-center gap-2 font-medium text-neutral-300">
           <img
             src="/logo.jpeg"
             alt=""
             className="size-5 shrink-0 rounded-sm object-cover"
           />
-          <span>Agent Zero</span>
-          <span className="text-neutral-700">/</span>
+          <span className="shrink-0">Agent Zero</span>
+          <span className="shrink-0 text-neutral-700">/</span>
           <button
             type="button"
             onClick={() => void openFolder()}
-            className="truncate text-neutral-500 hover:text-neutral-300"
+            className="truncate text-neutral-500 [-webkit-app-region:no-drag] hover:text-neutral-300"
             title={
               workbench?.project.rootPath
                 ? `Agent writes go to ${workbench.project.rootPath} — click to open another folder`
@@ -1763,21 +1897,64 @@ export function App() {
           >
             {workbench?.project.name ?? "workspace"}
           </button>
+          {desktop && (
+            <div className="ml-2 flex shrink-0 items-center gap-0.5 text-neutral-500">
+              {(["File", "Edit", "View", "Terminal", "Help"] as const).map(
+                (label) => (
+                  <TitleBarMenuButton
+                    key={label}
+                    label={label}
+                    onOpen={(x, y) =>
+                      desktop.popupMenu(label.toLowerCase(), x, y)
+                    }
+                  />
+                ),
+              )}
+            </div>
+          )}
         </div>
         <button
           type="button"
-          className="mx-auto flex h-6 w-[420px] items-center justify-center gap-2 rounded-sm border border-white/5 bg-black/20 text-neutral-500 transition duration-75 hover:bg-white/5 hover:text-neutral-300"
+          className="flex h-6 w-[420px] items-center justify-center gap-2 rounded-sm border border-white/5 bg-black/20 text-neutral-500 [-webkit-app-region:no-drag] transition duration-75 hover:bg-white/5 hover:text-neutral-300"
           onClick={() => setSection("search")}
         >
           <Search size={12} /> Search files and symbols <kbd>Ctrl K</kbd>
         </button>
-        <div className="flex w-[284px] justify-end gap-3 text-neutral-600">
+        <div className="flex items-center justify-end gap-3 text-neutral-600">
           <span className="flex items-center gap-1.5">
             <GitBranch size={12} /> main
           </span>
           <span className="flex items-center gap-1.5 text-emerald-500/80">
             <CircleDot size={10} /> local
           </span>
+          {desktop && desktop.platform !== "darwin" && (
+            <div className="-mr-3 ml-2 flex h-9 shrink-0 items-stretch self-stretch [-webkit-app-region:no-drag]">
+              <button
+                type="button"
+                aria-label="Minimize"
+                onClick={() => desktop.minimizeWindow()}
+                className="flex w-11 items-center justify-center text-neutral-500 hover:bg-white/5 hover:text-neutral-200"
+              >
+                <Minus size={14} />
+              </button>
+              <button
+                type="button"
+                aria-label={isMaximized ? "Restore" : "Maximize"}
+                onClick={() => desktop.toggleMaximizeWindow()}
+                className="flex w-11 items-center justify-center text-neutral-500 hover:bg-white/5 hover:text-neutral-200"
+              >
+                {isMaximized ? <Copy size={12} /> : <Square size={11} />}
+              </button>
+              <button
+                type="button"
+                aria-label="Close"
+                onClick={() => desktop.closeWindow()}
+                className="flex w-11 items-center justify-center text-neutral-500 hover:bg-rose-600 hover:text-white"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1831,7 +2008,10 @@ export function App() {
           </div>
         </nav>
 
-        <aside className="flex w-[260px] shrink-0 flex-col border-r border-white/5 bg-panel">
+        <aside
+          className="flex shrink-0 flex-col border-r border-white/5 bg-panel"
+          style={{ width: explorerWidth }}
+        >
           <SidebarHeader
             section={section}
             onRefresh={() => void refreshWorkbench()}
@@ -1906,6 +2086,10 @@ export function App() {
           )}
           {section === "settings" && <SettingsSummary />}
         </aside>
+        <ResizeHandle
+          onPointerDown={startExplorerResize}
+          label="Resize explorer panel"
+        />
 
         <main className="flex min-w-0 flex-1 flex-col bg-canvas">
           {section === "dashboard" ? (
@@ -3701,393 +3885,412 @@ function AssistantPanel({
   const approvalPreview = pendingApproval?.preview
     ? JSON.stringify(pendingApproval.preview, null, 2).slice(0, 1800)
     : undefined;
+  const [chatWidth, startChatResize] = useResizableWidth(
+    "chat",
+    320,
+    260,
+    560,
+    -1,
+  );
 
   return (
-    <aside className="flex w-[320px] shrink-0 flex-col border-l border-white/5 bg-panel">
-      <div className="flex h-10 items-center gap-2 border-b border-white/5 px-3 text-xs font-medium text-neutral-300">
-        <Sparkles size={14} className="text-indigo-400" /> Agent chat{" "}
-        <span
-          className={`ml-auto rounded-sm border px-1.5 py-0.5 text-[9px] font-normal ${
-            runtimeError
-              ? "border-rose-400/20 text-rose-400"
+    <>
+      <ResizeHandle onPointerDown={startChatResize} label="Resize chat panel" />
+      <aside
+        className="flex shrink-0 flex-col border-l border-white/5 bg-panel"
+        style={{ width: chatWidth }}
+      >
+        <div className="flex h-10 items-center gap-2 border-b border-white/5 px-3 text-xs font-medium text-neutral-300">
+          <Sparkles size={14} className="text-indigo-400" /> Agent chat{" "}
+          <span
+            className={`ml-auto rounded-sm border px-1.5 py-0.5 text-[9px] font-normal ${
+              runtimeError
+                ? "border-rose-400/20 text-rose-400"
+                : runtimeStatus?.ready
+                  ? "border-emerald-400/20 text-emerald-400"
+                  : "border-amber-400/20 text-amber-400"
+            }`}
+          >
+            {runtimeError
+              ? "reconnecting"
               : runtimeStatus?.ready
-                ? "border-emerald-400/20 text-emerald-400"
-                : "border-amber-400/20 text-amber-400"
-          }`}
-        >
-          {runtimeError
-            ? "reconnecting"
-            : runtimeStatus?.ready
-              ? "runtime ready"
-              : "setup required"}
-        </span>
-      </div>
-      <div className="border-b border-white/5 p-2">
-        <div className="flex gap-1">
-          <select
-            value={selectedSessionId ?? ""}
-            onChange={(event) => onSelectSession(event.target.value)}
-            className="field min-w-0 flex-1"
-          >
-            {sessions.length === 0 && <option value="">No session</option>}
-            {sessions.map((session) => (
-              <option key={session.id} value={session.id}>
-                {session.title}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={onCreateSession}
-            className="icon-control"
-            title="New session"
-          >
-            <Plus size={13} />
-          </button>
+                ? "runtime ready"
+                : "setup required"}
+          </span>
         </div>
-        <div className="mt-1 flex gap-1">
-          <select
-            value={selectedAgentId ?? ""}
-            onChange={(event) => onSelectAgent(event.target.value)}
-            className="field min-w-0 flex-1"
-            aria-label="Active agent"
-            title="Auto reads the prompt and routes it. Pick a specific agent to override that."
-          >
-            {agents
-              .filter((agent) => agent.enabled && agent.selectable !== false)
-              .map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.automatic ? `Auto (${agent.name})` : agent.name}
+        <div className="border-b border-white/5 p-2">
+          <div className="flex gap-1">
+            <select
+              value={selectedSessionId ?? ""}
+              onChange={(event) => onSelectSession(event.target.value)}
+              className="field min-w-0 flex-1"
+            >
+              {sessions.length === 0 && <option value="">No session</option>}
+              {sessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.title}
                 </option>
               ))}
-          </select>
-          <select
-            value={runtimeStatus?.providerId ?? "ollama"}
-            onChange={(event) => onConfigureRuntime(event.target.value)}
-            className="field min-w-0 flex-1"
-            aria-label="Runtime provider"
-          >
-            {(runtimeStatus?.routes ?? []).map((route) => (
-              <option key={route.providerId} value={route.providerId}>
-                {route.label}
-                {route.configured ? "" : " · setup"}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <div
-          className={`mb-3 border p-3 ${
-            runtimeError
-              ? "border-rose-400/15 bg-rose-500/5"
-              : "border-indigo-400/10 bg-indigo-500/5"
-          }`}
-        >
-          <div className="flex items-center gap-2 text-[11px] text-indigo-200/80">
-            <Bot size={14} />
-            {runtimeError
-              ? runtimeError
-              : runtimeStatus?.ready
-                ? `${runtimeStatus.providerId} / ${runtimeStatus.modelId}`
-                : "Configure a provider model in Settings"}
-          </div>
-          <p className="mt-1 text-[10px] leading-4 text-neutral-600">
-            Live task events, cancellation, and approval decisions use the local
-            runtime transport.
-          </p>
-        </div>
-
-        <div className="space-y-3">
-          {messages.length === 0 && liveTurns.length === 0 && (
-            <div className="py-5 text-center text-[10px] leading-4 text-neutral-700">
-              Ask the selected agent about this workspace.
-            </div>
-          )}
-          {messages.map((message, index) => (
-            <div
-              key={`${message.role}-${index}`}
-              className={
-                message.role === "user"
-                  ? "ml-6 rounded-md bg-indigo-500/10 px-3 py-2 text-xs leading-5 text-indigo-100/80"
-                  : "mr-2 border-l border-indigo-400/20 pl-3 text-xs leading-5 text-neutral-400"
-              }
+            </select>
+            <button
+              type="button"
+              onClick={onCreateSession}
+              className="icon-control"
+              title="New session"
             >
-              {message.role === "assistant" && (
-                <ThinkingDisclosure items={message.metadata?.thinking ?? []} />
-              )}
-              <MessageBody
-                text={message.content}
-                onOpenReference={onOpenReference}
-              />
+              <Plus size={13} />
+            </button>
+          </div>
+          <div className="mt-1 flex gap-1">
+            <select
+              value={selectedAgentId ?? ""}
+              onChange={(event) => onSelectAgent(event.target.value)}
+              className="field min-w-0 flex-1"
+              aria-label="Active agent"
+              title="Auto reads the prompt and routes it. Pick a specific agent to override that."
+            >
+              {agents
+                .filter((agent) => agent.enabled && agent.selectable !== false)
+                .map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.automatic ? `Auto (${agent.name})` : agent.name}
+                  </option>
+                ))}
+            </select>
+            <select
+              value={runtimeStatus?.providerId ?? "ollama"}
+              onChange={(event) => onConfigureRuntime(event.target.value)}
+              className="field min-w-0 flex-1"
+              aria-label="Runtime provider"
+            >
+              {(runtimeStatus?.routes ?? []).map((route) => (
+                <option key={route.providerId} value={route.providerId}>
+                  {route.label}
+                  {route.configured ? "" : " · setup"}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          <div
+            className={`mb-3 border p-3 ${
+              runtimeError
+                ? "border-rose-400/15 bg-rose-500/5"
+                : "border-indigo-400/10 bg-indigo-500/5"
+            }`}
+          >
+            <div className="flex items-center gap-2 text-[11px] text-indigo-200/80">
+              <Bot size={14} />
+              {runtimeError
+                ? runtimeError
+                : runtimeStatus?.ready
+                  ? `${runtimeStatus.providerId} / ${runtimeStatus.modelId}`
+                  : "Configure a provider model in Settings"}
             </div>
-          ))}
-          {liveTurns.map((turn) => (
-            <div key={turn.taskId} className="space-y-3">
-              <div className="ml-6 rounded-md bg-indigo-500/10 px-3 py-2 text-xs leading-5 text-indigo-100/80">
+            <p className="mt-1 text-[10px] leading-4 text-neutral-600">
+              Live task events, cancellation, and approval decisions use the
+              local runtime transport.
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            {messages.length === 0 && liveTurns.length === 0 && (
+              <div className="py-5 text-center text-[10px] leading-4 text-neutral-700">
+                Ask the selected agent about this workspace.
+              </div>
+            )}
+            {messages.map((message, index) => (
+              <div
+                key={`${message.role}-${index}`}
+                className={
+                  message.role === "user"
+                    ? "ml-6 rounded-md bg-indigo-500/10 px-3 py-2 text-xs leading-5 text-indigo-100/80"
+                    : "mr-2 border-l border-indigo-400/20 pl-3 text-xs leading-5 text-neutral-400"
+                }
+              >
+                {message.role === "assistant" && (
+                  <ThinkingDisclosure
+                    items={message.metadata?.thinking ?? []}
+                  />
+                )}
                 <MessageBody
-                  text={turn.prompt}
+                  text={message.content}
                   onOpenReference={onOpenReference}
                 />
               </div>
-              <div
-                className={`mr-2 border-l pl-3 text-xs leading-5 ${
-                  turn.status === "failed"
-                    ? "border-rose-400/30 text-rose-300/80"
-                    : "border-indigo-400/20 text-neutral-400"
-                }`}
-              >
-                <ThinkingDisclosure
-                  items={turn.thinking}
-                  active={!turn.response}
-                />
-                {turn.response ? (
+            ))}
+            {liveTurns.map((turn) => (
+              <div key={turn.taskId} className="space-y-3">
+                <div className="ml-6 rounded-md bg-indigo-500/10 px-3 py-2 text-xs leading-5 text-indigo-100/80">
                   <MessageBody
-                    text={turn.response}
+                    text={turn.prompt}
                     onOpenReference={onOpenReference}
                   />
-                ) : (
-                  <span className="flex items-center gap-2 text-indigo-300/70">
-                    <RefreshCw size={11} className="animate-spin" /> Agent is
-                    working…
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-          {isolated.map((exchange) => (
-            <div
-              key={exchange.id}
-              className="border border-dashed border-amber-400/20 bg-amber-500/[0.03] p-2"
-            >
-              <div className="text-[9px] uppercase tracking-[0.12em] text-amber-300/60">
-                /bytheway · isolated, not added to this task's context
-              </div>
-              <div className="mt-1 text-xs leading-5 text-amber-100/70">
-                {exchange.question}
-              </div>
-              <div className="mt-2 border-t border-amber-400/10 pt-2 text-xs leading-5 text-neutral-400">
-                {exchange.error ? (
-                  <span className="text-rose-300/80">{exchange.error}</span>
-                ) : exchange.answer ? (
-                  <MessageBody
-                    text={exchange.answer}
-                    onOpenReference={onOpenReference}
-                  />
-                ) : (
-                  <span className="flex items-center gap-2 text-amber-300/70">
-                    <RefreshCw size={11} className="animate-spin" /> Answering…
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {pendingApproval && (
-          <ApprovalReview
-            approval={pendingApproval}
-            fallbackPreview={
-              approvalPreview ??
-              JSON.stringify(pendingApproval.call.arguments, null, 2)
-            }
-            onApprove={onApprove}
-          />
-        )}
-
-        <div className="my-4 h-px bg-white/5" />
-        <div className="mb-2 flex items-center justify-between text-[9px] font-medium uppercase tracking-[0.12em] text-neutral-600">
-          <span>
-            Active context ·{" "}
-            {context.reduce((sum, item) => sum + item.tokenEstimate, 0)} tokens
-          </span>
-          {activePath && (
-            <button
-              type="button"
-              onClick={() => onAddContext(activePath)}
-              className="text-indigo-400 hover:text-indigo-300"
-            >
-              + current file
-            </button>
-          )}
-        </div>
-        <div className="space-y-1">
-          {context.length === 0 ? (
-            <div className="border border-dashed border-white/5 p-3 text-center text-[10px] text-neutral-700">
-              Pin files from the editor
-            </div>
-          ) : (
-            context.map((item) => (
-              <div
-                key={item.id}
-                className="flex items-center gap-2 border border-white/5 bg-black/10 px-2 py-1.5 text-[10px] text-neutral-500"
-              >
-                <File size={11} className="shrink-0 text-indigo-400/70" />
-                <button
-                  type="button"
-                  className="truncate text-left hover:text-indigo-300"
-                  title={`Open ${item.filePath}`}
-                  onClick={() =>
-                    item.filePath &&
-                    onOpenReference(
-                      item.filePath,
-                      item.startLine && item.endLine
-                        ? { startLine: item.startLine, endLine: item.endLine }
-                        : undefined,
-                    )
-                  }
-                >
-                  {item.filePath}
-                  {item.startLine ? `:${item.startLine}-${item.endLine}` : ""}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onRemoveContext(item.id)}
-                  className="ml-auto hover:text-rose-400"
-                  aria-label="Remove context"
-                >
-                  <X size={11} />
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-      <div className="border-t border-white/5 p-2">
-        <div className="relative rounded-md border border-white/5 bg-black/25 p-2 shadow-2xl shadow-black/30 transition focus-within:border-indigo-400/20">
-          {mentionQuery !== undefined && mentionPaths.length > 0 && (
-            <div className="absolute bottom-full left-0 z-20 mb-1 max-h-56 w-full overflow-y-auto rounded-md border border-white/10 bg-panel p-1 shadow-2xl shadow-black/50">
-              {mentionPaths.map((path, index) => (
-                <button
-                  key={path}
-                  type="button"
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    applyMention(path);
-                  }}
-                  className={`flex w-full items-center gap-1.5 truncate px-2 py-1 text-left font-mono text-[10px] ${
-                    index === mentionIndex
-                      ? "bg-indigo-500/15 text-indigo-200"
-                      : "text-neutral-500 hover:text-neutral-300"
+                </div>
+                <div
+                  className={`mr-2 border-l pl-3 text-xs leading-5 ${
+                    turn.status === "failed"
+                      ? "border-rose-400/30 text-rose-300/80"
+                      : "border-indigo-400/20 text-neutral-400"
                   }`}
                 >
-                  <File size={10} className="shrink-0" /> {path}
-                </button>
-              ))}
-            </div>
+                  <ThinkingDisclosure
+                    items={turn.thinking}
+                    active={!turn.response}
+                  />
+                  {turn.response ? (
+                    <MessageBody
+                      text={turn.response}
+                      onOpenReference={onOpenReference}
+                    />
+                  ) : (
+                    <span className="flex items-center gap-2 text-indigo-300/70">
+                      <RefreshCw size={11} className="animate-spin" /> Agent is
+                      working…
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+            {isolated.map((exchange) => (
+              <div
+                key={exchange.id}
+                className="border border-dashed border-amber-400/20 bg-amber-500/[0.03] p-2"
+              >
+                <div className="text-[9px] uppercase tracking-[0.12em] text-amber-300/60">
+                  /bytheway · isolated, not added to this task's context
+                </div>
+                <div className="mt-1 text-xs leading-5 text-amber-100/70">
+                  {exchange.question}
+                </div>
+                <div className="mt-2 border-t border-amber-400/10 pt-2 text-xs leading-5 text-neutral-400">
+                  {exchange.error ? (
+                    <span className="text-rose-300/80">{exchange.error}</span>
+                  ) : exchange.answer ? (
+                    <MessageBody
+                      text={exchange.answer}
+                      onOpenReference={onOpenReference}
+                    />
+                  ) : (
+                    <span className="flex items-center gap-2 text-amber-300/70">
+                      <RefreshCw size={11} className="animate-spin" />{" "}
+                      Answering…
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {pendingApproval && (
+            <ApprovalReview
+              approval={pendingApproval}
+              fallbackPreview={
+                approvalPreview ??
+                JSON.stringify(pendingApproval.call.arguments, null, 2)
+              }
+              onApprove={onApprove}
+            />
           )}
-          <textarea
-            ref={composerRef}
-            rows={3}
-            value={composerText}
-            onChange={handleComposerChange}
-            onBlur={() => setMentionQuery(undefined)}
-            onKeyDown={(event) => {
-              const menuOpen =
-                mentionQuery !== undefined && mentionPaths.length > 0;
-              if (menuOpen) {
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  setMentionIndex((current) =>
-                    Math.min(current + 1, mentionPaths.length - 1),
-                  );
-                  return;
-                }
-                if (event.key === "ArrowUp") {
-                  event.preventDefault();
-                  setMentionIndex((current) => Math.max(current - 1, 0));
-                  return;
-                }
-                if (event.key === "Enter" || event.key === "Tab") {
-                  event.preventDefault();
-                  applyMention(mentionPaths[mentionIndex] ?? mentionPaths[0]!);
-                  return;
-                }
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  setMentionQuery(undefined);
-                  return;
-                }
-              }
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                if (canSubmit) onSubmit();
-              }
-            }}
-            disabled={!runtimeStatus?.ready || Boolean(activeTurn)}
-            placeholder={
-              runtimeStatus?.ready
-                ? activeTurn
-                  ? "Wait for the active task or stop it…"
-                  : "Ask the agent about your code…"
-                : "Configure a provider model in Settings…"
-            }
-            className="w-full resize-none bg-transparent text-xs text-neutral-300 outline-none placeholder:text-neutral-700 disabled:text-neutral-600"
-          />
-          <div className="mt-2 flex items-center">
-            <button
-              type="button"
-              disabled={!activePath}
-              onClick={() => activePath && onAddContext(activePath)}
-              className="flex items-center gap-1 text-[10px] text-neutral-500 hover:text-indigo-300 disabled:text-neutral-700"
-              title={
-                activePath
-                  ? "Add the active file to agent context"
-                  : "Open a file before adding context"
-              }
-            >
-              <Plus size={12} /> File
-            </button>
-            <button
-              type="button"
-              disabled={!activePath || !selection}
-              onClick={() =>
-                activePath && selection && onAddContext(activePath, selection)
-              }
-              className="ml-3 flex items-center gap-1 text-[10px] text-neutral-500 hover:text-indigo-300 disabled:text-neutral-700"
-              title={
-                selection
-                  ? `Add lines ${selection.startLine}-${selection.endLine} to agent context`
-                  : "Select lines in the editor to add a code block"
-              }
-            >
-              <Code2 size={12} />{" "}
-              {selection
-                ? `Lines ${selection.startLine}-${selection.endLine}`
-                : "Selection"}
-            </button>
-            {activeTurn ? (
+
+          <div className="my-4 h-px bg-white/5" />
+          <div className="mb-2 flex items-center justify-between text-[9px] font-medium uppercase tracking-[0.12em] text-neutral-600">
+            <span>
+              Active context ·{" "}
+              {context.reduce((sum, item) => sum + item.tokenEstimate, 0)}{" "}
+              tokens
+            </span>
+            {activePath && (
               <button
                 type="button"
-                onClick={() => onCancel(activeTurn.taskId)}
-                className="ml-auto rounded-sm bg-rose-500/10 p-1.5 text-rose-300 hover:bg-rose-500/15"
-                title="Stop task"
+                onClick={() => onAddContext(activePath)}
+                className="text-indigo-400 hover:text-indigo-300"
               >
-                <Square size={12} fill="currentColor" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                disabled={!canSubmit}
-                onClick={onSubmit}
-                className="ml-auto rounded-sm bg-indigo-500/15 p-1.5 text-indigo-300 hover:bg-indigo-500/20 disabled:text-indigo-400/30"
-                title={submitBlockedReason ?? "Send task (Enter)"}
-                aria-label={submitBlockedReason ?? "Send task"}
-              >
-                <Send size={13} />
+                + current file
               </button>
             )}
           </div>
+          <div className="space-y-1">
+            {context.length === 0 ? (
+              <div className="border border-dashed border-white/5 p-3 text-center text-[10px] text-neutral-700">
+                Pin files from the editor
+              </div>
+            ) : (
+              context.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex items-center gap-2 border border-white/5 bg-black/10 px-2 py-1.5 text-[10px] text-neutral-500"
+                >
+                  <File size={11} className="shrink-0 text-indigo-400/70" />
+                  <button
+                    type="button"
+                    className="truncate text-left hover:text-indigo-300"
+                    title={`Open ${item.filePath}`}
+                    onClick={() =>
+                      item.filePath &&
+                      onOpenReference(
+                        item.filePath,
+                        item.startLine && item.endLine
+                          ? { startLine: item.startLine, endLine: item.endLine }
+                          : undefined,
+                      )
+                    }
+                  >
+                    {item.filePath}
+                    {item.startLine ? `:${item.startLine}-${item.endLine}` : ""}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveContext(item.id)}
+                    className="ml-auto hover:text-rose-400"
+                    aria-label="Remove context"
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
         </div>
-        <div
-          className={`mt-1 text-center text-[9px] ${composerText.trim() && submitBlockedReason ? "text-amber-300/60" : "text-neutral-700"}`}
-        >
-          {composerText.trim() && submitBlockedReason
-            ? submitBlockedReason
-            : "Enter to send · @ to tag a file · /bytheway for an isolated question"}
+        <div className="border-t border-white/5 p-2">
+          <div className="relative rounded-md border border-white/5 bg-black/25 p-2 shadow-2xl shadow-black/30 transition focus-within:border-indigo-400/20">
+            {mentionQuery !== undefined && mentionPaths.length > 0 && (
+              <div className="absolute bottom-full left-0 z-20 mb-1 max-h-56 w-full overflow-y-auto rounded-md border border-white/10 bg-panel p-1 shadow-2xl shadow-black/50">
+                {mentionPaths.map((path, index) => (
+                  <button
+                    key={path}
+                    type="button"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      applyMention(path);
+                    }}
+                    className={`flex w-full items-center gap-1.5 truncate px-2 py-1 text-left font-mono text-[10px] ${
+                      index === mentionIndex
+                        ? "bg-indigo-500/15 text-indigo-200"
+                        : "text-neutral-500 hover:text-neutral-300"
+                    }`}
+                  >
+                    <File size={10} className="shrink-0" /> {path}
+                  </button>
+                ))}
+              </div>
+            )}
+            <textarea
+              ref={composerRef}
+              rows={3}
+              value={composerText}
+              onChange={handleComposerChange}
+              onBlur={() => setMentionQuery(undefined)}
+              onKeyDown={(event) => {
+                const menuOpen =
+                  mentionQuery !== undefined && mentionPaths.length > 0;
+                if (menuOpen) {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setMentionIndex((current) =>
+                      Math.min(current + 1, mentionPaths.length - 1),
+                    );
+                    return;
+                  }
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setMentionIndex((current) => Math.max(current - 1, 0));
+                    return;
+                  }
+                  if (event.key === "Enter" || event.key === "Tab") {
+                    event.preventDefault();
+                    applyMention(
+                      mentionPaths[mentionIndex] ?? mentionPaths[0]!,
+                    );
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setMentionQuery(undefined);
+                    return;
+                  }
+                }
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  if (canSubmit) onSubmit();
+                }
+              }}
+              disabled={!runtimeStatus?.ready || Boolean(activeTurn)}
+              placeholder={
+                runtimeStatus?.ready
+                  ? activeTurn
+                    ? "Wait for the active task or stop it…"
+                    : "Ask the agent about your code…"
+                  : "Configure a provider model in Settings…"
+              }
+              className="w-full resize-none bg-transparent text-xs text-neutral-300 outline-none placeholder:text-neutral-700 disabled:text-neutral-600"
+            />
+            <div className="mt-2 flex items-center">
+              <button
+                type="button"
+                disabled={!activePath}
+                onClick={() => activePath && onAddContext(activePath)}
+                className="flex items-center gap-1 text-[10px] text-neutral-500 hover:text-indigo-300 disabled:text-neutral-700"
+                title={
+                  activePath
+                    ? "Add the active file to agent context"
+                    : "Open a file before adding context"
+                }
+              >
+                <Plus size={12} /> File
+              </button>
+              <button
+                type="button"
+                disabled={!activePath || !selection}
+                onClick={() =>
+                  activePath && selection && onAddContext(activePath, selection)
+                }
+                className="ml-3 flex items-center gap-1 text-[10px] text-neutral-500 hover:text-indigo-300 disabled:text-neutral-700"
+                title={
+                  selection
+                    ? `Add lines ${selection.startLine}-${selection.endLine} to agent context`
+                    : "Select lines in the editor to add a code block"
+                }
+              >
+                <Code2 size={12} />{" "}
+                {selection
+                  ? `Lines ${selection.startLine}-${selection.endLine}`
+                  : "Selection"}
+              </button>
+              {activeTurn ? (
+                <button
+                  type="button"
+                  onClick={() => onCancel(activeTurn.taskId)}
+                  className="ml-auto rounded-sm bg-rose-500/10 p-1.5 text-rose-300 hover:bg-rose-500/15"
+                  title="Stop task"
+                >
+                  <Square size={12} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={!canSubmit}
+                  onClick={onSubmit}
+                  className="ml-auto rounded-sm bg-indigo-500/15 p-1.5 text-indigo-300 hover:bg-indigo-500/20 disabled:text-indigo-400/30"
+                  title={submitBlockedReason ?? "Send task (Enter)"}
+                  aria-label={submitBlockedReason ?? "Send task"}
+                >
+                  <Send size={13} />
+                </button>
+              )}
+            </div>
+          </div>
+          <div
+            className={`mt-1 text-center text-[9px] ${composerText.trim() && submitBlockedReason ? "text-amber-300/60" : "text-neutral-700"}`}
+          >
+            {composerText.trim() && submitBlockedReason
+              ? submitBlockedReason
+              : "Enter to send · @ to tag a file · /bytheway for an isolated question"}
+          </div>
         </div>
-      </div>
-    </aside>
+      </aside>
+    </>
   );
 }
 
