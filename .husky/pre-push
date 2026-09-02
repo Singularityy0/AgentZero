@@ -1,0 +1,27 @@
+echo "Running CI checks locally before push (lint, format, build, tests)..."
+
+pnpm lint || {
+  echo ""
+  echo "Push blocked: 'pnpm lint' failed. Fix the errors above, or run 'git push --no-verify' to skip this check (not recommended)."
+  exit 1
+}
+
+pnpm format:check || {
+  echo ""
+  echo "Push blocked: formatting issues found. Run 'pnpm format' to fix them, then push again."
+  exit 1
+}
+
+pnpm test || {
+  echo ""
+  echo "Push blocked: 'pnpm test' failed (build, Rust tests, or JS/TS tests). Fix the failures above before pushing."
+  exit 1
+}
+
+pnpm --filter @agentic-runtime/gui build || {
+  echo ""
+  echo "Push blocked: the GUI bundle failed to build."
+  exit 1
+}
+
+echo "All local CI checks passed."
