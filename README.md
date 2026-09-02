@@ -464,10 +464,16 @@ purpose: the bundled ripgrep binary and the Rust sidecar are both
 platform-specific, so a package built for another OS would ship executables that
 cannot run. `prepare-runtime-assets.mjs` fails loudly rather than producing one.
 
-The release job runs only when every platform succeeded — a release missing one
-OS is worse than no new release, because the gap is invisible from the download
-page. Builds are unsigned, which needs paid Apple and Windows certificates: on
-macOS, right-click → Open on first launch; on Windows, SmartScreen warns.
+The release job publishes whatever built: one platform failing does not withhold
+the ones that succeeded. A partial release says so — the notes carry a generated
+table marking any platform that was **not built in this run**, so the gap is
+stated rather than left for a reader to notice from the file list. The one case
+that publishes nothing is when no platform built at all, since replacing
+`latest` with an empty release would remove a working download and put nothing
+in its place.
+
+Builds are unsigned, which needs paid Apple and Windows certificates: on macOS,
+right-click → Open on first launch; on Windows, SmartScreen warns.
 
 ## Scripts
 
