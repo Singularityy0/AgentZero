@@ -504,8 +504,15 @@ export class SessionStore {
     const rows = sessionId
       ? (this.projectDb
           .prepare(
+            // An exact session match, deliberately. This previously also
+            // matched `session_id IS NULL`, which would have made any
+            // unscoped context item visible inside every conversation in the
+            // project. Nothing writes such an item today, so the clause was
+            // not leaking - but it made the isolation depend on every future
+            // caller remembering to pass a session, which is exactly the kind
+            // of guarantee that should not rest on discipline.
             `SELECT * FROM context_items
-             WHERE project_id = ? AND (session_id IS NULL OR session_id = ?) AND (task_id IS NULL OR task_id = ?)
+             WHERE project_id = ? AND session_id = ? AND (task_id IS NULL OR task_id = ?)
              ORDER BY pinned DESC, CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, created_at DESC`,
           )
           .all(

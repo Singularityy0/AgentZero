@@ -637,6 +637,28 @@ opens two projects against one shared data root:
 Provider credentials and general settings stay global on purpose: an API key
 belongs to the machine, not to a codebase.
 
+### Session isolation
+
+Conversations inside one project are isolated from each other as well. A secret
+told to the agent in one session is not visible in another: the transcript is
+stored per session, and every context item — pinned files, selected line ranges,
+and the structured summaries compaction produces — carries the session that
+created it and is queried by exact match.
+
+That last part was tightened deliberately. The scoped query previously also
+matched `session_id IS NULL`, which would have made any unscoped context item
+visible in every conversation in the project. Nothing writes such an item, so it
+was not leaking, but it left the isolation resting on every future caller
+remembering to pass a session.
+
+The boundary is the conversation, not the workspace. If the agent writes
+something to a file, it is part of the codebase from that moment and retrieval
+will find it from any session — which is correct, and is the limit worth stating
+plainly rather than implying a stronger guarantee than exists. Trace spans are
+likewise visible in the dashboard across sessions, because observability is the
+user's own view of their own project; they are never fed back into another
+session's prompt.
+
 ### Index contents
 
 The retrieval database contains:

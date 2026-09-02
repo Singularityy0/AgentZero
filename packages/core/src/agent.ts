@@ -74,6 +74,17 @@ export interface AgentRunResult {
   text: string;
   messages: ConversationMessage[];
   stopReason?: "approval_denied" | "safety_limit";
+  /**
+   * Files this run actually changed, and whether any mutation succeeded.
+   *
+   * Reported separately from `messages` because compaction rewrites the
+   * transcript: it folds old exchanges into a summary, which can delete the
+   * very tool message that recorded a successful edit. A caller that decides
+   * "did this agent change anything" by scanning messages will conclude no when
+   * the answer is yes, purely because the run was long enough to compact.
+   */
+  changedFiles: Array<{ path: string; hash?: string }>;
+  mutationCount: number;
 }
 
 export class AgentRunner {
@@ -97,6 +108,14 @@ export class AgentRunner {
     const cachedToolResults = new Map<string, CachedToolResult>();
     const executedToolNames: string[] = [];
     const successfulMutationLabels: string[] = [];
+    const changedFiles = new Map<string, { path: string; hash?: string }>();
+    const runOutcome = (): Pick<
+      AgentRunResult,
+      "changedFiles" | "mutationCount"
+    > => ({
+      changedFiles: [...changedFiles.values()],
+      mutationCount: new Set(successfulMutationLabels).size,
+    });
     let workspaceRevision = 0;
     let duplicateCallCount = 0;
     const repeatedCalls = new Set<string>();
@@ -128,7 +147,12 @@ export class AgentRunner {
             "The model's output was cut off by the token limit on every attempt, " +
             "so no complete file could be produced. Nothing was written.";
           await this.emit({ type: "agent_safety_limit", text });
-          return { text, messages, stopReason: "safety_limit" };
+          return {
+            text,
+            messages,
+            stopReason: "safety_limit",
+            ...runOutcome(),
+          };
         }
         messages.push({
           role: "user",
@@ -147,7 +171,7 @@ export class AgentRunner {
           continue;
         }
         await this.emit({ type: "agent_completed", text: response.text });
-        return { text: response.text, messages };
+        return { text: response.text, messages, ...runOutcome() };
       }
 
       for (const call of response.toolCalls) {
@@ -155,7 +179,12 @@ export class AgentRunner {
         if (toolCallCount > this.maxToolCalls) {
           const text = `The run was stopped after reaching the ${this.maxToolCalls}-tool-call safety limit.`;
           await this.emit({ type: "agent_safety_limit", text });
-          return { text, messages, stopReason: "safety_limit" };
+          return {
+            text,
+            messages,
+            stopReason: "safety_limit",
+            ...runOutcome(),
+          };
         }
         if (this.options.signal?.aborted) {
           throw new Error("Agent run cancelled.");
@@ -219,7 +248,12 @@ export class AgentRunner {
               `The model called ${call.name} with identical arguments ${duplicateCallCount} times in a row without acting on the result. ` +
               "The run was stopped before it could loop or exceed the provider token limit.";
             await this.emit({ type: "agent_safety_limit", text });
-            return { text, messages, stopReason: "safety_limit" };
+            return {
+              text,
+              messages,
+              stopReason: "safety_limit",
+              ...runOutcome(),
+            };
           }
           continue;
         }
@@ -242,6 +276,9 @@ export class AgentRunner {
           successfulMutationLabels.push(
             ...(paths.length > 0 ? paths : [call.name]),
           );
+          for (const file of result.changedFiles ?? []) {
+            changedFiles.set(file.path, file);
+          }
         }
         if (
           result.changed === false &&
@@ -271,7 +308,12 @@ export class AgentRunner {
             `The ${call.name} action was denied by the user. ` +
             "The task was paused immediately and no further tools were called.";
           await this.emit({ type: "agent_completed", text });
-          return { text, messages, stopReason: "approval_denied" };
+          return {
+            text,
+            messages,
+            stopReason: "approval_denied",
+            ...runOutcome(),
+          };
         }
       }
 
@@ -296,7 +338,7 @@ export class AgentRunner {
         const changed = [...new Set(successfulMutationLabels)].join(", ");
         const text = `Workspace mutation completed: ${changed}.`;
         await this.emit({ type: "agent_completed", text });
-        return { text, messages };
+        return { text, messages, ...runOutcome() };
       }
     }
 
@@ -304,7 +346,7 @@ export class AgentRunner {
       ? `${lastResponseText}\n\n[Agent stopped after reaching the ${this.maxSteps}-step safety limit.]`
       : `[Agent stopped after reaching the ${this.maxSteps}-step safety limit. Tools executed: ${executedToolNames.join(", ") || "none"}]`;
     await this.emit({ type: "agent_safety_limit", text });
-    return { text, messages, stopReason: "safety_limit" };
+    return { text, messages, stopReason: "safety_limit", ...runOutcome() };
   }
 
   private async requestModelWithContextRecovery(

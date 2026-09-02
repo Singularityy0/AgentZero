@@ -47,6 +47,14 @@ export interface MultiAgentResult {
   status: "completed" | "failed" | "paused";
   handoffs: number;
   messages?: ConversationMessage[];
+  /**
+   * Files the run changed, reported independently of `messages`.
+   *
+   * Compaction rewrites the transcript mid-run, so a caller asking "did this
+   * agent change anything" cannot answer it by scanning tool messages.
+   */
+  changedFiles?: Array<{ path: string; hash?: string }>;
+  mutationCount?: number;
 }
 
 export interface MultiAgentEvent {
@@ -260,6 +268,8 @@ export class MultiAgentOrchestrator {
             : "completed",
       handoffs: state.handoffs,
       messages,
+      changedFiles: result.changedFiles,
+      mutationCount: result.mutationCount,
     };
   }
 

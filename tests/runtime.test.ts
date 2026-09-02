@@ -4610,3 +4610,212 @@ test("chat history is per project, resumable, and deletes cleanly", async () => 
     }
   }
 });
+
+test("a secret told in one session never reaches another", async () => {
+  const secret = "HUNTER2-PINEAPPLE-42";
+  const root = await mkdtemp(join(tmpdir(), "agentic-session-leak-"));
+  await writeFile(join(root, "index.ts"), "export const value = 1;\n");
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+
+  let sent: string[] = [];
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "ollama", modelId: "fake" },
+    resolveModel: () => ({
+      respond: async (request) => {
+        sent.push(JSON.stringify(request.messages));
+        return assistantResponse("Understood.");
+      },
+    }),
+    resolveTools: () => new ToolRegistry(),
+    requestApproval: async () => false,
+    retrieval,
+  });
+
+  try {
+    const first = service.createSession("Session one");
+    await service.runTask({
+      sessionId: first.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: `remember my secret code, it is ${secret}`,
+    });
+    // Pin a file and force a compaction summary into the first session, since
+    // both are stored as context items and are the paths that could carry
+    // conversation content sideways.
+    await service.addFileContext({
+      sessionId: first.id,
+      path: "index.ts",
+    });
+    store.addContextItem({
+      sessionId: first.id,
+      source: "summary",
+      content: `Compacted state mentioning ${secret}`,
+      priority: "critical",
+      pinned: true,
+      tokenEstimate: 10,
+    });
+
+    // Within the session the agent does see it; that is the point of a session.
+    sent = [];
+    await service.runTask({
+      sessionId: first.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "what is my secret code",
+    });
+    assert.ok(
+      sent.some((request) => request.includes(secret)),
+      "the originating session must retain its own history",
+    );
+
+    // A new conversation in the same project starts empty.
+    sent = [];
+    const second = service.createSession("Session two");
+    await service.runTask({
+      sessionId: second.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "what is my secret code",
+    });
+    assert.equal(sent.length, 1);
+    assert.equal(
+      sent.some((request) => request.includes(secret)),
+      false,
+      "the second session must not receive the first session's content",
+    );
+
+    // Neither the transcript nor the assembled context carries it across.
+    assert.deepEqual(
+      store.getSession(second.id)?.messages.map((message) => message.role),
+      ["user", "assistant"],
+    );
+    assert.equal(
+      store.buildContext(second.id, undefined, 100_000).includes(secret),
+      false,
+    );
+    assert.equal(
+      store.listContextItems(second.id, undefined).length,
+      0,
+      "pinned context belongs to the session that pinned it",
+    );
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("a secret written to a file is found by any session, because it is code now", async () => {
+  const secret = "HUNTER2-PINEAPPLE-42";
+  const root = await mkdtemp(join(tmpdir(), "agentic-file-secret-"));
+  // The boundary is the conversation, not the workspace. Once something is on
+  // disk it is part of the codebase, and retrieval is meant to find it - this
+  // asserts the limit of session isolation rather than a defect in it.
+  await writeFile(
+    join(root, "config.ts"),
+    `export const token = "${secret}";\n`,
+  );
+  const index = new SemanticRetrievalIndex({ root });
+  try {
+    await index.indexProject();
+    const found = await index.query({ query: "token" });
+    assert.ok(
+      found.results.some((slice) => slice.path === "config.ts"),
+      "a file in the workspace is retrievable from any session",
+    );
+  } finally {
+    index.close();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("a mutation survives a compaction that happens after it", async () => {
+  const tools = new ToolRegistry()
+    .register({
+      name: "apply_patch",
+      description: "Edit a file.",
+      approval: "auto",
+      parameters: { type: "object", additionalProperties: true },
+      execute: async () => ({
+        output: "patched",
+        changed: true,
+        changedFiles: [{ path: "graph.ts", hash: "abc" }],
+      }),
+    })
+    .register({
+      name: "git_status",
+      description: "Show status.",
+      approval: "auto",
+      parameters: { type: "object", additionalProperties: true },
+      // Large enough that a few calls push the request past the compaction
+      // threshold, which is the situation the reported run was in.
+      execute: async () => ({
+        output: "status detail line ".repeat(400),
+      }),
+    });
+
+  // The reported shape: patch the file, then keep working long enough that
+  // compaction folds the earlier exchanges away - including the tool message
+  // that recorded the edit.
+  let turn = 0;
+  const model: LanguageModel = {
+    estimateContext: (request) => ({
+      inputTokens: Math.ceil(JSON.stringify(request.messages).length / 4),
+      contextWindowTokens: 8_192,
+      reservedOutputTokens: 1_024,
+    }),
+    respond: async () => {
+      turn += 1;
+      if (turn === 1) {
+        return assistantResponse("", [
+          { id: "p1", name: "apply_patch", arguments: { path: "graph.ts" } },
+        ]);
+      }
+      if (turn <= 4) {
+        return assistantResponse("", [
+          { id: `g${turn}`, name: "git_status", arguments: { at: turn } },
+        ]);
+      }
+      return assistantResponse("Replaced SPFA with Johnson's algorithm.");
+    },
+  };
+
+  const compactions: string[] = [];
+  const runner = new AgentRunner(model, tools, {
+    cwd: process.cwd(),
+    maxSteps: 12,
+    requestApproval: async () => true,
+    enforceWorkflowCompletion: false,
+    compaction: { minimumRecentExchanges: 1 },
+    onEvent: (event) => {
+      if (event.type === "context_compacted") compactions.push(event.summary);
+    },
+  });
+  const result = await runner.run([
+    { role: "user", content: "Replace spfa with johnson in graph.ts." },
+  ]);
+
+  assert.ok(compactions.length > 0, "the fixture must actually compact");
+
+  // The transcript no longer proves the edit happened...
+  const patchMessages = result.messages.filter(
+    (message) => message.role === "tool" && message.toolName === "apply_patch",
+  );
+  assert.equal(
+    patchMessages.length,
+    0,
+    "compaction is expected to remove the tool message",
+  );
+
+  // ...but the run still reports it, which is what the pipeline reads. Before
+  // this, the coding step failed with "did not call a workspace mutation tool"
+  // after having successfully edited the file.
+  assert.equal(result.mutationCount, 1);
+  assert.deepEqual(result.changedFiles, [{ path: "graph.ts", hash: "abc" }]);
+});

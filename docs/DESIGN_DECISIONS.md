@@ -831,6 +831,39 @@ task cannot keep writing into history the user has thrown away.
 
 ---
 
+## 32. Evidence of work lives outside the transcript
+
+**Decision.** `AgentRunner` reports `changedFiles` and `mutationCount` on its
+result, tracked as the run proceeds. The pipeline reads those to decide whether
+a coding step did anything, instead of scanning tool messages.
+
+**The bug this fixed, from a real run.** A coding step applied a patch, compacted
+its context, wrote a file, checked the diff - and then failed with `The coding
+model did not call a workspace mutation tool. No files were changed.` The
+execution summary showed both mutations completing. The file on disk had been
+edited.
+
+The cause is that two mechanisms had contradictory assumptions about one data
+structure. Compaction _rewrites_ `messages`: it folds old exchanges into a
+summary and deletes what it replaced. Mutation detection _read_ `messages`,
+looking for a tool result with `changed: true`. So a step long enough to compact
+could delete the only proof that it had succeeded, and then be told it had done
+nothing. The longer and harder the task, the more likely it was to happen -
+exactly backwards.
+
+**Why this class of bug is worth naming.** Neither mechanism was wrong on its
+own. The fault was treating a lossy, deliberately-rewritten structure as the
+system of record for a fact that has to survive. Anything a later decision
+depends on has to be recorded where nothing is allowed to rewrite it - which the
+runner was already doing internally for its own mutation budget, and simply
+never reported.
+
+**Boundary.** A successful `run_command` still counts as progress and is still
+read from the transcript. It is not a file mutation, has no durable record, and
+a command that ran before a compaction is not evidence a later step depends on.
+
+---
+
 ## Known gaps
 
 Stated plainly, because an unclaimed gap is cheaper than a claimed feature that

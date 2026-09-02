@@ -1201,32 +1201,27 @@ export class HeadlessRuntimeService {
               : undefined,
           routePolicyForStage(agentId, complexity),
         );
-        for (const message of result.messages ?? []) {
-          if (message.role !== "tool" || message.metadata?.isError === true) {
-            continue;
-          }
-          const changedFiles = message.metadata?.changedFiles;
-          if (!Array.isArray(changedFiles)) continue;
-          for (const file of changedFiles) {
-            const path = stringValue(recordValue(file)?.path);
-            if (path) producedFiles.add(path);
-          }
+        // Read the run's own record of what it changed, not its transcript.
+        //
+        // Compaction folds old exchanges into a summary and deletes the
+        // messages it replaced, so a long coding step could apply a patch,
+        // compact, and then be judged to have changed nothing because the tool
+        // message proving otherwise had been compacted away. The step failed
+        // with "did not call a workspace mutation tool" after having edited the
+        // file. The runner tracks mutations independently for exactly this
+        // reason; the transcript is only a fallback for a successful command.
+        for (const file of result.changedFiles ?? []) {
+          if (file.path) producedFiles.add(file.path);
         }
-        const completedMutation = (result.messages ?? []).some(
+        const commandSucceeded = (result.messages ?? []).some(
           (message) =>
             message.role === "tool" &&
-            typeof message.toolName === "string" &&
+            message.toolName === "run_command" &&
             message.metadata?.isError !== true &&
-            (([
-              "apply_patch",
-              "write_file",
-              "create_file",
-              "delete_file",
-            ].includes(message.toolName) &&
-              message.metadata?.changed === true) ||
-              (message.toolName === "run_command" &&
-                message.metadata?.exitCode === 0)),
+            message.metadata?.exitCode === 0,
         );
+        const completedMutation =
+          (result.mutationCount ?? 0) > 0 || commandSucceeded;
         const approvalDenied = result.status === "paused";
         const success = enforceWorkflowCompletion
           ? requireWorkspaceMutation
