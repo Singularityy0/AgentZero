@@ -4998,7 +4998,11 @@ function ProviderCard({
         )}
         <details className="mt-2 rounded border border-white/5 bg-black/20 px-2 py-1.5">
           <summary className="flex cursor-pointer items-center justify-between text-[10px] text-neutral-500 hover:text-neutral-300">
-            <span>Free tier &lt;80B (scraped) {freeLoading ? "…" : `(${freeModels.length})`}</span>
+            <span>
+              {provider.id === "ollama"
+                ? `Installed (live ollama list) ${freeLoading ? "…" : `(${freeModels.length})`}`
+                : `Free tier <80B (scraped live) ${freeLoading ? "…" : `(${freeModels.length})`}`}
+            </span>
             <span className="text-[9px] text-neutral-600">click to expand</span>
           </summary>
           <div className="mt-2">
@@ -5008,7 +5012,11 @@ function ProviderCard({
               disabled={freeLoading}
               className="mb-2 w-full rounded bg-white/5 px-2 py-1 text-[10px] text-neutral-300 hover:bg-white/10 disabled:opacity-50"
             >
-              {freeLoading ? "Scraping…" : `Scrape free tier <80B from ${provider.label}`}
+              {freeLoading
+                ? "Scraping…"
+                : provider.id === "ollama"
+                  ? `Scrape installed via ollama list / api/tags`
+                  : `Scrape free tier <80B live from ${provider.label}`}
             </button>
             {freeModels.length > 0 ? (
               <ul className="max-h-40 space-y-1 overflow-y-auto">
@@ -5031,7 +5039,11 @@ function ProviderCard({
               </ul>
             ) : (
               <p className="text-[10px] text-neutral-600">
-                {freeLoading ? "Fetching…" : "No free tier models scraped yet. Click Scrape."}
+                {freeLoading
+                  ? "Fetching…"
+                  : provider.id === "ollama"
+                    ? "No installed models found via ollama list. Is Ollama running?"
+                    : "No free tier <80B models scraped yet. Click Scrape — live API verifies availability (not expired)."}
               </p>
             )}
           </div>

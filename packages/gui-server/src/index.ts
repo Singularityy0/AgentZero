@@ -1187,6 +1187,83 @@ async function scrapeFreeTierModels(
     return known === undefined ? true : known <= 80_000_000_000;
   };
 
+  // Real-time Ollama scrape via `ollama list` CLI and /api/tags (no cache)
+  if (providerId === "ollama") {
+    const baseUrl =
+      store.getProviderSetting("ollama", "baseUrl")?.trim() || "http://localhost:11434";
+    const normalizedBase = baseUrl.replace(/\/$/, "").replace(/\/api\/chat$/, "");
+    // Try HTTP /api/tags first (live daemon), fallback to CLI
+    try {
+      const res = await fetch(`${normalizedBase}/api/tags`);
+      if (res.ok) {
+        const body = (await res.json()) as {
+          models?: Array<{ name?: string; size?: number; details?: Record<string, unknown> }>;
+        };
+        if (Array.isArray(body.models)) {
+          const live = body.models
+            .filter((m) => typeof m.name === "string" && m.name)
+            .map((m) => {
+              const id = m.name as string;
+              const total = catalog[id];
+              return {
+                id,
+                name: id,
+                providerId,
+                totalParameters: total,
+                freeTier: false,
+                unverified: total === undefined,
+                contextWindow: undefined as number | undefined,
+              };
+            })
+            .filter((m) => isUnder80B(m.id, m.totalParameters));
+          if (live.length > 0) return live;
+        }
+      }
+    } catch {
+      // Fall through to CLI
+    }
+    // CLI fallback: `ollama list` parse NAME column
+    try {
+      const { executeCommand } = await import("@agentic-runtime/command");
+      const result = await executeCommand("ollama list", {
+        cwd: store.project.rootPath,
+        requestApproval: async () => true,
+      } as unknown as never);
+      const output = result.output ?? "";
+      const lines = output.split(/\r?\n/).slice(1); // skip header
+      const ids = lines
+        .map((l) => l.trim().split(/\s+/)[0])
+        .filter((id): id is string => Boolean(id) && id !== "NAME");
+      if (ids.length > 0) {
+        return ids
+          .map((id) => ({
+            id,
+            name: id,
+            providerId,
+            totalParameters: catalog[id],
+            freeTier: false,
+            unverified: catalog[id] === undefined,
+          }))
+          .filter((m) => isUnder80B(m.id, m.totalParameters));
+      }
+    } catch {
+      // ignore
+    }
+    // Final fallback: static allowlist <80B
+    const spec = PROVIDER_FIELD_SPECS.find((s) => s.id === "ollama");
+    if (!spec?.modelOptions) return [];
+    return spec.modelOptions
+      .filter((id) => isUnder80B(id))
+      .map((id) => ({
+        id,
+        name: id,
+        providerId,
+        totalParameters: catalog[id],
+        freeTier: false,
+        unverified: catalog[id] === undefined,
+      }));
+  }
+
   if (providerId === "openrouter") {
     const key = store.getCredential("openrouter");
     const headers: Record<string, string> = {};
