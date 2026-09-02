@@ -77,6 +77,7 @@ export interface RuntimeTransportStatus {
   providerId: RuntimeProviderId;
   modelId: string;
   routes: RuntimeRouteView[];
+  fallbackOrder: RuntimeProviderId[];
   activeTaskIds: string[];
   pendingApprovals: RuntimeApprovalRequest[];
 }
@@ -99,9 +100,8 @@ export class RuntimeTransport {
 
   status(): RuntimeTransportStatus {
     const providerId = this.selectedProvider();
-    const routes = RUNTIME_PROVIDER_PRIORITY.map((id) =>
-      this.describeRoute(id, providerId),
-    );
+    const fallbackOrder = this.getFallbackOrder();
+    const routes = fallbackOrder.map((id) => this.describeRoute(id, providerId));
     const selected = routes.find((route) => route.providerId === providerId)!;
     return {
       ready: selected.configured && Boolean(selected.modelId),
@@ -112,6 +112,7 @@ export class RuntimeTransport {
       providerId,
       modelId: selected.modelId,
       routes,
+      fallbackOrder,
       activeTaskIds: [...this.activeTasks.keys()],
       pendingApprovals: [...this.pendingApprovals.values()].map(
         ({ request }) => request,
@@ -276,13 +277,55 @@ export class RuntimeTransport {
         `No model is configured for ${providerId}. Set a model ID in Provider Settings.`,
       );
     }
-    const fallbacks = RUNTIME_PROVIDER_PRIORITY.filter(
-      (id) => id !== providerId,
-    )
-      .filter((id) => this.hasExplicitConfiguration(id))
+    const fallbacks = this.getFallbackOrder()
+      .filter((id) => id !== providerId)
+      // Ollama needs no credential, only a reachable daemon, so it stays a
+      // viable last-resort fallback without ever being "explicitly
+      // configured" - that's the whole point of it being the local fallback.
+      .filter((id) => id === "ollama" || this.hasExplicitConfiguration(id))
       .map((id) => this.routeFor(id))
       .filter((route) => Boolean(route.modelId));
     return { ...primary, fallbacks };
+  }
+
+  /**
+   * User-editable fallback order, persisted per machine. Defaults to
+   * `RUNTIME_PROVIDER_PRIORITY`. Ollama is always present - appended at the
+   * end if the stored order omits it - so local inference is always the
+   * fallback of last resort even if the user never touches this setting.
+   */
+  getFallbackOrder(): RuntimeProviderId[] {
+    const raw = this.store.getProviderSetting("runtime", "fallbackOrder");
+    let order: RuntimeProviderId[] = RUNTIME_PROVIDER_PRIORITY.slice();
+    if (raw) {
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const valid = parsed.filter(isRuntimeProviderId);
+          if (valid.length > 0) order = valid;
+        }
+      } catch {
+        // Fall through to the default order.
+      }
+    }
+    const deduped = [...new Set(order)];
+    if (!deduped.includes("ollama")) deduped.push("ollama");
+    return deduped;
+  }
+
+  setFallbackOrder(order: readonly string[]): RuntimeProviderId[] {
+    const valid = order.filter(isRuntimeProviderId);
+    if (valid.length === 0) {
+      throw new Error("At least one valid provider is required.");
+    }
+    const deduped = [...new Set(valid)];
+    if (!deduped.includes("ollama")) deduped.push("ollama");
+    this.store.setProviderSetting(
+      "runtime",
+      "fallbackOrder",
+      JSON.stringify(deduped),
+    );
+    return deduped;
   }
 
   private selectedProvider(): RuntimeProviderId {

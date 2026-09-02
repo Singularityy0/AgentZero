@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   Boxes,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
@@ -264,6 +265,7 @@ interface RuntimeStatusView {
   providerId: string;
   modelId: string;
   routes: RuntimeRouteView[];
+  fallbackOrder: string[];
   activeTaskIds: string[];
   pendingApprovals: RuntimeApprovalView[];
 }
@@ -4512,11 +4514,119 @@ function ProviderSettings() {
             />
           ))}
         </div>
+        <FallbackOrderCard onMessage={setMessage} />
         <div className="mt-4 flex items-center gap-2 border border-white/5 bg-panel px-3 py-2 text-[10px] text-neutral-600">
           <Database size={12} />
           {message}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Lets the user choose the order routing falls back through when the current
+ * model errors or hits a rate limit. Ollama defaults to the last position -
+ * it needs no credential, only a reachable local daemon, so it is always
+ * present as the fallback of last resort even before the user edits this.
+ */
+function FallbackOrderCard({
+  onMessage,
+}: {
+  onMessage: (message: string) => void;
+}) {
+  const [order, setOrder] = useState<RuntimeRouteView[]>([]);
+  const load = useCallback(
+    () =>
+      requestJson<{ runtime: RuntimeStatusView }>("/api/runtime/status").then(
+        (body) => setOrder(body.runtime.routes),
+      ),
+    [],
+  );
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async (next: RuntimeRouteView[]) => {
+    setOrder(next);
+    try {
+      const body = await requestJson<{ runtime: RuntimeStatusView }>(
+        "/api/runtime/fallback-order",
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ order: next.map((route) => route.providerId) }),
+        },
+      );
+      setOrder(body.runtime.routes);
+      onMessage("Saved fallback order.");
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : String(error));
+      await load();
+    }
+  };
+
+  const move = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= order.length) return;
+    const next = order.slice();
+    [next[index], next[target]] = [next[target]!, next[index]!];
+    void save(next);
+  };
+
+  return (
+    <div className="mt-6 border border-white/5 bg-panel p-4">
+      <div className="text-sm font-medium text-neutral-300">
+        Fallback order
+      </div>
+      <p className="mt-1 text-[10px] leading-relaxed text-neutral-600">
+        When the active route errors or hits a rate limit, routing falls
+        through this list in order. Ollama (local) needs no API key, so it
+        stays last by default as the offline fallback of last resort.
+      </p>
+      <ol className="mt-3 space-y-1">
+        {order.map((route, index) => (
+          <li
+            key={route.providerId}
+            className="flex items-center gap-2 border border-white/5 bg-black/20 px-2 py-1.5 text-xs"
+          >
+            <span className="w-4 text-[10px] text-neutral-600">
+              {index + 1}
+            </span>
+            <span className="flex-1 text-neutral-300">
+              {route.label}
+              {route.providerId === "ollama" && (
+                <span className="ml-1.5 text-[9px] text-neutral-600">
+                  local
+                </span>
+              )}
+            </span>
+            <span
+              className={`text-[9px] ${route.configured ? "text-emerald-400/80" : "text-neutral-700"}`}
+            >
+              {route.configured ? "configured" : "not configured"}
+            </span>
+            <button
+              type="button"
+              aria-label={`Move ${route.label} up`}
+              disabled={index === 0}
+              onClick={() => move(index, -1)}
+              className="px-1 text-neutral-500 hover:text-neutral-200 disabled:opacity-20"
+            >
+              <ChevronUp size={12} />
+            </button>
+            <button
+              type="button"
+              aria-label={`Move ${route.label} down`}
+              disabled={index === order.length - 1}
+              onClick={() => move(index, 1)}
+              className="px-1 text-neutral-500 hover:text-neutral-200 disabled:opacity-20"
+            >
+              <ChevronDown size={12} />
+            </button>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

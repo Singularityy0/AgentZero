@@ -200,6 +200,23 @@ async function handleRequest(
     return;
   }
 
+  if (url.pathname === "/api/runtime/fallback-order" && method === "PUT") {
+    const body = (await readJsonBody(request)) as Record<string, unknown>;
+    const order = Array.isArray(body.order)
+      ? body.order.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    try {
+      runtimeTransport.setFallbackOrder(order);
+    } catch (error) {
+      sendJson(response, 400, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    sendJson(response, 200, { runtime: runtimeTransport.status() });
+    return;
+  }
+
   if (url.pathname === "/api/workspace/events" && method === "GET") {
     response.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",

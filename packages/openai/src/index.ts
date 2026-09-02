@@ -78,6 +78,15 @@ export class OpenAIModel implements LanguageModel {
       const usage = normalizeResponsesUsage(response.usage);
       const finishReason =
         response.incomplete_details?.reason ?? response.status;
+      // `status` is normally "completed"; a provider can still resolve the
+      // request (HTTP 200) while the underlying generation failed. Without
+      // this check the empty response looks like a real, successful turn.
+      if (response.status === "failed" || response.status === "cancelled") {
+        throw new ModelError(
+          `${this.model} returned status "${response.status}".`,
+          { code: "server", retryable: true },
+        );
+      }
 
       return {
         message,
@@ -147,6 +156,17 @@ export class OpenAICompatibleChatModel implements LanguageModel {
       const choice = response.choices[0];
       const message = choice?.message;
       if (!message) throw new Error("Provider returned no completion choices.");
+      // OpenRouter proxies to many backends and, when the upstream model itself
+      // fails, still answers with HTTP 200 and a populated (often empty)
+      // message - only `finish_reason` reveals the failure. Left unchecked,
+      // this reads as a normal successful turn and the gateway's exception-
+      // driven failover never runs.
+      if ((choice.finish_reason as string) === "error") {
+        throw new ModelError(
+          `${this.options.model} returned finish_reason "error".`,
+          { code: "server", retryable: true },
+        );
+      }
       const toolCalls = (message.tool_calls ?? []).flatMap((call) => {
         if (call.type !== "function") return [];
         try {
