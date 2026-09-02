@@ -353,7 +353,10 @@ export class ModelRegistry {
 
 /** One bounded attempt for every eligible provider in the safe catalog. */
 export const DEFAULT_MAX_ROUTE_ATTEMPTS = 7;
-export const DEFAULT_ROUTE_COOLDOWN_MS = 30_000;
+// Free-tier request/token windows commonly outlive a single model round trip.
+// A two-minute circuit breaker prevents one task from probing the same limited
+// key again after a slow fallback call merely because 30 seconds elapsed.
+export const DEFAULT_ROUTE_COOLDOWN_MS = 2 * 60_000;
 export const DEFAULT_QUOTA_ROUTE_COOLDOWN_MS = 30 * 60_000;
 export const DEFAULT_ESTIMATED_OUTPUT_TOKENS = 1_024;
 
@@ -525,15 +528,16 @@ export class ProviderGateway implements LanguageModel {
     return {
       inputTokens: estimateModelRequestTokens(request),
       contextWindowTokens: model?.contextWindow,
-      reservedOutputTokens: this.estimatedOutputTokens,
+      reservedOutputTokens:
+        request.maxOutputTokens ?? this.estimatedOutputTokens,
     };
   }
 
   /**
    * When every policy-allowed route is cooling down, a short wait is better than
-   * demoting the request to an excluded provider. Rate-limit cooldowns are
-   * seconds; a judgement step is worth waiting for. The wait is bounded and
-   * abortable, and falls through to normal ranking when it expires.
+   * demoting the request to an excluded provider. The wait is bounded and
+   * abortable; if it cannot finish within the policy budget, normal ranking may
+   * use an excluded provider as a last resort rather than fail the task.
    */
   private async waitOutCooldownForPolicy(request: ModelRequest): Promise<void> {
     const policy = request.routePolicy;
@@ -611,25 +615,44 @@ export class ProviderGateway implements LanguageModel {
     const requirements = {
       requiresTools: request.tools.length > 0,
       contextTokens,
-      estimatedOutputTokens: this.estimatedOutputTokens,
+      estimatedOutputTokens:
+        request.maxOutputTokens ?? this.estimatedOutputTokens,
       now,
       bias: request.routePolicy?.bias,
     };
-    const minContextWindow = request.routePolicy?.minContextWindow;
-    if (minContextWindow === undefined) {
-      return rankModelRoutes(usable, requirements);
+    const rank = (pool: readonly RouteRankingCandidate[]) => {
+      const minContextWindow = request.routePolicy?.minContextWindow;
+      if (minContextWindow === undefined) {
+        return rankModelRoutes(pool, requirements);
+      }
+      // The window floor is a preference, not a hard constraint. Enforcing it
+      // when nothing clears it would fail a task that a smaller window could
+      // still have completed, so it is dropped rather than allowed to empty the
+      // route list.
+      const preferred = rankModelRoutes(pool, {
+        ...requirements,
+        minContextWindow,
+      });
+      return preferred.some((route) => route.eligible)
+        ? preferred
+        : rankModelRoutes(pool, requirements);
+    };
+    const ranked = rank(usable);
+    // Provider exclusions express quality preference, not permission. Keep the
+    // excluded routes behind every preferred route so they are attempted only
+    // after an in-request failure or when the preferred set is already cooling.
+    // This preserves hosted judgement when it works without turning a rate
+    // limit into "no eligible model route".
+    if (allowed.length > 0 && allowed.length < candidates.length) {
+      const fallback = candidates.filter((candidate) =>
+        excluded.has(candidate.model.providerId),
+      );
+      const rankedFallback = rank(fallback);
+      return ranked.some((route) => route.eligible && !route.inCooldown)
+        ? [...ranked, ...rankedFallback]
+        : [...rankedFallback, ...ranked];
     }
-    // The window floor is a preference, not a hard constraint. Enforcing it
-    // when nothing clears it would fail a task that a smaller window could
-    // still have completed, so it is dropped rather than allowed to empty the
-    // route list.
-    const preferred = rankModelRoutes(usable, {
-      ...requirements,
-      minContextWindow,
-    });
-    return preferred.some((route) => route.eligible)
-      ? preferred
-      : rankModelRoutes(usable, requirements);
+    return ranked;
   }
 
   async respond(request: ModelRequest): Promise<ModelResponse> {

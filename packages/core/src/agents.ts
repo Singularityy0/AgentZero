@@ -87,11 +87,14 @@ export interface MultiAgentOptions {
   maxHandoffsPerPair?: number;
   maxModelSteps?: number;
   maxToolCalls?: number;
+  /** Per-run turn ceiling overriding the stored agent definition. */
+  maxSteps?: number;
   maxDurationMs?: number;
   allowHandoffs?: boolean;
   enforceWorkflowCompletion?: boolean;
   stopAfterMutationCount?: number;
   routePolicy?: ModelRoutePolicy;
+  maxOutputTokens?: number;
   rejectIncompleteMutations?: boolean;
   toolAllowlist?: readonly string[];
   workflowMode?: "mutation" | "verification";
@@ -220,7 +223,7 @@ export class MultiAgentOrchestrator {
     ];
     const runner = new AgentRunner(model, tools, {
       cwd: this.options.cwd,
-      maxSteps: agent.maxSteps,
+      maxSteps: this.options.maxSteps ?? agent.maxSteps,
       maxToolCalls: this.options.maxToolCalls,
       requestApproval: this.options.requestApproval,
       signal: this.options.signal,
@@ -231,6 +234,7 @@ export class MultiAgentOrchestrator {
       enforceWorkflowCompletion: this.options.enforceWorkflowCompletion,
       stopAfterMutationCount: this.options.stopAfterMutationCount,
       routePolicy: this.options.routePolicy,
+      maxOutputTokens: this.options.maxOutputTokens,
       rejectIncompleteMutations: this.options.rejectIncompleteMutations,
       mutationObjective: task,
       workflowMode: this.options.workflowMode,

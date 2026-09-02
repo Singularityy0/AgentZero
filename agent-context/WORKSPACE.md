@@ -201,9 +201,21 @@ Build artifacts are emitted under package `dist/` directories and
   unavailable provider is cooled down and the same request immediately moves to
   the next configured provider instead of repeating the pipeline step.
 - Quota failures use a 30-minute circuit-breaker cooldown instead of the normal
-  30-second transient cooldown. Simple one-file creation/edit tasks skip a
+  two-minute transient cooldown. Simple one-file creation/edit tasks skip a
   redundant Reviewer model call after independent verification, and successful
   file work is summarized in chat as only `Saved <path>.`.
+- Explicit `@path` requests using `implement` or `add` take the focused-file
+  path. The runtime preloads the named file so Coder can mutate it in one model
+  turn, preserves the configured provider order instead of economy-promoting
+  Ollama, and gives Verifier the saved snapshot with only compile/syntax tools
+  and a three-turn ceiling. Focused verification does not enter rollback,
+  replanning, re-indexing, or corrective recoding. Model output is budgeted per
+  stage, structurally partial patch fragments are accepted after the preview
+  proves their replacement target exists, and Windows coding agents are told
+  that `run_command` uses `cmd.exe`.
+- Dashboard recorded time uses the root task's wall-clock duration instead of
+  summing nested spans, model-call counts recognize `model_call` spans, and a
+  failed attempt span is closed before a verifier retry begins.
 - Gateway-created Ollama requests currently use the adapter's 300-second timeout;
   `OLLAMA_TIMEOUT_MS` is not wired into runtime composition.
 - Ollama availability checks normalize the implicit `:latest` tag and confirm

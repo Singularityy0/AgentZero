@@ -988,6 +988,8 @@ export class HeadlessRuntimeService {
     toolAllowlist?: readonly string[],
     workflowMode?: "mutation" | "verification",
     routePolicy?: ModelRoutePolicy,
+    maxOutputTokens?: number,
+    maxSteps?: number,
   ): Promise<MultiAgentResult> {
     let runId = "";
     let activeAgentId = agentId;
@@ -1002,6 +1004,7 @@ export class HeadlessRuntimeService {
         maxHandoffsPerPair: this.limits.maxHandoffsPerPair,
         maxModelSteps: this.limits.maxModelSteps,
         maxToolCalls: this.limits.maxToolCalls,
+        maxSteps,
         maxDurationMs: this.limits.maxDurationMs,
         allowHandoffs,
         enforceWorkflowCompletion,
@@ -1010,6 +1013,7 @@ export class HeadlessRuntimeService {
         toolAllowlist,
         workflowMode,
         routePolicy,
+        maxOutputTokens,
         beforeModelRequest: () => {
           this.assertWithinBudget(taskId);
           beforeModelRequest?.();
@@ -1047,6 +1051,14 @@ export class HeadlessRuntimeService {
       throw new Error("Semantic retrieval is not configured.");
     const greenfieldArtifact = isGreenfieldArtifactRequest(task.prompt);
     const focusedFileEdit = isFocusedFileEditRequest(task.prompt);
+    const focusedFilePath = focusedFileEdit
+      ? extractExplicitWorkspacePath(task.prompt)
+      : undefined;
+    const focusedFileSnapshot = focusedFilePath
+      ? await new WorkspaceFileService(this.projectRoot)
+          .readText(focusedFilePath)
+          .catch(() => undefined)
+      : undefined;
     // A focused single-file edit is a simple task by construction, whatever its
     // wording suggests; everything else is judged from the prompt itself.
     const complexity: TaskComplexity = focusedFileEdit
@@ -1054,6 +1066,7 @@ export class HeadlessRuntimeService {
       : classifyTaskComplexity(task.prompt);
     const producedFiles = new Set<string>();
     let lastVerifierFinding: string | undefined;
+    let focusedVerifierSnapshotAvailable = false;
     const requestedVariants = requestedVariantLabels(task.prompt);
     // "in 5 different languages" gives a count; "in Python and Rust" gives the
     // languages instead. Either form has to produce one file per variant.
@@ -1082,7 +1095,9 @@ export class HeadlessRuntimeService {
               prompt: greenfieldArtifact
                 ? "Create one complete, self-contained artifact file that satisfies the objective exactly. Use native HTML/CSS/JavaScript when suitable. The file must contain the full implementation: no placeholders, ellipses, TODOs, template markers, or tutorial prose. Call create_file for a new path or write_file when the path already exists. Stop after the successful mutation; the verifier will inspect the saved file."
                 : focusedFileEdit
-                  ? "This is a focused local file edit. Read the explicitly named file once, make exactly the requested replacement with apply_patch or write_file, and stop after the successful mutation. Do not search or browse the web; the existing file and objective are the authoritative context."
+                  ? focusedFileSnapshot
+                    ? "This is a focused local file edit. The runtime already read the explicitly named file and supplied its exact current content below. Make exactly the requested replacement with apply_patch or write_file, then stop after the successful mutation. Do not read, search, browse, compile, or inspect Git."
+                    : "This is a focused local file edit. Read the explicitly named file once, make exactly the requested replacement with apply_patch or write_file, and stop after the successful mutation. Do not search or browse the web; the existing file and objective are the authoritative context."
                   : "Implement the plan using the retrieved evidence. Satisfy every acceptance item exactly; never substitute an easier artifact or explain what could be built instead of creating it. After mutation, re-read every changed file and compare its actual contents with the original acceptance checklist.",
               dependsOn: ["retrieve"],
             },
@@ -1176,17 +1191,19 @@ export class HeadlessRuntimeService {
         stopAfterMutationCount = 0,
         rejectIncompleteMutations = false,
         toolAllowlist?: readonly string[],
+        maxSteps?: number,
       ) =>
       async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
         const previous = request.previousResults
           .map((result) => `${result.role}: ${result.summary}`)
           .join("\n\n");
+        const hostContext = executionEnvironmentContext(agentId);
         const result = await this.executeAgent(
           session.id,
           task.id,
           agentId,
           `${request.step.prompt}\n\nObjective:\n${request.objective}`,
-          [request.context, previous].filter(Boolean).join("\n\n"),
+          [request.context, previous, hostContext].filter(Boolean).join("\n\n"),
           includeHistory ? history : [],
           signal,
           false,
@@ -1200,7 +1217,16 @@ export class HeadlessRuntimeService {
             : agentId === CODING_AGENT_ID
               ? "mutation"
               : undefined,
-          routePolicyForStage(agentId, complexity),
+          focusedFileEdit &&
+            (agentId === CODING_AGENT_ID || agentId === VERIFIER_AGENT_ID)
+            ? undefined
+            : routePolicyForStage(agentId, complexity),
+          outputBudgetForStage(agentId, {
+            focusedFileEdit,
+            greenfieldArtifact,
+            complexity,
+          }),
+          maxSteps,
         );
         // Read the run's own record of what it changed, not its transcript.
         //
@@ -1241,6 +1267,18 @@ export class HeadlessRuntimeService {
         );
         const completedMutation =
           (result.mutationCount ?? 0) > 0 || commandSucceeded;
+        let rejectedMutation:
+          Extract<ConversationMessage, { role: "tool" }> | undefined;
+        for (const message of result.messages ?? []) {
+          if (
+            message.role === "tool" &&
+            message.metadata?.isError === true &&
+            typeof message.toolName === "string" &&
+            MUTATION_TOOLS.has(message.toolName)
+          ) {
+            rejectedMutation = message;
+          }
+        }
         const approvalDenied = result.status === "paused";
         const success = enforceWorkflowCompletion
           ? requireWorkspaceMutation
@@ -1249,11 +1287,14 @@ export class HeadlessRuntimeService {
           : result.status === "completed";
         const summary =
           requireWorkspaceMutation && !completedMutation
-            ? "The coding model did not call a workspace mutation tool. No files were changed."
+            ? rejectedMutation
+              ? `The coding model called ${rejectedMutation.toolName}, but the mutation was rejected and no files were changed: ${rejectedMutation.content.replace(/\n\[[^\]]*\]\s*$/u, "")}`
+              : "The coding model did not call a workspace mutation tool. No files were changed."
             : result.text;
         const verifierEvidence =
           request.step.role === "verifier"
-            ? (result.messages ?? []).some(
+            ? focusedVerifierSnapshotAvailable ||
+              (result.messages ?? []).some(
                 (message) =>
                   message.role === "tool" &&
                   message.metadata?.isError !== true &&
@@ -1402,16 +1443,90 @@ export class HeadlessRuntimeService {
             "write_file",
           ])
         : focusedFileEdit
-          ? runAgentWorker(CODING_AGENT_ID, false, true, true, 1, true, [
-              "read_file",
-              "apply_patch",
-              "write_file",
-              "analyze_code_structure",
-              "compute_ast_diff",
-            ])
+          ? async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
+              const hasSnapshot = focusedFileSnapshot !== undefined;
+              return runAgentWorker(
+                CODING_AGENT_ID,
+                false,
+                true,
+                true,
+                1,
+                true,
+                hasSnapshot
+                  ? [
+                      "apply_patch",
+                      "write_file",
+                      "analyze_code_structure",
+                      "compute_ast_diff",
+                    ]
+                  : [
+                      "read_file",
+                      "apply_patch",
+                      "write_file",
+                      "analyze_code_structure",
+                      "compute_ast_diff",
+                    ],
+                hasSnapshot ? 2 : 3,
+              )(
+                hasSnapshot
+                  ? {
+                      ...request,
+                      context: [
+                        request.context,
+                        `Authoritative current file snapshot (${focusedFileSnapshot.path}, sha256 ${focusedFileSnapshot.hash}):\n${focusedFileSnapshot.content}`,
+                      ]
+                        .filter(Boolean)
+                        .join("\n\n"),
+                    }
+                  : request,
+              );
+            }
           : runAgentWorker(CODING_AGENT_ID),
       verifier: async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
         const changed = [...producedFiles];
+        if (focusedFileEdit && changed.length > 0) {
+          const workspace = new WorkspaceFileService(this.projectRoot);
+          const snapshots = (
+            await Promise.all(
+              changed.map((path) =>
+                workspace.readText(path).catch(() => undefined),
+              ),
+            )
+          ).filter(
+            (file): file is NonNullable<typeof file> => file !== undefined,
+          );
+          focusedVerifierSnapshotAvailable =
+            snapshots.length === changed.length;
+          return runAgentWorker(
+            VERIFIER_AGENT_ID,
+            false,
+            false,
+            false,
+            0,
+            false,
+            focusedVerifierSnapshotAvailable
+              ? ["compile_code", "syntax_check"]
+              : ["read_file", "compile_code", "syntax_check"],
+            3,
+          )({
+            ...request,
+            context: [
+              request.context,
+              ...snapshots.map(
+                (file) =>
+                  `Authoritative changed file snapshot (${file.path}, sha256 ${file.hash}):\n${file.content}`,
+              ),
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+            step: {
+              ...request.step,
+              prompt:
+                `${request.step.prompt}\n\nThis is a focused single-file verification. The runtime already supplied the exact saved file content, so do not read it again. ` +
+                "Use at most one compile_code or syntax_check call when appropriate. Do not use run_command, Git, directory listing, or create test files. After that single check returns, immediately decide and emit VERIFICATION_PASSED when the implementation is correct.",
+            },
+          });
+        }
         return runAgentWorker(VERIFIER_AGENT_ID)(
           changed.length === 0
             ? request
@@ -1435,7 +1550,7 @@ export class HeadlessRuntimeService {
         : runAgentWorker(REVIEWER_AGENT_ID),
     };
     const orchestrator = new TaskOrchestrator(workers, {
-      maxAttemptsPerStep: 2,
+      maxAttemptsPerStep: focusedFileEdit ? 1 : 2,
       maxTotalAttempts: 10,
       maxDurationMs: this.limits.maxDurationMs,
       signal,
@@ -1798,6 +1913,23 @@ export class HeadlessRuntimeService {
         this.finishTraceSpan(trace.traceId, spanId, {
           status: "completed",
           output: event,
+          stepId: event.stepId,
+          ...(rolled.usage ? { usage: rolled.usage } : {}),
+          ...(rolled.cost !== undefined ? { cost: rolled.cost } : {}),
+        });
+        this.activeStepSpans.delete(stepKey);
+      }
+    } else if (
+      trace &&
+      (event.type === "step_recovering" || event.type === "step_retrying")
+    ) {
+      const spanId = this.activeStepSpans.get(stepKey);
+      if (spanId) {
+        const rolled = this.rollUpUsage(taskId, trace.traceId, spanId);
+        this.finishTraceSpan(trace.traceId, spanId, {
+          status: "failed",
+          output: event,
+          error: event.reason,
           stepId: event.stepId,
           ...(rolled.usage ? { usage: rolled.usage } : {}),
           ...(rolled.cost !== undefined ? { cost: rolled.cost } : {}),
@@ -2438,9 +2570,34 @@ function formatSavedFiles(paths: ReadonlySet<string>): string {
 }
 
 /**
+ * Models otherwise assume a Unix shell and waste a tool turn on `cat`/`ls` in
+ * the Windows desktop host. Keep this runtime fact next to the task context so
+ * both Coder and Verifier use the shell that `run_command` actually exposes.
+ */
+function executionEnvironmentContext(agentId: string): string | undefined {
+  if (agentId !== CODING_AGENT_ID && agentId !== VERIFIER_AGENT_ID) {
+    return undefined;
+  }
+  if (process.platform === "win32") {
+    return [
+      "Host execution environment:",
+      "- Operating system: Windows.",
+      "- run_command uses cmd.exe unless a specialized tool handles the operation.",
+      "- Prefer read_file/list_directory for inspection. If a shell command is necessary, use Windows commands such as type and dir; do not use cat or ls.",
+    ].join("\n");
+  }
+  return [
+    "Host execution environment:",
+    `- Operating system: ${process.platform}.`,
+    "- run_command uses a POSIX shell; use POSIX command syntax.",
+  ].join("\n");
+}
+
+/**
  * Stages that judge someone else's work. Running these on a weaker model than
- * the one that produced the work makes the judgement worthless, so they never
- * fall back to a local route while a hosted one is configured.
+ * the one that produced the work makes the judgement less useful, so hosted
+ * routes are preferred. The gateway may still use a local route as a last
+ * resort when every hosted route is unavailable beyond the bounded wait.
  */
 const JUDGEMENT_AGENT_IDS: ReadonlySet<string> = new Set([
   VERIFIER_AGENT_ID,
@@ -2449,7 +2606,7 @@ const JUDGEMENT_AGENT_IDS: ReadonlySet<string> = new Set([
 
 const JUDGEMENT_ROUTE_POLICY: ModelRoutePolicy = {
   excludeProviders: ["ollama"],
-  // Provider rate limits clear in seconds. Waiting beats demoting the check.
+  // Brief provider cooldowns are worth waiting through before demoting the check.
   maxCooldownWaitMs: 45_000,
   bias: "capacity",
   reason: "verification and review must not run on a weaker local model",
@@ -2467,6 +2624,29 @@ const JUDGEMENT_ROUTE_POLICY: ModelRoutePolicy = {
  * several operations rather than one.
  */
 export type TaskComplexity = "simple" | "standard" | "complex";
+
+/**
+ * Provider limits commonly charge the requested completion allowance, not only
+ * the tokens eventually emitted. Reserve a whole-file budget only when a stage
+ * may actually create a whole file; focused patches and judgement need much
+ * less and therefore consume far less free-tier token quota.
+ */
+function outputBudgetForStage(
+  agentId: string,
+  task: {
+    focusedFileEdit: boolean;
+    greenfieldArtifact: boolean;
+    complexity: TaskComplexity;
+  },
+): number {
+  if (agentId === CODING_AGENT_ID) {
+    if (task.greenfieldArtifact) return 8_192;
+    if (task.focusedFileEdit) return 3_072;
+    return task.complexity === "complex" ? 6_144 : 4_096;
+  }
+  if (JUDGEMENT_AGENT_IDS.has(agentId)) return 2_048;
+  return task.complexity === "complex" ? 4_096 : 2_048;
+}
 
 const MULTI_STEP_PATTERN =
   /\b(?:refactor|migrat\w*|redesign|architect\w*|across|throughout|each|every|all\s+(?:the\s+)?(?:files?|modules?|tests?|callers?)|then\b.*\bthen|as\s+well\s+as|integrat\w*|end[- ]to[- ]end|backward[- ]compat\w*)\b/iu;
@@ -2554,6 +2734,14 @@ const VERIFICATION_TOOLS: ReadonlySet<string> = new Set([
   "find_files",
 ]);
 
+/** File tools whose rejected calls deserve a truthful pipeline failure. */
+const MUTATION_TOOLS: ReadonlySet<string> = new Set([
+  "apply_patch",
+  "create_file",
+  "delete_file",
+  "write_file",
+]);
+
 /**
  * Treat the verifier marker as a protocol token, not a formatting trick.
  * Hosted models commonly bold the marker or append a short file/check label,
@@ -2626,6 +2814,13 @@ const PRODUCE_VERB_PATTERN =
 const MUTATE_VERB_PATTERN =
   "change|debug|delete|edit|fix|migrate|modify|patch|refactor|remove|rename|replace|update|upgrade";
 
+// "Implement X in @file.cpp" and "add X to file.ts" modify a named artifact
+// even though `implement` and `add` can also create unnamed greenfield work.
+const FOCUSED_FILE_VERB_PATTERN = new RegExp(
+  `\\b(?:${MUTATE_VERB_PATTERN}|add|implement)\\b`,
+  "iu",
+);
+
 const LANGUAGE_PATTERN =
   "languages?|bash|shell|powershell|c|c\\+\\+|c#|csharp|css|dart|elixir|go|golang|haskell|html|java|javascript|js|jsx|kotlin|lua|matlab|perl|php|python|ruby|rust|scala|sql|swift|typescript|tsx?";
 
@@ -2649,6 +2844,13 @@ const mutateArtifactPattern = new RegExp(
 // is mistaken for general conversation and loses all workspace context.
 const explicitPathPattern =
   /(?:^|\s)@?(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?=\s|$|[:;,!?)}\]])/u;
+
+const explicitPathCapturePattern =
+  /(?:^|\s)@?((?:(?:\.\.?[/\\]|[A-Za-z]:[/\\])?[\w.-]+(?:[/\\][\w.-]+)*)\.[A-Za-z0-9]{1,8})(?=\s|$|[:;,!?)}\]])/u;
+
+function extractExplicitWorkspacePath(prompt: string): string | undefined {
+  return explicitPathCapturePattern.exec(prompt)?.[1]?.replaceAll("\\", "/");
+}
 
 const existingWorkPattern =
   /\b(?:existing|current|opened|this)\s+(?:file|page|document|component|website|webpage|app|application|project|workspace|repo|repository|codebase)\b/iu;
@@ -2995,7 +3197,9 @@ function isGreenfieldArtifactRequest(prompt: string): boolean {
  * fallback model from turning a two-tool edit into a long browsing session.
  */
 function isFocusedFileEditRequest(prompt: string): boolean {
-  return mutateArtifactPattern.test(prompt) && explicitPathPattern.test(prompt);
+  return (
+    FOCUSED_FILE_VERB_PATTERN.test(prompt) && explicitPathPattern.test(prompt)
+  );
 }
 
 function waitForApproval(

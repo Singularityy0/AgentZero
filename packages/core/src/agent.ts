@@ -66,6 +66,8 @@ export interface AgentRunnerOptions {
   workflowMode?: "mutation" | "verification";
   /** Routing constraints applied to every model call this runner makes. */
   routePolicy?: ModelRoutePolicy;
+  /** Maximum completion tokens requested for each model call in this run. */
+  maxOutputTokens?: number;
   compaction?: false | ContextCompactionOptions;
   onEvent?: (event: AgentEvent) => void | Promise<void>;
 }
@@ -619,6 +621,9 @@ export class AgentRunner {
       ...(this.options.routePolicy
         ? { routePolicy: this.options.routePolicy }
         : {}),
+      ...(this.options.maxOutputTokens === undefined
+        ? {}
+        : { maxOutputTokens: this.options.maxOutputTokens }),
     };
   }
 
@@ -854,6 +859,12 @@ function findUnterminatedContent(content: string): string | undefined {
 
 /** Rejects a mutation whose content simply stops part-way through. */
 function findTruncatedMutation(call: ToolCall): string | undefined {
+  // `apply_patch` replaces one exact fragment, not an entire file. A valid
+  // fragment can intentionally end with an unmatched opener (for example the
+  // replacement and original fragment may both end with `class DSU {`). The
+  // patch preview still proves the old fragment exists, and a provider-level
+  // finish reason remains the authoritative truncation signal.
+  if (call.name === "apply_patch") return undefined;
   const content = mutationContent(call);
   return content === undefined ? undefined : findUnterminatedContent(content);
 }

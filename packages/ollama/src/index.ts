@@ -111,7 +111,10 @@ export class OllamaModel implements LanguageModel {
             ...(this.options.contextWindow
               ? { num_ctx: this.options.contextWindow }
               : {}),
-            num_predict: this.options.maxOutputTokens ?? DEFAULT_NUM_PREDICT,
+            num_predict:
+              request.maxOutputTokens ??
+              this.options.maxOutputTokens ??
+              DEFAULT_NUM_PREDICT,
           },
           stream: false,
         }),

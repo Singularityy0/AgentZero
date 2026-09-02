@@ -708,7 +708,7 @@ Relative Path` yields the workspace-relative one. Clipboard writes fall back
   redundant 3.5 s repeating the passed checklist and its prose became the chat
   response.
 - Quota routes now stay cooled down for 30 minutes (transient rate limits remain
-  30 seconds), so a dead paid/quota route is not probed on every nearby task.
+  two minutes), so a dead paid/quota route is not probed on every nearby task.
   Bounded one-file create/edit flows keep the Verifier but complete Reviewer
   deterministically, removing that extra model call. Successful workspace tasks
   now persist only a concise `Saved <path>.` assistant message; full review and
@@ -723,6 +723,58 @@ Relative Path` yields the workspace-relative one. Clipboard writes fall back
   global file shortcuts cannot keep targeting a deleted path. Live browser
   verification confirmed both chat and terminal inputs accept text after the
   dialog closes.
+
+- Diagnosed failed task `mtjhlnh9-3ezurhdaoz` from its persisted trace rather
+  than the final error alone. A single convex-hull edit consumed eight model
+  calls (36,043 input tokens), including two Groq 413 probes and repeated
+  OpenRouter continuations. The Coder did call `apply_patch`, but the safety
+  check counted braces in the replacement fragment in isolation. Its trailing
+  `class DSU {` was copied from the matched old fragment and was therefore a
+  valid partial patch, not truncated output. The later `write_file` rejection
+  was valid because the same fragment was not a complete file. The model then
+  emitted POSIX `cat` to a Windows `cmd.exe` command runner.
+- Fixed that chain end to end. `implement`/`add` with an explicit `@path` now
+  enters focused deterministic planning and retrieval; `apply_patch` relies on
+  preview validation instead of standalone brace balance; model requests carry
+  per-stage output budgets through OpenAI-compatible, Ollama, and gateway
+  context accounting; coder/verifier prompts include the actual host shell;
+  transient route cooldown is two minutes; and an excluded local route is a
+  last resort after the hosted judgement wait budget. A rejected mutation is
+  now reported truthfully instead of saying no mutation tool was called.
+- Added exact regression coverage for the structurally partial DSU patch,
+  focused `implement ... in @file` routing/output budget, gateway context
+  reservation, and last-resort local routing during hosted cooldown. The full
+  suite passed with 113 TypeScript tests and 16 Rust tests before the final
+  documentation update.
+
+- Traced successful task `mtjis80l-eniatwkiu8` for `implement convex hull
+algorithm in @vishu.cpp`. Its persisted root span was 554,416 ms, not the
+  dashboard's 2,290 s: the UI added overlapping task, stage, agent, model, and
+  tool spans. It also filtered for nonexistent kind `model`, displaying zero
+  calls although task spend recorded 37 model calls, 119,685 input tokens, and
+  14,917 output tokens.
+- The focused Coder spent two turns: Groq used 754 ms only to request
+  `read_file`; the immediately following Groq call hit its rate limit, forcing
+  a 41.6 s OpenRouter mutation. The first Verifier then spent 107 s compiling,
+  repeatedly improvising Windows shell commands and checking Git. Although its
+  final text said the code compiled, ran, and was correct, it omitted the exact
+  pass marker. The general recovery graph rolled correct code back, replanned,
+  re-indexed, recoded, and ran a second 186 s verifier. That recovery gap
+  accounted for roughly another 211 s.
+- Focused edits now preload the target file and hash before Coder, remove
+  `read_file` from that model's tools, preserve configured provider order, and
+  cap Coder at two turns. Verifier receives the saved snapshot, has only
+  compile/syntax tools, may make at most three turns, and gets one attempt with
+  no rollback/replan/re-index/recode graph. The dashboard now uses root
+  wall-clock duration, counts `model_call` spans/persisted spend, and closes
+  failed attempt spans on retry transitions. Regression coverage asserts a
+  focused edit needs one Coder and one direct Verifier call in the normal path.
+- Confirmed the PS figures: 1,320 s is the scoring reference baseline and 2,700
+  s is the hard per-task ceiling, not an acceptable target for simple edits.
+  The optimized implementation retains the full multi-agent graph for genuine
+  medium/hard long-horizon tasks while routing explicit one-file work through
+  the bounded fast path. Full validation passed: 113 TypeScript tests, 16 Rust
+  tests, and the production GUI build.
 
 ## Next Steps
 

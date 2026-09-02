@@ -59,7 +59,8 @@ export class OpenAIModel implements LanguageModel {
           model: this.model,
           input: toResponseInput(request.messages),
           tools: request.tools.map(toFunctionTool),
-          max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+          max_output_tokens:
+            request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         },
         { signal: request.signal },
       );
@@ -139,7 +140,7 @@ export class OpenAICompatibleChatModel implements LanguageModel {
               parameters: tool.parameters,
             },
           })),
-          max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+          max_tokens: request.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
         },
         { signal: request.signal },
       );

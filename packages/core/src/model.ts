@@ -47,6 +47,11 @@ export interface ModelRequest {
   tools: readonly ToolDefinition[];
   signal?: AbortSignal;
   routePolicy?: ModelRoutePolicy;
+  /**
+   * Completion budget for this logical stage. Small planning and verification
+   * turns should not reserve the same provider quota as a whole-file creation.
+   */
+  maxOutputTokens?: number;
 }
 
 export interface ModelUsage {

@@ -95,10 +95,20 @@ normal model behavior.
 Focused edits to one explicitly named file use a compact pipeline specialization:
 planning and retrieval are deterministic, Coder receives only local read/write
 and structural tools, and its node checkpoints and stops after one successful
-mutation. This prevents a fallback model from inventing web research or spending
-its full step budget on a change whose authoritative context is already the
-named file. An explicit approval denial pauses the durable orchestration state
-without another model call.
+mutation. The runtime reads the named file before Coder starts and places the
+exact content and hash in context, eliminating the read-only model turn that
+previously consumed a provider request immediately before mutation. Verifier is
+likewise given the post-mutation snapshot, may use only one relevant
+compile/syntax check, and has a three-turn ceiling. A focused verifier failure is
+reported with the written artifact intact; it does not launch the general
+rollback/replan/retrieve/recode recovery graph. This prevents a fallback model
+from inventing web research or spending its full step budget on a change whose
+authoritative context is already the named file. `implement` and `add` are
+recognized edit verbs when paired with an explicit path such as `@vishu.cpp`.
+Patch fragments are validated as patches, not as standalone source files: a
+replacement may intentionally carry an open structure from the matched old
+fragment into the new fragment. An explicit approval denial pauses the durable
+orchestration state without another model call.
 
 Bounded single-file creation/edit tasks use the independent Verifier as their
 final semantic check and complete the Reviewer stage deterministically instead
@@ -106,10 +116,21 @@ of paying for a second model to repeat the same checklist. Detailed verifier and
 provider evidence remains in the trace, while the chat transcript receives only
 a compact saved-file confirmation rather than internal review prose.
 
+Elapsed task time in the dashboard comes from the root task span; nested
+stage/agent/model/tool durations are not added because they describe overlapping
+intervals. Provider calls are counted from `model_call` spans (or persisted task
+spend), and retry transitions close the failed attempt span before creating the
+next one.
+
 The desktop preserves an explicitly selected primary provider. When Groq is the
 primary, its failover preference is OpenRouter/Nemotron first, then the other
 configured hosted providers, with Ollama last. Cooldowns and capability/context
-eligibility still apply inside that stable preference order.
+eligibility still apply inside that stable preference order. Each pipeline stage
+sets a bounded output-token allowance instead of reserving the global maximum on
+every request. Transiently limited routes cool for two minutes, preventing the
+same free-tier key from being reprobed by every continuation turn. Judgement
+stages briefly wait for preferred hosted routes, then may use the excluded local
+route as a last resort rather than ending with no eligible model.
 
 Provider quota and billing exhaustion (including HTTP 402) is terminal for the
 affected account but not for the user's task. The gateway classifies it as a

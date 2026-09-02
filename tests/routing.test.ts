@@ -464,6 +464,75 @@ test("gateway restores a primary route at cooldown expiry", async () => {
   );
 });
 
+test("an excluded local route is a last resort when every hosted route is cooling", async () => {
+  let now = 1_000;
+  let hostedCalls = 0;
+  let localCalls = 0;
+  const hosted = model("groq", "hosted", { contextWindow: 10_000 });
+  const local = model("ollama", "local", { contextWindow: 10_000 });
+  const gateway = new ProviderGateway(
+    new ProviderRegistry()
+      .register(
+        new StubProvider("groq", [hosted], async () => {
+          hostedCalls += 1;
+          throw { status: 429 };
+        }),
+      )
+      .register(
+        new StubProvider("ollama", [local], async () => {
+          localCalls += 1;
+          return structuredClone(response);
+        }),
+      ),
+    undefined,
+    { cooldownMs: 120_000, now: () => now },
+  );
+  registerModels(gateway, [hosted, local]);
+  gateway.setRoutePreferences([
+    { providerId: "groq", modelId: "hosted" },
+    { providerId: "ollama", modelId: "local" },
+  ]);
+
+  // The first request tries the preferred hosted route, then falls back.
+  assert.equal(
+    (
+      await gateway.respond({
+        ...request(),
+        routePolicy: {
+          excludeProviders: ["ollama"],
+          maxCooldownWaitMs: 45_000,
+        },
+      })
+    ).text,
+    "ok",
+  );
+  assert.deepEqual(
+    { hostedCalls, localCalls },
+    { hostedCalls: 1, localCalls: 1 },
+  );
+
+  // The 120-second circuit breaker outlives the 45-second wait budget, so the
+  // next request must go straight to the healthy last-resort route rather than
+  // probing the rate-limited key again or failing with no eligible route.
+  now = 2_000;
+  assert.equal(
+    (
+      await gateway.respond({
+        ...request(),
+        routePolicy: {
+          excludeProviders: ["ollama"],
+          maxCooldownWaitMs: 45_000,
+        },
+      })
+    ).text,
+    "ok",
+  );
+  assert.deepEqual(
+    { hostedCalls, localCalls },
+    { hostedCalls: 1, localCalls: 2 },
+  );
+});
+
 test("gateway stops on terminal errors without trying a fallback", async () => {
   let fallbackAttempts = 0;
   const first = model("groq", "primary", { contextWindow: 10_000 });
@@ -509,9 +578,13 @@ test("gateway exposes context estimates and classifies oversized requests", asyn
   );
   registerModels(gateway, [selected]);
   gateway.select("ollama", "small");
-  const oversized = request("x".repeat(8000));
+  const oversized = {
+    ...request("x".repeat(8000)),
+    maxOutputTokens: 3_072,
+  };
 
   assert.equal(gateway.estimateContext(oversized).contextWindowTokens, 1500);
+  assert.equal(gateway.estimateContext(oversized).reservedOutputTokens, 3_072);
   await assert.rejects(
     gateway.respond(oversized),
     (error: unknown) =>

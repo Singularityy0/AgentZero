@@ -3996,14 +3996,39 @@ function Dashboard({
     return () => window.clearInterval(timer);
   }, [liveTaskId, refresh, selectedTaskId]);
   const selected = spans.find((span) => span.spanId === selectedSpanId);
-  const totalDuration = spans.reduce(
-    (total, span) => total + (span.durationMs ?? 0),
+  // Spans are hierarchical: task includes stages, stages include agents, and
+  // agents include model/tool calls. Summing them counts the same wall-clock
+  // interval three or four times. The task span is the authoritative elapsed
+  // duration; the range fallback keeps live/legacy traces useful.
+  const taskSpan = spans.find((span) => span.kind === "task");
+  const earliestStart = spans.reduce(
+    (earliest, span) => Math.min(earliest, span.startedAt),
+    Number.POSITIVE_INFINITY,
+  );
+  const latestEnd = spans.reduce(
+    (latest, span) =>
+      Math.max(
+        latest,
+        span.durationMs === undefined
+          ? span.status === "running"
+            ? Date.now()
+            : span.startedAt
+          : span.startedAt + span.durationMs,
+      ),
     0,
   );
+  const totalDuration =
+    taskSpan?.durationMs ??
+    (Number.isFinite(earliestStart)
+      ? Math.max(0, latestEnd - earliestStart)
+      : 0);
   const totalCost =
     spend?.costUsd ??
     spans.reduce((total, span) => total + (span.cost ?? 0), 0);
-  const modelCalls = spans.filter((span) => span.kind === "model").length;
+  const tracedModelCalls = spans.filter(
+    (span) => span.kind === "model_call",
+  ).length;
+  const modelCalls = Math.max(spend?.modelCalls ?? 0, tracedModelCalls);
   const toolCalls = spans.filter((span) => span.kind === "tool").length;
   return (
     <div className="flex min-h-0 flex-1 flex-col">

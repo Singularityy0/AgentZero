@@ -577,6 +577,59 @@ test("AgentRunner accepts complete content that merely contains delimiters", asy
   assert.equal(writes.length, 1, "valid content must not be rejected");
 });
 
+test("AgentRunner accepts a structurally partial apply_patch fragment", async () => {
+  // Exact regression from the convex-hull task: both the old and replacement
+  // fragment end at the opening of the existing class. Counting braces in the
+  // fragment alone says it is unbalanced even though the resulting file is not.
+  const replacement = [
+    "#include <algorithm>",
+    "struct Point { int x; int y; };",
+    "class DSU {",
+  ].join("\n");
+  let applied = false;
+  let modelCalls = 0;
+  const model: LanguageModel = {
+    respond: async () => {
+      modelCalls += 1;
+      return modelCalls === 1
+        ? assistantResponse("", [
+            {
+              id: "patch-fragment",
+              name: "apply_patch",
+              arguments: {
+                path: "vishu.cpp",
+                oldContent: "#include <vector>\n\nclass DSU {",
+                newContent: replacement,
+              },
+            },
+          ])
+        : assistantResponse("Patched vishu.cpp.");
+    },
+  };
+  const tools = new ToolRegistry().register({
+    name: "apply_patch",
+    description: "Apply an exact replacement.",
+    approval: "auto",
+    parameters: { type: "object", additionalProperties: true },
+    execute: async () => {
+      applied = true;
+      return { output: "patched", changed: true };
+    },
+  });
+
+  await new AgentRunner(model, tools, {
+    cwd: process.cwd(),
+    enforceWorkflowCompletion: false,
+    requestApproval: async () => true,
+  }).run([{ role: "user", content: "Add convex hull to vishu.cpp." }]);
+
+  assert.equal(
+    applied,
+    true,
+    "a valid replacement fragment must reach preview",
+  );
+});
+
 test("AgentRunner stops corrective mutation nudges after two retries", async () => {
   let modelCalls = 0;
   const model: LanguageModel = {
@@ -2293,6 +2346,7 @@ test("HeadlessRuntimeService keeps a focused single-file edit local and stops af
   });
   await retrieval.indexProject();
   const coderRequests: ModelRequest[] = [];
+  const verifierRequests: ModelRequest[] = [];
   let plannerCalls = 0;
   let reviewerCalls = 0;
   const insertionSort = `pub fn insertion_sort(values: &mut [i32]) {
@@ -2320,38 +2374,30 @@ test("HeadlessRuntimeService keeps a focused single-file edit local and stops af
       {
         respond: async (request) => {
           coderRequests.push(request);
-          return coderRequests.length === 1
-            ? assistantResponse("", [
-                {
-                  id: "focused-read",
-                  name: "read_file",
-                  arguments: { path: "singu.rs" },
-                },
-              ])
-            : assistantResponse("", [
-                {
-                  id: "focused-write",
-                  name: "write_file",
-                  arguments: { path: "singu.rs", content: insertionSort },
-                },
-              ]);
+          return assistantResponse("", [
+            {
+              id: "focused-write",
+              name: "apply_patch",
+              arguments: {
+                path: "singu.rs",
+                oldContent: original,
+                newContent: insertionSort,
+              },
+            },
+          ]);
         },
       },
     ],
     [
       VERIFIER_AGENT_ID,
-      new FakeModel([
-        assistantResponse("", [
-          {
-            id: "focused-verify-read",
-            name: "read_file",
-            arguments: { path: "singu.rs" },
-          },
-        ]),
-        assistantResponse(
-          "Verified insertion sort.\n**VERIFICATION_PASSED** for singu.rs\n- Static review passed.",
-        ),
-      ]),
+      {
+        respond: async (request) => {
+          verifierRequests.push(request);
+          return assistantResponse(
+            "Verified insertion sort.\n**VERIFICATION_PASSED** for singu.rs\n- Static review passed.",
+          );
+        },
+      },
     ],
     [
       REVIEWER_AGENT_ID,
@@ -2381,23 +2427,40 @@ test("HeadlessRuntimeService keeps a focused single-file edit local and stops af
     const result = await service.runTask({
       sessionId: session.id,
       agentId: DEFAULT_AGENT_ID,
-      prompt:
-        "edit this file singu.rs and replace merge sort with insertion sort",
+      prompt: "implement insertion sort in @singu.rs",
     });
 
     assert.equal(result.status, "completed");
     assert.equal(result.text, "Saved `singu.rs`.");
     assert.equal(plannerCalls, 0);
     assert.equal(reviewerCalls, 0);
-    assert.equal(coderRequests.length, 2);
+    assert.equal(coderRequests.length, 1);
+    assert.equal(coderRequests[0]?.maxOutputTokens, 3_072);
+    assert.equal(coderRequests[0]?.routePolicy, undefined);
     assert.deepEqual(
       coderRequests[0]?.tools.map((tool) => tool.name),
-      ["read_file", "write_file", "apply_patch"],
+      ["write_file", "apply_patch"],
+    );
+    assert.match(
+      coderRequests[0]?.messages.find((message) => message.role === "user")
+        ?.content ?? "",
+      /Authoritative current file snapshot[\s\S]*merge_sort/u,
     );
     assert.ok(
       coderRequests[0]?.tools.every(
         (tool) => tool.name !== "web_search" && tool.name !== "browse_url",
       ),
+    );
+    assert.equal(verifierRequests.length, 1);
+    assert.equal(verifierRequests[0]?.routePolicy, undefined);
+    assert.deepEqual(
+      verifierRequests[0]?.tools.map((tool) => tool.name),
+      ["compile_code", "syntax_check"],
+    );
+    assert.match(
+      verifierRequests[0]?.messages.find((message) => message.role === "user")
+        ?.content ?? "",
+      /Authoritative changed file snapshot[\s\S]*insertion_sort/u,
     );
     const saved = await readFile(join(root, "singu.rs"), "utf8");
     assert.match(saved, /insertion_sort/u);
