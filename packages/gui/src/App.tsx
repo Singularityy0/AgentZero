@@ -4555,7 +4555,9 @@ function FallbackOrderCard({
         {
           method: "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ order: next.map((route) => route.providerId) }),
+          body: JSON.stringify({
+            order: next.map((route) => route.providerId),
+          }),
         },
       );
       setOrder(body.runtime.routes);
@@ -4576,13 +4578,11 @@ function FallbackOrderCard({
 
   return (
     <div className="mt-6 border border-white/5 bg-panel p-4">
-      <div className="text-sm font-medium text-neutral-300">
-        Fallback order
-      </div>
+      <div className="text-sm font-medium text-neutral-300">Fallback order</div>
       <p className="mt-1 text-[10px] leading-relaxed text-neutral-600">
-        When the active route errors or hits a rate limit, routing falls
-        through this list in order. Ollama (local) needs no API key, so it
-        stays last by default as the offline fallback of last resort.
+        When the active route errors or hits a rate limit, routing falls through
+        this list in order. Ollama (local) needs no API key, so it stays last by
+        default as the offline fallback of last resort.
       </p>
       <ol className="mt-3 space-y-1">
         {order.map((route, index) => (

@@ -101,7 +101,9 @@ export class RuntimeTransport {
   status(): RuntimeTransportStatus {
     const providerId = this.selectedProvider();
     const fallbackOrder = this.getFallbackOrder();
-    const routes = fallbackOrder.map((id) => this.describeRoute(id, providerId));
+    const routes = fallbackOrder.map((id) =>
+      this.describeRoute(id, providerId),
+    );
     const selected = routes.find((route) => route.providerId === providerId)!;
     return {
       ready: selected.configured && Boolean(selected.modelId),
