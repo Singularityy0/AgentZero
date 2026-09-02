@@ -72,6 +72,8 @@ async function resolveInitialWorkspace(): Promise<string | undefined> {
   const explicit =
     workspaceFromArguments() ?? process.env.AGENTIC_PROJECT_ROOT?.trim();
   if (isWorkspace(explicit)) return resolve(explicit);
+  const lastWorkspace = loadDesktopState().lastWorkspace;
+  if (isWorkspace(lastWorkspace)) return resolve(lastWorkspace);
   return undefined;
 }
 

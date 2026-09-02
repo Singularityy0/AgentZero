@@ -35,6 +35,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
@@ -461,10 +463,158 @@ function IconButton({
 const FILE_REFERENCE_PATTERN =
   /@?([\w.-]+(?:[/\\][\w.-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|scss|html|htm|py|rs|go|java|rb|php|c|h|cpp|hpp|cs|sh|yml|yaml|toml|sql|txt|ini|env))(?::(\d+)(?:-(\d+))?)?(?![\w/\\]|\.(?=\w))/gu;
 
+const FILE_REFERENCE_URL_SCHEME = "agentic-file://";
+
 /**
- * Renders chat text with every file reference turned into a button that opens
- * the file and scrolls to the referenced lines, satisfying clickable tagging in
- * the output chat as well as the input box.
+ * Remark plugin that turns file-reference tags inside text nodes into mdast
+ * link nodes (`agentic-file://<path>:<start>-<end>`), so the markdown renderer
+ * can hand them to the `a` component override below instead of leaving them
+ * as inert text.
+ */
+function remarkFileReferences() {
+  return (tree: { children: unknown[] }) => {
+    const walk = (node: any) => {
+      if (!Array.isArray(node.children)) return;
+      for (let i = node.children.length - 1; i >= 0; i--) {
+        const child = node.children[i];
+        if (child.type !== "text") {
+          walk(child);
+          continue;
+        }
+        const text: string = child.value;
+        FILE_REFERENCE_PATTERN.lastIndex = 0;
+        const parts: any[] = [];
+        let cursor = 0;
+        let found = false;
+        for (
+          let match = FILE_REFERENCE_PATTERN.exec(text);
+          match;
+          match = FILE_REFERENCE_PATTERN.exec(text)
+        ) {
+          found = true;
+          const [tag, path, startLine, endLine] = match;
+          if (match.index > cursor) {
+            parts.push({ type: "text", value: text.slice(cursor, match.index) });
+          }
+          const range = startLine ? `:${startLine}-${endLine ?? startLine}` : "";
+          parts.push({
+            type: "link",
+            url: `${FILE_REFERENCE_URL_SCHEME}${encodeURIComponent(path!)}${range}`,
+            children: [{ type: "text", value: tag }],
+          });
+          cursor = match.index + tag.length;
+        }
+        if (!found) continue;
+        if (cursor < text.length) {
+          parts.push({ type: "text", value: text.slice(cursor) });
+        }
+        node.children.splice(i, 1, ...parts);
+      }
+    };
+    walk(tree);
+  };
+}
+
+function markdownComponents(
+  onOpenReference: (path: string, range?: LineRange) => void,
+): Components {
+  return {
+    a: ({ href, children }) => {
+      if (href?.startsWith(FILE_REFERENCE_URL_SCHEME)) {
+        const raw = href.slice(FILE_REFERENCE_URL_SCHEME.length);
+        const [rawPath, range] = raw.split(/:(\d+-\d+)$/);
+        const path = decodeURIComponent(rawPath!);
+        const [start, end] = range ? range.split("-") : [];
+        return (
+          <button
+            type="button"
+            onClick={() =>
+              onOpenReference(
+                path,
+                start ? { startLine: Number(start), endLine: Number(end) } : undefined,
+              )
+            }
+            className="rounded-sm bg-indigo-400/10 px-1 font-mono text-[10px] text-indigo-300 hover:bg-indigo-400/20"
+            title={`Open ${path}${range ? `:${range}` : ""}`}
+          >
+            {children}
+          </button>
+        );
+      }
+      return (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-indigo-300 underline hover:text-indigo-200"
+        >
+          {children}
+        </a>
+      );
+    },
+    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+    ul: ({ children }) => (
+      <ul className="mb-2 list-disc space-y-0.5 pl-4 last:mb-0">{children}</ul>
+    ),
+    ol: ({ children }) => (
+      <ol className="mb-2 list-decimal space-y-0.5 pl-4 last:mb-0">{children}</ol>
+    ),
+    li: ({ children }) => <li>{children}</li>,
+    h1: ({ children }) => (
+      <h1 className="mb-2 mt-1 text-sm font-semibold text-neutral-200 first:mt-0">
+        {children}
+      </h1>
+    ),
+    h2: ({ children }) => (
+      <h2 className="mb-2 mt-1 text-[13px] font-semibold text-neutral-200 first:mt-0">
+        {children}
+      </h2>
+    ),
+    h3: ({ children }) => (
+      <h3 className="mb-1 mt-1 text-xs font-semibold text-neutral-200 first:mt-0">
+        {children}
+      </h3>
+    ),
+    blockquote: ({ children }) => (
+      <blockquote className="mb-2 border-l-2 border-indigo-400/30 pl-2 text-neutral-500 last:mb-0">
+        {children}
+      </blockquote>
+    ),
+    strong: ({ children }) => (
+      <strong className="font-semibold text-neutral-200">{children}</strong>
+    ),
+    code: ({ className, children }) => (
+      <code
+        className={`rounded-sm bg-white/10 px-1 py-0.5 font-mono text-[10px] text-neutral-200 ${className ?? ""}`}
+      >
+        {children}
+      </code>
+    ),
+    pre: ({ children }) => (
+      <pre className="mb-2 overflow-x-auto rounded-sm border border-white/10 bg-black/40 p-2 last:mb-0">
+        {children}
+      </pre>
+    ),
+    table: ({ children }) => (
+      <table className="mb-2 w-full border-collapse text-[10px] last:mb-0">
+        {children}
+      </table>
+    ),
+    th: ({ children }) => (
+      <th className="border border-white/10 px-1.5 py-1 text-left font-semibold">
+        {children}
+      </th>
+    ),
+    td: ({ children }) => (
+      <td className="border border-white/10 px-1.5 py-1">{children}</td>
+    ),
+    hr: () => <hr className="my-2 border-white/10" />,
+  };
+}
+
+/**
+ * Renders chat text as markdown, with every file reference turned into a
+ * button that opens the file and scrolls to the referenced lines.
  */
 function MessageBody({
   text,
@@ -473,37 +623,16 @@ function MessageBody({
   text: string;
   onOpenReference: (path: string, range?: LineRange) => void;
 }) {
-  const nodes: React.ReactNode[] = [];
-  let cursor = 0;
-  FILE_REFERENCE_PATTERN.lastIndex = 0;
-  for (
-    let match = FILE_REFERENCE_PATTERN.exec(text);
-    match;
-    match = FILE_REFERENCE_PATTERN.exec(text)
-  ) {
-    const [tag, path, startLine, endLine] = match;
-    if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
-    const range = startLine
-      ? {
-          startLine: Number(startLine),
-          endLine: Number(endLine ?? startLine),
-        }
-      : undefined;
-    nodes.push(
-      <button
-        key={`${match.index}-${tag}`}
-        type="button"
-        onClick={() => onOpenReference(path!, range)}
-        className="rounded-sm bg-indigo-400/10 px-1 font-mono text-[10px] text-indigo-300 hover:bg-indigo-400/20"
-        title={`Open ${tag}`}
+  return (
+    <div className="[&>*:last-child]:mb-0">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkFileReferences]}
+        components={markdownComponents(onOpenReference)}
       >
-        {tag}
-      </button>,
-    );
-    cursor = match.index + tag.length;
-  }
-  nodes.push(text.slice(cursor));
-  return <div className="whitespace-pre-wrap">{nodes}</div>;
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 function MonacoPane({
