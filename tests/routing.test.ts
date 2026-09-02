@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { test } from "node:test";
 import {
   ModelError,
@@ -18,6 +19,7 @@ import {
   type ModelRoute,
   type ProviderAdapter,
 } from "../packages/gateway/dist/index.js";
+import { OpenAICompatibleChatModel } from "../packages/openai/dist/index.js";
 import {
   classifyTaskComplexity,
   routePolicyForStage,
@@ -156,6 +158,47 @@ test("model errors classify retryable and terminal provider failures", () => {
     retryable: false,
     status: 400,
   });
+});
+
+test("a chat-completions response with no choices fails over instead of crashing the task", async () => {
+  // OpenRouter proxies to many backends and can answer HTTP 200 with an
+  // error-shaped body that has no `choices` array at all, not merely an
+  // empty one. Indexing straight into it threw a bare TypeError with no
+  // status code or recognizable wording, which classifyModelError could not
+  // place anywhere but { code: "unknown", retryable: false } - so instead of
+  // failing over to the next provider, the gateway treated it as terminal
+  // and the whole task died. This reproduces that response shape against a
+  // real HTTP server and checks the error is now classified as retryable.
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: "x", model: "test-model" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("expected an AddressInfo from the test server");
+  }
+  try {
+    const model = new OpenAICompatibleChatModel({
+      apiKey: "test-key",
+      model: "test-model",
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+    });
+    await assert.rejects(
+      model.respond({
+        messages: [{ role: "user", content: "hello" }],
+        tools: [],
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof ModelError);
+        assert.equal(error.retryable, true);
+        assert.equal(error.code, "server");
+        return true;
+      },
+    );
+  } finally {
+    server.close();
+  }
 });
 
 test("route ranking is pure and accounts for tools, context, cost, and cooldown", () => {
@@ -706,6 +749,39 @@ test("route bias reorders eligible routes without overriding eligibility", () =>
     floored.find((route) => route.model.id === "small")?.reason ?? "",
     /below the 32000 required/,
   );
+});
+
+test("local inference never outranks a hosted route on a pricing-metadata gap", () => {
+  // estimateModelCost hard-codes Ollama to exactly 0. A hosted free-tier
+  // route whose pricing metadata is missing or unparseable falls back to
+  // Infinity, so under "economy" bias a plain cost comparison put local
+  // ahead of a hosted route purely because its price could not be read -
+  // backwards from local hardware being the fallback of last resort. Local
+  // must lose to any eligible, non-cooling hosted route regardless of bias.
+  const local = model("ollama", "local-model", { contextWindow: 8_000 });
+  const hostedUnknownPricing = model("groq", "unpriced", {
+    contextWindow: 8_000,
+  });
+  const candidates = [
+    { model: local, preference: 0 },
+    { model: hostedUnknownPricing, preference: 1 },
+  ] as const;
+  const base = {
+    requiresTools: true,
+    contextTokens: 100,
+    estimatedOutputTokens: 50,
+    now: 1_000,
+  };
+
+  for (const bias of ["balanced", "capacity", "economy"] as const) {
+    const ranked = rankModelRoutes(candidates, { ...base, bias });
+    assert.equal(
+      ranked[0]?.model.id,
+      "unpriced",
+      `local must rank behind the hosted route under ${bias} bias`,
+    );
+    assert.equal(ranked[1]?.model.id, "local-model");
+  }
 });
 
 test("stage route policies follow task complexity", () => {

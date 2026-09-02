@@ -1093,6 +1093,7 @@ export class HeadlessRuntimeService {
       : 1;
     const fastSingleFilePath =
       focusedFileEdit || (greenfieldArtifact && artifactCount === 1);
+    const verificationRequested = requestsExplicitVerification(task.prompt);
     // A 7B model cannot reliably emit five mutation calls from one prompt: asked
     // for all of them at once it answers with prose and changes nothing. Each
     // artifact therefore gets its own coding step with a single-file objective,
@@ -1495,6 +1496,11 @@ export class HeadlessRuntimeService {
             }
           : runAgentWorker(CODING_AGENT_ID),
       verifier: async (request: AgentWorkRequest): Promise<AgentWorkResult> => {
+        if (!verificationRequested) {
+          const summary =
+            "Verification skipped: the objective did not ask for the result to be verified or tested.";
+          return { success: true, passed: true, summary, output: summary };
+        }
         const changed = [...producedFiles];
         if (focusedFileEdit && changed.length > 0) {
           const workspace = new WorkspaceFileService(this.projectRoot);
@@ -3338,6 +3344,23 @@ function isGreenfieldArtifactRequest(prompt: string): boolean {
  * retrieval, or internet research. Keeping this path local prevents a weak
  * fallback model from turning a two-tool edit into a long browsing session.
  */
+/**
+ * Whether the user's own prompt asked for the result to be verified/tested.
+ *
+ * The verifier stage used to run unconditionally after every coding step. On
+ * a task a small free model gets wrong on the first pass, that stage can
+ * loop through many read/run_command turns second-guessing itself before
+ * hitting its own step limit - real wall-clock time spent on a check nobody
+ * asked for. Verification now only runs when the objective explicitly asks
+ * for it; otherwise the coder's saved result is reported as-is.
+ */
+const EXPLICIT_VERIFICATION_PATTERN =
+  /\b(verify|verification|validate|validated|confirm(?:ed)?\s+(?:it|this|that)\s+works|make\s+sure\s+(?:it|this|that)\s+works|test(?:ed|ing)?\s+(?:it|this|that)|run\s+the\s+tests?|check\s+(?:it|this|that)\s+works)\b/iu;
+
+function requestsExplicitVerification(prompt: string): boolean {
+  return EXPLICIT_VERIFICATION_PATTERN.test(prompt);
+}
+
 function isFocusedFileEditRequest(prompt: string): boolean {
   return (
     FOCUSED_FILE_VERB_PATTERN.test(prompt) &&
