@@ -1681,7 +1681,15 @@ export class HeadlessRuntimeService {
       rustClient.start();
       const depth = await rustClient.checkWorkspaceCycle(
         changed.map((file) => `${file.path}:${file.hash ?? ""}`),
-        agentId,
+        // The sidecar keeps one rolling state history for the whole process,
+        // so the task id is folded into the snapshot alongside the agent.
+        // Without it, a second task that legitimately brings the same files
+        // back to a state an earlier task also produced - the common case when
+        // two tasks touch one file in the same repository - is reported as a
+        // loop it never entered. Namespacing rather than clearing the history
+        // on task start, because clearing is not safe while another session's
+        // task may be recording into the same history.
+        `${this.executionContext.getStore()?.taskId ?? "unknown-task"}:${agentId}`,
       );
       return typeof depth === "number" ? depth : undefined;
     } catch {

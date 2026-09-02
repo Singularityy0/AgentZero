@@ -18,3 +18,5 @@ gen/
 *.pdb
 references/
 .agentic/data/
+
+problem-statement.md

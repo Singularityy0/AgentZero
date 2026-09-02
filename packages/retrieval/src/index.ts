@@ -34,6 +34,15 @@ const DEFAULT_LIMIT = 8;
 const DEFAULT_MAX_CANDIDATES = 120;
 const DEFAULT_MAX_SLICE_LINES = 24;
 const DEFAULT_CONTEXT_LINES = 2;
+/**
+ * Score band for a candidate found only by walking the code graph.
+ *
+ * The floor sits above a bare text hit (52) and the top of the band stays below
+ * an unexported symbol match (76), so however strongly the graph relates a
+ * symbol, a candidate the query actually named still outranks it.
+ */
+const GRAPH_SCORE_FLOOR = 64;
+const GRAPH_SCORE_SPREAD = 11;
 
 interface Candidate {
   path: string;
@@ -388,18 +397,28 @@ export class SemanticRetrievalIndex {
     const seeds = [
       ...new Set(direct.slice(0, 12).flatMap((item) => [...item.symbols])),
     ].slice(0, 24);
-    for (const neighbour of await this.graphNeighbours(seeds, 24)) {
+    const neighbours = await this.graphNeighbours(seeds, 24);
+    // The sidecar returns these ordered by descending PageRank mass, so the
+    // first one carries the most. Masses are relative to the seed set and can
+    // be uniformly tiny on a large graph, which would collapse every neighbour
+    // onto the bottom of the band; scaling against the strongest one spreads
+    // them across it while keeping the ordering the graph computed.
+    const strongestMass = neighbours[0]?.score ?? 0;
+    for (const neighbour of neighbours) {
+      const relatedness =
+        strongestMass > 0 ? neighbour.score / strongestMass : 0;
       addCandidate(candidates, {
         path: neighbour.path,
         language: this.database.file(neighbour.path)?.language ?? "text",
         startLine: neighbour.startLine,
         endLine: neighbour.endLine,
         // Below a direct symbol match and above a bare text hit: the graph says
-        // this is related, but the query never named it.
-        score: 64,
+        // this is related, but the query never named it. Within that band the
+        // graph's own measure of how related decides the order.
+        score: GRAPH_SCORE_FLOOR + relatedness * GRAPH_SCORE_SPREAD,
         modifiedAt: this.database.file(neighbour.path)?.modified_at ?? 0,
         reasons: new Set([
-          `call-graph proximity to ${seeds.slice(0, 3).join(", ")}: ${neighbour.symbol}`,
+          `call-graph proximity to ${seeds.slice(0, 3).join(", ")}: ${neighbour.symbol} (relatedness ${relatedness.toFixed(2)})`,
         ]),
         symbols: new Set([neighbour.symbol]),
       });

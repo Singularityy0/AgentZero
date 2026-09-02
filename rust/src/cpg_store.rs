@@ -211,21 +211,25 @@ impl CpgStore {
         // past convergence for graphs this shape, and the threshold is low
         // enough to keep second- and third-hop neighbours that a one-hop
         // expansion would have dropped.
+        // Already ordered by descending PageRank mass, so truncating below
+        // keeps the most related nodes rather than the lowest-numbered ones.
         let ranked = project.graph.compute_ppr_slice(&seeds, 0.15, 10, 1e-4);
         let seed_set: std::collections::HashSet<u32> = seeds.iter().copied().collect();
         let mut results: Vec<RankedNode> = ranked
             .into_iter()
             // The seeds are already known to the caller; the value here is what
             // they are connected to.
-            .filter(|index| !seed_set.contains(index))
-            .filter_map(|index| {
+            .filter(|(index, _)| !seed_set.contains(index))
+            .filter_map(|(index, score)| {
                 let node = project.nodes.get(index as usize)?;
                 Some(RankedNode {
                     symbol: node.symbol.clone(),
                     path: node.path.clone(),
                     start_line: node.start_line,
                     end_line: node.end_line,
-                    score: 0.0,
+                    // The mass itself, so a caller can say how strongly a
+                    // symbol is related and not merely that it is.
+                    score,
                 })
             })
             .collect();
@@ -280,6 +284,68 @@ mod tests {
         assert!(names.contains(&"repository"), "two hops");
         assert!(names.contains(&"driver"), "three hops, which one-hop misses");
         assert!(!names.contains(&"unrelated"), "a disconnected node stays out");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A graph whose node order deliberately disagrees with its graph order:
+    /// `near` is one hop from the seed but sits at the highest index, `far` is
+    /// two hops away but sits at the lowest. Ranking by index returns `far`.
+    fn inverted_snapshot() -> CpgSnapshot {
+        CpgSnapshot {
+            nodes: vec![
+                CpgNode { symbol: "seed".into(), path: "a.go".into(), start_line: 1, end_line: 5 },
+                CpgNode { symbol: "far".into(), path: "b.go".into(), start_line: 1, end_line: 9 },
+                CpgNode { symbol: "near".into(), path: "c.go".into(), start_line: 1, end_line: 7 },
+            ],
+            edges: vec![
+                CpgEdge { head: 0, tail: 2, kind: "call".into() },
+                CpgEdge { head: 2, tail: 1, kind: "call".into() },
+            ],
+            revision: "rev-1".into(),
+        }
+    }
+
+    #[test]
+    fn scores_carry_the_pagerank_mass_in_descending_order() {
+        let directory = std::env::temp_dir().join("cpg-test-scores");
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut store = CpgStore::new();
+        store.put("proj", &directory, snapshot()).unwrap();
+
+        let ranked = store.rank("proj", &directory, &["handler".to_string()], 10);
+
+        assert!(
+            ranked.iter().all(|node| node.score > 0.0),
+            "a ranked node carries its own mass, not a placeholder",
+        );
+        for pair in ranked.windows(2) {
+            assert!(
+                pair[0].score >= pair[1].score,
+                "results are ordered by descending relatedness",
+            );
+        }
+        // Distance from the seed should cost mass along the chain.
+        let mass = |symbol: &str| {
+            ranked.iter().find(|node| node.symbol == symbol).expect(symbol).score
+        };
+        assert!(mass("service") > mass("driver"), "one hop outranks three");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_truncated_ranking_keeps_the_most_related_not_the_lowest_indexed() {
+        let directory = std::env::temp_dir().join("cpg-test-truncate");
+        let _ = std::fs::remove_dir_all(&directory);
+        let mut store = CpgStore::new();
+        store.put("proj", &directory, inverted_snapshot()).unwrap();
+
+        let ranked = store.rank("proj", &directory, &["seed".to_string()], 1);
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(
+            ranked[0].symbol, "near",
+            "the single kept result is the closest node, not node index 1",
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 

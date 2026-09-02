@@ -800,6 +800,30 @@ algorithm in @vishu.cpp`. Its persisted root span was 554,416 ms, not the
   which Prettier would rewrite by thousands of lines, so the generated lockfile
   is now explicitly excluded from formatting checks.
 
+- Fixed two defects found by auditing the sidecar against its callers.
+  `compute_ppr_slice` returned node indices in index order and `rank` discarded
+  the mass entirely, writing `score: 0.0`. Truncating that list to `limit` kept
+  whichever related symbols happened to be inserted into the graph first rather
+  than the most related ones, so the ranking was silently arbitrary whenever
+  personalised PageRank found more neighbours than the caller asked for. It now
+  returns `(index, mass)` sorted by descending mass, ties broken by index for
+  determinism, and `rank` carries the mass through. Retrieval scales the mass
+  against the strongest neighbour and spreads it across a 64-75 band, keeping
+  graph hits below an unexported symbol match (76) and above a text hit (52)
+  while ordering them by how related the graph says they are. The slice reason
+  now states that relatedness, so the dashboard can show why.
+- The sidecar keeps one rolling `StateTree` for the whole process, and nothing
+  in production ever called `reset_cycles`. Two tasks touching the same file in
+  the same repository could therefore leave identical state and have the second
+  reported as a loop it never entered. Snapshots are now namespaced by task id
+  alongside the agent id. Namespacing rather than clearing the history on task
+  start: clearing is unsafe while another session's task may be recording into
+  the same history, and it would disable that peer's safeguard silently.
+- Regression coverage: two Rust tests asserting descending mass along a call
+  chain and that a truncated ranking keeps the closest node rather than the
+  lowest-indexed one, plus task-namespacing assertions on the existing
+  workspace-loop test. 114 TypeScript tests and 18 Rust tests pass.
+
 ## Next Steps
 
 - Refine the IDE Observability Dashboard to show full call hierarchy traces per the PS requirements.

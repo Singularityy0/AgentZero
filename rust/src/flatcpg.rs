@@ -49,7 +49,14 @@ impl FlatCPG {
         self.edge_kinds.push(kind as u8);
     }
 
-    pub fn compute_ppr_slice(&self, seed_nodes: &[u32], alpha: f32, iterations: usize, threshold: f32) -> Vec<u32> {
+    /// Personalised PageRank from `seed_nodes`, as `(node index, mass)` pairs
+    /// ordered by descending mass.
+    ///
+    /// The order is part of the contract. A caller that keeps only the top `k`
+    /// is asking for the `k` most related nodes, and returning them in node
+    /// index order would instead hand back whichever related nodes happened to
+    /// be inserted into the graph first.
+    pub fn compute_ppr_slice(&self, seed_nodes: &[u32], alpha: f32, iterations: usize, threshold: f32) -> Vec<(u32, f32)> {
         let n = self.node_types.len();
         if n == 0 || seed_nodes.is_empty() {
             return Vec::new();
@@ -99,12 +106,22 @@ impl FlatCPG {
             p.copy_from_slice(&next_p);
         }
 
-        let mut slice = Vec::new();
+        let mut slice: Vec<(u32, f32)> = Vec::new();
         for (i, &prob) in p.iter().enumerate() {
             if prob >= threshold {
-                slice.push(i as u32);
+                slice.push((i as u32, prob));
             }
         }
+
+        // Descending mass. `total_cmp` rather than `partial_cmp` because the
+        // masses are floats and a NaN would otherwise panic the unwrap; ties
+        // fall back to node index so the order is deterministic across runs.
+        slice.sort_unstable_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.cmp(&right.0))
+        });
 
         slice
     }

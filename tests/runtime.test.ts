@@ -4973,6 +4973,28 @@ test("a workspace that returns to an earlier state is stopped as a loop", async 
     // The command is part of the state, so the same files reached by a
     // different action is not a repeat.
     assert.equal(await client.checkWorkspaceCycle(before, "write_file"), null);
+
+    // The sidecar keeps one history for the whole process, so the runtime
+    // namespaces each snapshot by task. Two tasks that legitimately leave the
+    // same files in the same state - the common case when both touch one file
+    // in the same repository - must not be reported as a loop.
+    await client.resetCycles();
+    const state = ["src/graph.ts:ccc"];
+    assert.equal(
+      await client.checkWorkspaceCycle(state, "task-a:coder"),
+      null,
+      "the first task records its state",
+    );
+    assert.equal(
+      await client.checkWorkspaceCycle(state, "task-b:coder"),
+      null,
+      "an identical state under a different task is not that task looping",
+    );
+    assert.equal(
+      await client.checkWorkspaceCycle(state, "task-b:coder"),
+      1,
+      "the same task returning to its own earlier state is still a loop",
+    );
   } finally {
     client.stop();
     stop();
