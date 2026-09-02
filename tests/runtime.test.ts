@@ -386,6 +386,23 @@ test("AgentRunner executes a tool and continues to a final response", async () =
   assert.equal(result.messages.at(-2)?.role, "tool");
 });
 
+test("AgentRunner derives workflow intent from the task, not injected file context", async () => {
+  const model = new FakeModel([assistantResponse("It is an input helper.")]);
+  const result = await new AgentRunner(model, new ToolRegistry(), {
+    cwd: process.cwd(),
+    mutationObjective: "what is @cp.rs doing?",
+    requestApproval: async () => false,
+  }).run([
+    {
+      role: "user",
+      content:
+        "what is @cp.rs doing?\n\nContext from the parent workflow:\n// okay write from here",
+    },
+  ]);
+
+  assert.equal(result.text, "It is an input helper.");
+});
+
 test("AgentRunner pauses immediately after the user denies a tool", async () => {
   const call = { id: "call-2", name: "echo", arguments: { value: "secret" } };
   const registry = new ToolRegistry().register(echoTool());
@@ -3887,6 +3904,16 @@ test("a question about the opened project is answered with tools, not from memor
       await ask("what is @cp.rs doing"),
       DEFAULT_AGENT_ID,
       "an @file mention must route to the read-capable workspace agent",
+    );
+    assert.equal(
+      await ask("pls explain what is @cp.rs doing"),
+      DEFAULT_AGENT_ID,
+      "an abbreviated politeness preamble must not turn an explanation into a mutation pipeline",
+    );
+    assert.equal(
+      await ask("thoughts on @cp.rs?"),
+      DEFAULT_AGENT_ID,
+      "a workspace path without an action verb must remain read-only",
     );
 
     // A read-only verification request still skips planning and coding.

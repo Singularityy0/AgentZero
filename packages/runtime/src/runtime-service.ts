@@ -2648,7 +2648,7 @@ const mutateArtifactPattern = new RegExp(
 // for routing purposes; otherwise a question such as "what is @cp.rs doing"
 // is mistaken for general conversation and loses all workspace context.
 const explicitPathPattern =
-  /(?:^|\s)@?(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?=\s|$|[:;,])/u;
+  /(?:^|\s)@?(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?=\s|$|[:;,!?)}\]])/u;
 
 const existingWorkPattern =
   /\b(?:existing|current|opened|this)\s+(?:file|page|document|component|website|webpage|app|application|project|workspace|repo|repository|codebase)\b/iu;
@@ -2675,7 +2675,7 @@ function requestsCodeArtifact(prompt: string): boolean {
  * wrapper - never a verb that could describe work.
  */
 const QUESTION_PREAMBLE_PATTERN =
-  /^(?:\s*(?:yo|hey|hi|hello|ok|okay|so|um|uh|well|please|thanks|sorry|btw|quick question|question)\b[\s,.!:;-]*)*(?:\s*(?:can|could|would|will)\s+(?:you|u)\b[\s,]*)?(?:\s*(?:please|kindly)\b[\s,]*)?(?:\s*(?:do\s+you\s+know|any\s+idea|i(?:'d| would)?\s+(?:like|want)\s+to\s+know|let\s+me\s+know|i(?:'m| am)\s+curious)\b[\s,]*(?:about\b[\s,]*)?)?/iu;
+  /^(?:\s*(?:yo|hey|hi|hello|ok|okay|so|um|uh|well|please|pls|plz|thanks|sorry|btw|quick question|question)\b[\s,.!:;-]*)*(?:\s*(?:can|could|would|will)\s+(?:you|u)\b[\s,]*)?(?:\s*(?:please|pls|plz|kindly)\b[\s,]*)?(?:\s*(?:do\s+you\s+know|any\s+idea|i(?:'d| would)?\s+(?:like|want)\s+to\s+know|let\s+me\s+know|i(?:'m| am)\s+curious)\b[\s,]*(?:about\b[\s,]*)?)?/iu;
 
 /** Openers that ask for information rather than for work to be done. */
 const EXPLANATION_OPENER_PATTERN =
@@ -2897,11 +2897,11 @@ const bareActionPattern = new RegExp(
  */
 function requestsWorkspaceWork(prompt: string): boolean {
   if (isExplanationRequest(prompt)) return false;
-  return (
-    requestsCodeArtifact(prompt) ||
-    hasWorkspaceReference(prompt) ||
-    bareActionPattern.test(prompt)
-  );
+  // Naming a workspace file only establishes where the answer must come from;
+  // it does not authorize or request a mutation. Path-only turns belong to the
+  // read-capable Architect. Enter the coding pipeline only when the user also
+  // asks for an artifact or uses an explicit action verb.
+  return requestsCodeArtifact(prompt) || bareActionPattern.test(prompt);
 }
 
 const KNOWN_LANGUAGES: readonly string[] = [

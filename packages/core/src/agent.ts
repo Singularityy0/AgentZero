@@ -61,7 +61,7 @@ export interface AgentRunnerOptions {
   stopAfterMutationCount?: number;
   /** Reject obvious placeholder file content before approval or execution. */
   rejectIncompleteMutations?: boolean;
-  /** Original task text used for lightweight, request-derived artifact checks. */
+  /** Original task text used for request-derived workflow and artifact checks. */
   mutationObjective?: string;
   workflowMode?: "mutation" | "verification";
   /** Routing constraints applied to every model call this runner makes. */
@@ -126,7 +126,11 @@ export class AgentRunner {
     const workflow =
       this.options.enforceWorkflowCompletion === false
         ? { followUp: () => undefined }
-        : createWorkflowState(messages, this.options.workflowMode);
+        : createWorkflowState(
+            messages,
+            this.options.workflowMode,
+            this.options.mutationObjective,
+          );
 
     for (let step = 0; step < this.maxSteps; step += 1) {
       await this.compactContextIfNecessary(messages, "token_threshold");
@@ -1243,10 +1247,17 @@ interface WorkflowState {
 function createWorkflowState(
   messages: readonly ConversationMessage[],
   mode?: "mutation" | "verification",
+  objective?: string,
 ): WorkflowState {
-  const request = [...messages]
-    .reverse()
-    .find((message) => message.role === "user")?.content;
+  // The last user-shaped message can include retrieved files, project rules,
+  // or parent-workflow context. Those are evidence, not instructions. Running
+  // intent regexes over them lets a comment such as "write from here" turn a
+  // read-only explanation into a mutation workflow. Prefer the original task
+  // whenever the orchestrator supplied it, and retain the message fallback for
+  // direct AgentRunner callers.
+  const request =
+    objective?.trim() ||
+    [...messages].reverse().find((message) => message.role === "user")?.content;
   if (
     !request ||
     /\b(do not|don't|dont)\s+(modify|change|write|edit)/i.test(request)
