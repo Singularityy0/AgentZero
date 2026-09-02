@@ -1673,35 +1673,6 @@ export function App() {
     }
   };
 
-  /** Continues an interrupted task from its last durable checkpoint. */
-  const resumeTask = async (task: TaskView) => {
-    try {
-      const body = await requestJson<{ sessionId: string; taskId: string }>(
-        `/api/tasks/${encodeURIComponent(task.id)}/resume`,
-        { method: "POST" },
-      );
-      setSelectedSessionId(body.sessionId);
-      setLiveTurns((current) =>
-        current.some((turn) => turn.taskId === body.taskId)
-          ? current
-          : [
-              ...current,
-              {
-                taskId: body.taskId,
-                sessionId: body.sessionId,
-                prompt: task.prompt,
-                thinking: [],
-                status: "running",
-              },
-            ],
-      );
-      setNotice("Resumed the task from its last saved stage");
-      await loadRuntimeStatus();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    }
-  };
-
   const cancelTask = async (taskId: string) => {
     try {
       await requestJson(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
@@ -2080,10 +2051,7 @@ export function App() {
             <AgentsPanel agents={workbench?.agents ?? []} />
           )}
           {section === "dashboard" && (
-            <TaskList
-              tasks={workbench?.tasks ?? []}
-              onResume={(task) => void resumeTask(task)}
-            />
+            <TaskList tasks={workbench?.tasks ?? []} />
           )}
           {section === "settings" && <SettingsSummary />}
         </aside>
@@ -3422,23 +3390,8 @@ function AgentsPanel({ agents }: { agents: AgentView[] }) {
   );
 }
 
-/**
- * Persisted tasks, with a resume action on the ones that were interrupted.
- *
- * A long task can outlive the window that started it. Its stage checkpoints are
- * durable, so resuming continues from the last completed stage rather than
- * repeating finished work; without an affordance here that capability was
- * unreachable from the IDE.
- */
-function TaskList({
-  tasks,
-  onResume,
-}: {
-  tasks: TaskView[];
-  onResume: (task: TaskView) => void;
-}) {
-  const resumable = (status: string): boolean =>
-    status === "paused" || status === "failed" || status === "pending";
+/** Persisted tasks for the current project, newest activity first. */
+function TaskList({ tasks }: { tasks: TaskView[] }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       {tasks.length === 0 ? (
@@ -3452,19 +3405,7 @@ function TaskList({
             </div>
             <div className="mt-1 flex items-center justify-between text-[9px] uppercase tracking-wide text-neutral-700">
               <span>{task.currentStage}</span>
-              <div className="flex items-center gap-2">
-                <span>{shortDate(task.updatedAt)}</span>
-                {resumable(task.status) && (
-                  <button
-                    type="button"
-                    onClick={() => onResume(task)}
-                    className="rounded-sm bg-indigo-500/15 px-1.5 py-0.5 uppercase tracking-wide text-indigo-300 hover:bg-indigo-500/25"
-                    title="Continue this task from its last saved stage"
-                  >
-                    Resume
-                  </button>
-                )}
-              </div>
+              <span>{shortDate(task.updatedAt)}</span>
             </div>
           </div>
         ))
