@@ -214,6 +214,8 @@ function createRetrievalTool(retrieval: SemanticRetrievalIndex): Tool {
           endLine: slice.endLine,
           content: slice.content,
           tokenEstimate: Math.max(1, Math.ceil(slice.content.length / 4)),
+          reasons: slice.reasons,
+          extractor: retrieval.getFileMetadata(slice.path)?.extractor,
         })),
       };
     },

@@ -153,6 +153,9 @@ importers:
 
   packages/retrieval:
     dependencies:
+      "@agentic-runtime/core":
+        specifier: workspace:*
+        version: link:../core
       "@agentic-runtime/search":
         specifier: workspace:*
         version: link:../search

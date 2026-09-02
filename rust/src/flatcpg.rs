@@ -111,12 +111,9 @@ impl FlatCPG {
 }
 
 pub fn slice_ast(code: &str, ext: &str, symbols: &[String]) -> Vec<String> {
-    let language = match ext {
-        "ts" | "tsx" | "js" | "jsx" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        "py" => Some(tree_sitter_python::LANGUAGE.into()),
-        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
-        _ => None,
-    };
+    // Share one grammar table with the extractor, so a language added for
+    // retrieval is immediately available for structural slicing too.
+    let language = crate::extract::language_for(ext).map(|(language, _)| language);
 
     if let Some(lang) = language {
         let mut parser = Parser::new();
@@ -208,12 +205,7 @@ fn fallback_slice(code: &str, symbols: &[String]) -> Vec<String> {
 }
 
 pub fn prune_to_signatures(code: &str, ext: &str) -> String {
-    let language = match ext {
-        "ts" | "tsx" | "js" | "jsx" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        "py" => Some(tree_sitter_python::LANGUAGE.into()),
-        "rs" => Some(tree_sitter_rust::LANGUAGE.into()),
-        _ => None,
-    };
+    let language = crate::extract::language_for(ext).map(|(language, _)| language);
 
     if let Some(lang) = language {
         let mut parser = Parser::new();

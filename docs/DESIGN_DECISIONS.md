@@ -864,6 +864,132 @@ a command that ran before a compaction is not evidence a later step depends on.
 
 ---
 
+## 33. Three extraction tiers, not one parser for everything
+
+**Decision.** TypeScript and JavaScript are extracted in-process by the
+TypeScript compiler API. Python, Go, Rust, C, and C++ go to tree-sitter grammars
+in the Rust sidecar. Everything else keeps the regex fallback.
+
+**Why not one parser.** Tree-sitter could parse TS and JS too, and using it
+everywhere would be simpler. It would also be worse: the compiler API resolves
+bindings, so its reference edges point at the declaration a name actually refers
+to, where a syntax tree can only match text. Giving up real resolution on the
+languages where we have it, to gain uniformity, trades accuracy for tidiness.
+
+**Why not extend the regex extractor.** It could recognise more declaration
+shapes, and would still produce single-line anchors, no scoping, and no call
+graph — because a line-oriented matcher cannot know where a function ends or who
+is calling whom. The problem statement asks whether the index understands
+structure and execution flow; regex cannot answer yes at any level of effort.
+
+**What the middle tier buys.** Per-language visibility rules (Rust `pub`, Go's
+leading capital, C's `static`, Python's underscore), real multi-line spans, and
+a call graph attributed to the enclosing function rather than to the file.
+
+**Boundary.** The sidecar is an enhancement, not a prerequisite. A missing or
+failing binary degrades that tier to the regex fallback rather than failing the
+index, so a machine where the native build did not run still has a searchable
+project.
+
+---
+
+## 34. Relatedness is a graph property, not a hop count
+
+**Decision.** The project's symbol graph is held in `FlatCPG`'s flat arrays and
+queried with personalised PageRank seeded on the symbols a query matched. Results
+are added as candidates below a direct symbol match and above a bare text hit.
+
+**What it replaced.** A one-hop expansion over per-file edges. That finds a
+direct caller and stops, which is the wrong shape for the question retrieval is
+actually answering: a change to a handler breaks the driver three calls away, and
+one hop never sees it. Raising the hop count is not the fix either — two hops is
+as arbitrary as one, and each level multiplies the candidate set.
+
+PageRank makes distance continuous instead of discrete. A node four edges away
+on a dense path can outrank a node two edges away on a sparse one, which is what
+"related" actually means in a call graph.
+
+**Where the work is split.** Edges are resolved in SQLite and traversal happens
+in Rust. Only the database knows which of several same-named symbols an edge
+should attach to; only the flat arrays make a ten-iteration power method cheap.
+Putting resolution in the sidecar would have meant shipping it a symbol table it
+would then have to rebuild.
+
+**Boundary.** The seed symbols are excluded from the results — the caller already
+has them, and the value is what they reach. The reason string names the
+mechanism, so a file the user did not ask for arrives with an explanation.
+
+---
+
+## 35. The write-ahead log is the graph's on-disk format
+
+**Decision.** `Wal` stores each project's graph snapshot: bincode payload behind
+an 8-byte little-endian length. A fresh index adopts the persisted graph when its
+revision matches the database and rebuilds only when it does not.
+
+**Why this and not a table.** The graph is read whole and written whole, never
+queried by field, which is exactly the access pattern a memory map serves and
+SQLite does not. It also gave the WAL a real consumer: it existed, compiled, and
+had no caller, which is worse than not having it.
+
+**Why the length prefix.** The original WAL appended raw bytes and always started
+at offset zero, so a truncated write was indistinguishable from a complete one.
+Framing makes a short tail detectable at load, and the load path returns nothing
+rather than deserialising garbage.
+
+**Boundary.** The revision is a cheap aggregate — file count, newest index time,
+symbol count — so staleness is detected without rebuilding the graph to find out.
+
+---
+
+## 36. Two loop detectors, because they catch different loops
+
+**Decision.** The orchestrator keeps its per-step failure fingerprint, and the
+coding stage additionally records the workspace state in the Merkle `StateTree`
+after every mutating run.
+
+**Why one is not enough.** A fingerprint compares a step's _failure_ to its last
+failure. It cannot see a run that edits a file, reverts it, and edits it again:
+every step succeeds, and every step's output differs. What repeats is the
+workspace, not the error. Hashing the changed files with the action that produced
+them makes that visible, and the tree reports how many steps ago the state was
+last seen.
+
+**Boundary.** Only mutating stages are recorded. A read-only stage legitimately
+leaves the workspace unchanged every time, and recording it would report a cycle
+for doing its job correctly. A sidecar that is unavailable contributes no signal,
+because this is an additional safeguard rather than the only one.
+
+---
+
+## 37. Retrieval's reasoning reaches the dashboard, not just the log
+
+**Decision.** `ContextArtifact` carries the relevance reasons and the analyser
+tier alongside the slice, the pipeline's retrieval stage records its selection on
+its own trace span, and the dashboard renders context as a list of slices with
+their reasons rather than as JSON.
+
+**The gap this closed.** Three things were true at once and added up to an
+invisible feature. The reasons were computed and then dropped when building
+context artifacts, so the graph work that decided which files to include left no
+trace of having decided anything. The pipeline's retriever is a direct index call
+rather than a tool call, so it produced no artifacts at all - the stage that
+chooses most of the coder's context was the one stage missing from the view whose
+whole job is showing what was in context. And the context tab printed escaped
+source, which is not an answer to a question a person asks while debugging a bad
+result.
+
+**Why the span is updated mid-run.** A pipeline stage picks its context early and
+finishes much later. Waiting for `finishTraceSpan` would leave the panel empty
+for exactly the window in which someone is watching a live task, so
+`updateTraceSpanContext` writes it as soon as it is chosen.
+
+**Boundary.** A slice with no reasons still renders; the reason list is
+supplementary, and a fallback-tier file legitimately has little to say about why
+it matched.
+
+---
+
 ## Known gaps
 
 Stated plainly, because an unclaimed gap is cheaper than a claimed feature that
@@ -873,13 +999,13 @@ fails under questioning.
   is the only evidence behind the <=80B constraint. Models absent from it are
   flagged `unverified` rather than blocked, and that flag is not surfaced in the
   settings screen.
-- **Semantic retrieval outside JavaScript/TypeScript.** Python, Go, Rust, Java
-  and the rest use a per-line regex extractor: single-line symbol anchors,
-  import edges, no call graph. The Rust sidecar already carries tree-sitter
-  grammars for Python and Rust; routing those through it is the next step.
-- **Unintegrated Rust systems.** The sidecar's slicing, pruning, and diff RPCs
-  are wired up and shipped, but `FlatCPG`, the Merkle runtime, and the
-  memory-mapped WAL compile with no runtime caller.
+- **Semantic retrieval outside the seven parsed languages.** Java, Ruby, PHP,
+  C#, and the rest still use the per-line regex extractor.
+- **No type resolution outside TypeScript.** An edge naming a symbol declared in
+  several places attaches to all of them rather than to the right one, because
+  deciding without types would be a guess.
+- **The graph is a symbol graph.** No data-flow or control-flow analysis, so it
+  answers "what calls what", not "what value reaches where".
 - **Explorer parity.** No drag-and-drop, multi-select, or nested tree; the
   explorer shows one folder at a time.
 - **Cross-platform builds.** Only the Windows build has been produced.

@@ -104,10 +104,19 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
       previous wildcard glob was enumerating `node_modules` (21,653 paths here
       against 116 real ones) and could have tripped the index's 25,000-file
       ceiling on a normal project.
-- [~] Symbols, imports, exports, references, and calls are indexed for both
-  TypeScript and JavaScript through the compiler API; full CPG control/data-flow
-  analysis remains deferred, and non-JS/TS languages still use the regex
-  fallback.
+- [x] Semantic extraction for seven languages in three tiers: the TypeScript
+      compiler API for TS/TSX/JS/JSX (bindings resolved), tree-sitter in the
+      Rust sidecar for Python, Go, Rust, C, and C++ (multi-line spans,
+      per-language visibility rules, call graph attributed to the enclosing
+      function), and the regex fallback for everything else. A missing sidecar
+      degrades a tier rather than failing the index.
+- [x] Ranking follows the whole call graph, not one hop. `FlatCPG` holds the
+      project symbol graph and personalised PageRank seeds on the matched
+      symbols, so a function three calls from the match surfaces and a
+      disconnected file does not. Persisted between runs through the
+      memory-mapped WAL and keyed by canonical project id.
+- [~] Full CPG control/data-flow analysis remains deferred: the graph is a
+  symbol graph, and there is no type resolution outside TypeScript.
 - [x] Ranked line-scoped context selection.
 - [x] Broadening/narrowing recovery for poor retrieval.
 - [x] Retrieval and agent memory isolation between canonical project roots.
@@ -215,7 +224,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [~] The trace schema supports the complete hierarchy, but `AgentRunner` does not
   yet emit model/tool correlation IDs and complete request/response payloads.
 - [~] Safe progress and routing/recovery events are persisted.
-- [~] Context artifact contracts exist, but tool-message propagation is incomplete.
+- [x] Every trace node shows the files and slices that were in its context,
+      each with the reason it was selected (exact symbol match, call-graph
+      proximity, text hit) and the analyser tier that produced its symbols.
+      The pipeline retrieval stage records its selection on its own span while
+      the task is still running, so a live task is as inspectable as a
+      finished one.
 - [x] Tokens and wall-clock time are recorded for every node. Providers report
       usage per model call (Groq, OpenAI-compatible, and Ollama via
       `prompt_eval_count`/`eval_count`); those calls are summed onto their

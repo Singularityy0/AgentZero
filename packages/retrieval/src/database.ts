@@ -167,6 +167,106 @@ export class RetrievalDatabase {
     });
   }
 
+  /**
+   * Every indexed symbol, and every edge whose target names a known symbol.
+   *
+   * This is the whole project graph in one pass, which is what the Rust code
+   * property graph is built from. Edges are resolved here rather than in the
+   * sidecar because only SQLite knows which of several same-named symbols an
+   * edge should attach to.
+   */
+  /**
+   * The revision string a graph built from this index would carry.
+   *
+   * Cheap on purpose: two aggregates, no symbol scan. It exists so a caller can
+   * decide whether a persisted graph is still current without paying to rebuild
+   * the graph in order to find out.
+   */
+  graphRevisionStamp(): string {
+    const stamp = this.db
+      .prepare(
+        `SELECT COUNT(*) AS files, COALESCE(MAX(indexed_at), 0) AS newest
+         FROM retrieval_files WHERE project_id = ?`,
+      )
+      .get(this.project.id) as { files: number; newest: number };
+    const symbols = this.db
+      .prepare(
+        "SELECT COUNT(*) AS total FROM retrieval_symbols WHERE project_id = ?",
+      )
+      .get(this.project.id) as { total: number };
+    return `${stamp.files}:${stamp.newest}:${symbols.total}`;
+  }
+
+  graphSnapshot(): {
+    nodes: Array<{
+      symbol: string;
+      path: string;
+      start_line: number;
+      end_line: number;
+    }>;
+    edges: Array<{ head: number; tail: number; kind: string }>;
+    revision: string;
+  } {
+    const rows = this.db
+      .prepare(
+        `SELECT path, name, start_line, end_line FROM retrieval_symbols
+         WHERE project_id = ? ORDER BY path, start_line, name`,
+      )
+      .all(this.project.id) as unknown as Array<{
+      path: string;
+      name: string;
+      start_line: number;
+      end_line: number;
+    }>;
+    const nodes = rows.map((row) => ({
+      symbol: row.name,
+      path: row.path,
+      start_line: row.start_line,
+      end_line: row.end_line,
+    }));
+    // A symbol name can be declared in several places; an edge points at all of
+    // them, because deciding which one without type resolution would be a guess.
+    const byName = new Map<string, number[]>();
+    const byPath = new Map<string, number[]>();
+    nodes.forEach((node, index) => {
+      const name = node.symbol.toLowerCase();
+      byName.set(name, [...(byName.get(name) ?? []), index]);
+      byPath.set(node.path, [...(byPath.get(node.path) ?? []), index]);
+    });
+
+    const edgeRows = this.db
+      .prepare(
+        `SELECT source_path, source_symbol, target_name, kind FROM retrieval_edges
+         WHERE project_id = ? AND kind IN ('call', 'import', 'reference')`,
+      )
+      .all(this.project.id) as unknown as Array<{
+      source_path: string;
+      source_symbol: string | null;
+      target_name: string;
+      kind: string;
+    }>;
+
+    const edges: Array<{ head: number; tail: number; kind: string }> = [];
+    const seen = new Set<string>();
+    for (const row of edgeRows) {
+      const heads = row.source_symbol
+        ? (byName.get(row.source_symbol.toLowerCase()) ?? [])
+        : (byPath.get(row.source_path) ?? []);
+      const tails = byName.get(row.target_name.toLowerCase()) ?? [];
+      for (const head of heads) {
+        for (const tail of tails) {
+          if (head === tail) continue;
+          const key = `${head}:${tail}:${row.kind}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          edges.push({ head, tail, kind: row.kind });
+        }
+      }
+    }
+
+    return { nodes, edges, revision: this.graphRevisionStamp() };
+  }
+
   deleteAbsent(seenPaths: Set<string>): number {
     const stale = [...this.files().keys()].filter(
       (path) => !seenPaths.has(path),

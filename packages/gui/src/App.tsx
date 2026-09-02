@@ -4119,6 +4119,96 @@ function TraceIcon({ kind }: { kind: string }) {
   return <Activity size={13} className="shrink-0 text-neutral-500" />;
 }
 
+/** A context slice as the runtime records it on a trace span. */
+interface ContextArtifactView {
+  source?: string;
+  path?: string;
+  startLine?: number;
+  endLine?: number;
+  content?: string;
+  tokenEstimate?: number;
+  reasons?: string[];
+  extractor?: string;
+}
+
+function isArtifactList(value: unknown): value is ContextArtifactView[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (item) => typeof item === "object" && item !== null && "content" in item,
+    )
+  );
+}
+
+/**
+ * The files and slices an agent had, and why each one is there.
+ *
+ * Rendered rather than dumped as JSON: "which code was in this agent's context"
+ * is a question a person asks while debugging a bad answer, and a wall of
+ * escaped source is not an answer.
+ */
+function ContextArtifacts({ items }: { items: ContextArtifactView[] }) {
+  const [openPath, setOpenPath] = useState<string>();
+  const total = items.reduce((sum, item) => sum + (item.tokenEstimate ?? 0), 0);
+  return (
+    <div className="min-h-0 flex-1 overflow-auto p-3">
+      <p className="mb-2 text-[10px] uppercase tracking-wide text-neutral-600">
+        {items.length} slice{items.length === 1 ? "" : "s"} · ~{total} tokens
+      </p>
+      {items.map((item, index) => {
+        const label = item.path
+          ? item.startLine
+            ? `${item.path}:${item.startLine}-${item.endLine ?? item.startLine}`
+            : item.path
+          : (item.source ?? "context");
+        const key = `${label}:${index}`;
+        const open = openPath === key;
+        return (
+          <div key={key} className="mb-1.5 border border-white/5 bg-black/20">
+            <button
+              type="button"
+              onClick={() => setOpenPath(open ? undefined : key)}
+              className="flex w-full items-center gap-2 px-2 py-1.5 text-left"
+            >
+              <FileCode2 size={12} className="shrink-0 text-indigo-400/80" />
+              <span className="truncate font-mono text-[10px] text-neutral-300">
+                {label}
+              </span>
+              <span className="ml-auto shrink-0 text-[9px] uppercase tracking-wide text-neutral-600">
+                {item.extractor ?? item.source}
+              </span>
+            </button>
+            {(item.reasons ?? []).length > 0 && (
+              <div className="flex flex-wrap gap-1 px-2 pb-1.5">
+                {(item.reasons ?? []).map((reason) => (
+                  <span
+                    key={reason}
+                    className={`rounded-sm px-1.5 py-0.5 text-[9px] ${
+                      /call-graph/.test(reason)
+                        ? "bg-violet-500/15 text-violet-300"
+                        : /exact|symbol/.test(reason)
+                          ? "bg-indigo-500/15 text-indigo-300"
+                          : "bg-white/5 text-neutral-500"
+                    }`}
+                  >
+                    {reason}
+                  </span>
+                ))}
+              </div>
+            )}
+            {open && (
+              <pre className="max-h-64 overflow-auto border-t border-white/5 px-2 py-1.5 font-mono text-[10px] leading-4 text-neutral-500">
+                {item.content}
+              </pre>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function TraceDetails({ span }: { span?: TraceSpan }) {
   const [tab, setTab] = useState<"input" | "output" | "context" | "metadata">(
     "input",
@@ -4172,11 +4262,15 @@ function TraceDetails({ span }: { span?: TraceSpan }) {
           </button>
         ))}
       </div>
-      <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[10px] leading-5 text-neutral-500">
-        {value === undefined
-          ? "No data was recorded for this field."
-          : JSON.stringify(value, null, 2)}
-      </pre>
+      {tab === "context" && isArtifactList(value) ? (
+        <ContextArtifacts items={value} />
+      ) : (
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[10px] leading-5 text-neutral-500">
+          {value === undefined
+            ? "No data was recorded for this field."
+            : JSON.stringify(value, null, 2)}
+        </pre>
+      )}
     </div>
   );
 }

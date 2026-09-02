@@ -6,6 +6,7 @@ import {
   MultiAgentOrchestrator,
   TaskOrchestrator,
   ToolRegistry,
+  rustClient,
   type AgentDefinition,
   type AgentWorkRequest,
   type AgentWorkResult,
@@ -1213,6 +1214,24 @@ export class HeadlessRuntimeService {
         for (const file of result.changedFiles ?? []) {
           if (file.path) producedFiles.add(file.path);
         }
+        // Workspace-level loop detection, complementary to the per-step failure
+        // fingerprint. A run that edits a file, reverts it, and edits it again
+        // succeeds at every individual step and produces different output each
+        // time, so a fingerprint never fires - but the workspace has returned
+        // to a state it already occupied, which is the definition of no
+        // progress. The Merkle state tree in the sidecar is what notices.
+        const cycleDepth = await this.detectWorkspaceCycle(result, agentId);
+        if (cycleDepth !== undefined) {
+          return {
+            success: false,
+            retryable: false,
+            summary:
+              `The workspace returned to a state it was already in ${cycleDepth} step(s) ago, ` +
+              "so the run is undoing and redoing the same change instead of progressing. " +
+              "Stopped before it could loop.",
+            progressKey: `workspace-cycle:${cycleDepth}`,
+          };
+        }
         const commandSucceeded = (result.messages ?? []).some(
           (message) =>
             message.role === "tool" &&
@@ -1365,6 +1384,11 @@ export class HeadlessRuntimeService {
         // the lowest-ranked slices costs the least: they are the ones retrieval
         // was least confident about.
         const payload = boundedRetrievalPayload(retrieval);
+        // The pipeline's retriever is a direct index call, not a tool call, so
+        // nothing was recording what it put into context. The dashboard's
+        // per-node context view is fed by artifacts, which meant the stage that
+        // chooses most of the coder's context was the one stage invisible in it.
+        this.recordRetrievalContext(task.id, retrieval);
         return {
           success: true,
           summary: payload,
@@ -1489,6 +1513,65 @@ export class HeadlessRuntimeService {
         { role: "assistant", content: text },
       ],
     };
+  }
+
+  /**
+   * Attach the slices a retrieval stage selected to its trace span.
+   *
+   * Records the reason each slice was chosen and which analyser produced its
+   * symbols, so the dashboard can answer why a file is in context rather than
+   * only that it is.
+   */
+  private recordRetrievalContext(
+    taskId: string,
+    retrieval: RetrievalQueryResult,
+  ): void {
+    const trace = this.executionContext.getStore();
+    if (!trace) return;
+    const spanId = this.lastActiveStepSpan(taskId);
+    if (!spanId) return;
+    this.store.updateTraceSpanContext(
+      trace.traceId,
+      spanId,
+      retrieval.results.map((slice) => ({
+        source: "retrieval" as const,
+        path: slice.path,
+        startLine: slice.startLine,
+        endLine: slice.endLine,
+        content: slice.content,
+        tokenEstimate: Math.max(1, Math.ceil(slice.content.length / 4)),
+        reasons: slice.reasons,
+        extractor: this.retrieval?.getFileMetadata(slice.path)?.extractor,
+      })),
+    );
+  }
+
+  /**
+   * Ask the sidecar whether this agent left the workspace in a state it has
+   * already been in during this task.
+   *
+   * Only mutating runs are recorded: a read-only stage legitimately leaves the
+   * workspace unchanged every time, and recording it would report a cycle for
+   * doing its job correctly. A sidecar that is unavailable simply contributes
+   * no signal, because this is an additional safeguard rather than the only one.
+   */
+  private async detectWorkspaceCycle(
+    result: MultiAgentResult,
+    agentId: string,
+  ): Promise<number | undefined> {
+    if (agentId !== CODING_AGENT_ID) return undefined;
+    const changed = result.changedFiles ?? [];
+    if (changed.length === 0) return undefined;
+    try {
+      rustClient.start();
+      const depth = await rustClient.checkWorkspaceCycle(
+        changed.map((file) => `${file.path}:${file.hash ?? ""}`),
+        agentId,
+      );
+      return typeof depth === "number" ? depth : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private async recoverVerifierFailure(
@@ -2561,8 +2644,11 @@ const mutateArtifactPattern = new RegExp(
   "iu",
 );
 
+// `@path` is the IDE's file-mention syntax. Treat it exactly like a bare path
+// for routing purposes; otherwise a question such as "what is @cp.rs doing"
+// is mistaken for general conversation and loses all workspace context.
 const explicitPathPattern =
-  /(?:^|\s)(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?:\s|$|[:;,])/u;
+  /(?:^|\s)@?(?:\.\.?[/\\]|[A-Za-z]:[/\\]|[\w.-]+\.[A-Za-z0-9]{1,8})(?=\s|$|[:;,])/u;
 
 const existingWorkPattern =
   /\b(?:existing|current|opened|this)\s+(?:file|page|document|component|website|webpage|app|application|project|workspace|repo|repository|codebase)\b/iu;

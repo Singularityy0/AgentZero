@@ -73,9 +73,19 @@ export {
   type MultiAgentOptions,
   type MultiAgentResult,
 } from "./agents.js";
-export { RustClient } from "./rust-bridge.js";
 export {
   analyzeCodeStructureTool,
   computeAstDiffTool,
+  rustClient,
   stopRustEngine,
 } from "./rust-tools.js";
+export {
+  RustClient,
+  type CpgEdge,
+  type CpgNode,
+  type DiffChunk,
+  type ExtractedEdge,
+  type ExtractedFile,
+  type ExtractedSymbol,
+  type RankedGraphNode,
+} from "./rust-bridge.js";

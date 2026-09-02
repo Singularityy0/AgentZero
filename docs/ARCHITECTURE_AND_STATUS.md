@@ -668,6 +668,25 @@ The retrieval database contains:
 - Symbols and line spans
 - Definition, reference, call, import, and export edges
 
+Extraction runs in three tiers, strongest first.
+
+| Tier           | Languages                  | Produces                                           |
+| -------------- | -------------------------- | -------------------------------------------------- |
+| `typescript`   | TS, TSX, JS, JSX, MJS, CJS | Bindings-resolved symbols, imports, exports, calls |
+| `tree-sitter`  | Python, Go, Rust, C, C++   | Parsed symbols, multi-line spans, attributed calls |
+| `ripgrep-text` | everything else            | Regex declaration and import lines                 |
+
+The middle tier runs in the Rust sidecar. It gives each language its own
+visibility rule — Rust `pub`, Go's leading capital, C's `static`, Python's
+underscore — real multi-line spans instead of single-line anchors, and a call
+graph attributed to the enclosing function rather than to the file. TypeScript
+and JavaScript deliberately stay in-process: the compiler API resolves bindings,
+so its reference edges are real rather than name matches, and there is no IPC.
+
+A sidecar that is missing or fails degrades that tier to the regex fallback
+rather than failing the index, so a machine where the native binary did not
+build still has a searchable project.
+
 For TypeScript **and JavaScript** files, extraction uses the TypeScript compiler
 API. The same parser handles both, so `.js`, `.jsx`, `.mjs`, and `.cjs` sources
 get real structure instead of the regex fallback; `ScriptKind.JSX` is used for
@@ -750,15 +769,16 @@ empty.
 - There is no full control-flow or data-flow graph.
 - There is no LSP diagnostic integration.
 - Failing-test locations are not explicit ranking signals.
-- Semantics beyond TypeScript and JavaScript are limited to regex metadata and
-  text search, so those languages have single-line symbol anchors and no call
-  edges.
-- Graph expansion is one hop.
+- Languages outside TS/JS/Python/Go/Rust/C/C++ still use the regex fallback.
+- No type resolution outside TypeScript, so an edge that names a symbol declared
+  in several places attaches to all of them rather than to the right one.
+- No data-flow or control-flow analysis; the graph is a symbol graph.
 - There is no background file watcher.
 - Queries re-run an incremental project scan by default; the scan is now
   stat-gated, so this is cheap, but it is still demand-driven rather than
   event-driven.
-- The Rust FlatCPG and PageRank code are not connected to this index.
+- Graph ranking depends on the sidecar; without it, retrieval falls back to
+  symbol, edge, path, and text matching plus the one-hop expansion.
 
 ## Context compaction
 
@@ -1220,18 +1240,51 @@ Tree-sitter support currently covers TypeScript/JavaScript, Python, and Rust.
 Other languages use a lightweight declaration and indentation fallback for
 slicing.
 
+### Code property graph
+
+`FlatCPG` holds the project's whole symbol graph in flat arrays, built from the
+SQLite index and queried with personalised PageRank. Edges are resolved on the
+TypeScript side, because only SQLite knows which of several same-named symbols
+an edge should attach to; the sidecar owns the traversal.
+
+This is what lets ranking follow a chain. The per-file expansion reaches a direct
+caller and stops; PageRank from the matched symbols reaches the function three
+calls away that a change actually breaks, and leaves a disconnected file out. The
+reason string on each slice names the mechanism, so a user can tell why a file
+they did not ask for is in their context.
+
+One graph per project, keyed by the canonical project id, so two open codebases
+cannot see each other's structure.
+
+### Write-ahead log
+
+`Wal` is the graph's on-disk format. A snapshot is bincode-encoded and appended
+as an 8-byte little-endian length followed by the payload, so a truncated tail is
+detectable on load rather than parsed as garbage. Each graph carries the index
+revision it was built from; a fresh index adopts the persisted graph when the
+revision still matches its database and rebuilds only when it does not.
+
+### Merkle state tree
+
+`StateTree` is workspace-level loop detection, complementary to the per-step
+failure fingerprint. A run that edits a file, reverts it, and edits it again
+succeeds at every step and produces different output each time, so a fingerprint
+never fires — but the workspace has returned to a state it already occupied.
+`check_cycle` hashes the changed files together with the action that produced
+them and reports how many steps ago the same state was seen; the coding stage
+stops as non-retryable when it repeats.
+
+Only mutating stages are recorded. A read-only stage legitimately leaves the
+workspace unchanged every time, and recording it would report a cycle for doing
+its job correctly.
+
 ### Rust code that is not integrated
 
-- `FlatCPG` exists but is not populated from the workspace.
-- `FlatCPG.compute_ppr_slice()` is not called by retrieval.
-- The RPC slicer walks syntax trees directly.
 - The diff engine is line-based LCS, not an AST edit-distance engine.
 - There is no three-way AST merge.
-- TypeScript HITL approval does not use Rust diff chunks.
-- Runtime orchestration does not call `check_cycle`.
-- The cycle request does not represent a complete workspace Merkle tree.
-- The memory-mapped Rust `Wal` is not instantiated by the server or runtime.
-- The Rust WAL starts at offset zero and does not support durable replay.
+- TypeScript HITL approval does not use Rust diff chunks; the `diff` library
+  remains authoritative for approval hunks, and the Rust engine backs the
+  `compute_ast_diff` tool the coder calls.
 
 The current sidecar is useful for syntax slicing, signature pruning, and an
 advisory line diff. The larger Rust systems design remains planned.

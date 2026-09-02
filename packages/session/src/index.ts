@@ -614,6 +614,26 @@ export class SessionStore {
     return result;
   }
 
+  /**
+   * Attach context to a span that is still running.
+   *
+   * `finishTraceSpan` can carry context, but a pipeline stage selects its
+   * context partway through and finishes much later; waiting would leave the
+   * dashboard blank for exactly the window a user is watching a live task.
+   */
+  updateTraceSpanContext<TContext = unknown>(
+    traceId: string,
+    spanId: string,
+    context: TContext,
+  ): void {
+    this.projectDb
+      .prepare(
+        `UPDATE trace_spans SET context_json = ?
+         WHERE project_id = ? AND trace_id = ? AND span_id = ?`,
+      )
+      .run(serializeJson(context), this.project.id, traceId, spanId);
+  }
+
   finishTraceSpan<TOutput = unknown, TContext = unknown, TUsage = unknown>(
     traceId: string,
     spanId: string,

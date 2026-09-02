@@ -8,6 +8,7 @@ import {
   createProjectIdentity,
 } from "../packages/retrieval/dist/index.js";
 import { findFiles } from "../packages/search/dist/index.js";
+import { stopRustEngine } from "../packages/core/dist/index.js";
 
 const mainSource = `import { helper as importedHelper } from "./helper.js";
 
@@ -372,5 +373,215 @@ test("file discovery honours ignore rules instead of walking dependencies", asyn
     }
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Python, Go, Rust, C, and C++ are parsed, not regex-matched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "retrieval-polyglot-"));
+  try {
+    await mkdir(join(root, "src"), { recursive: true });
+    const files: Record<string, string> = {
+      "src/service.py": [
+        "import os",
+        "",
+        "def load_config(path):",
+        "    return os.path.join(path, 'cfg')",
+        "",
+        "class Service:",
+        "    def start(self):",
+        "        return load_config('/etc')",
+        "",
+      ].join("\n"),
+      "src/server.go": [
+        "package main",
+        "",
+        'import "fmt"',
+        "",
+        "type Server struct {",
+        "\tAddr string",
+        "}",
+        "",
+        "func Serve(s *Server) {",
+        "\tfmt.Println(s.Addr)",
+        "}",
+        "",
+        "func boot() {",
+        "\tServe(nil)",
+        "}",
+        "",
+      ].join("\n"),
+      "src/engine.rs": [
+        "pub struct Engine { size: usize }",
+        "",
+        "impl Engine {",
+        "    pub fn start(&self) -> usize { self.compute() }",
+        "    fn compute(&self) -> usize { self.size }",
+        "}",
+        "",
+      ].join("\n"),
+      "src/util.c": [
+        "#include <stdio.h>",
+        "",
+        "static int helper(int x) { return x + 1; }",
+        "",
+        "int Run(int x) { return helper(x); }",
+        "",
+      ].join("\n"),
+      "src/app.cpp": [
+        "namespace app {",
+        "class Engine {",
+        "public:",
+        "  int Start();",
+        "};",
+        "int Engine::Start() { return 1; }",
+        "}",
+        "",
+      ].join("\n"),
+    };
+    for (const [path, content] of Object.entries(files)) {
+      await writeFile(join(root, path), content, "utf8");
+    }
+
+    const index = new SemanticRetrievalIndex({
+      root,
+      databasePath: join(root, ".data", "retrieval.db"),
+    });
+    try {
+      await index.indexProject();
+
+      // Every one of these used to be a per-line regex producing single-line
+      // anchors and no call graph.
+      for (const path of Object.keys(files)) {
+        assert.equal(
+          index.getFileMetadata(path)?.extractor,
+          "tree-sitter",
+          `${path} should be parsed`,
+        );
+      }
+
+      // Real spans, not one-line anchors.
+      const server = index
+        .getFileMetadata("src/server.go")
+        ?.symbols.find((symbol) => symbol.name === "Server");
+      assert.ok(server && server.endLine > server.startLine);
+
+      // Per-language visibility rules, not a shared guess.
+      const go = index.getFileMetadata("src/server.go")?.symbols ?? [];
+      assert.equal(go.find((s) => s.name === "Serve")?.exported, true);
+      assert.equal(go.find((s) => s.name === "boot")?.exported, false);
+      const rust = index.getFileMetadata("src/engine.rs")?.symbols ?? [];
+      assert.equal(rust.find((s) => s.name === "start")?.exported, true);
+
+      // A call graph attributed to the enclosing function, in every language.
+      const callEdge = (path: string, from: string, to: string): boolean =>
+        (index.getFileMetadata(path)?.edges ?? []).some(
+          (edge) =>
+            edge.kind === "call" &&
+            edge.sourceSymbol === from &&
+            edge.targetName === to,
+        );
+      assert.ok(callEdge("src/service.py", "start", "load_config"));
+      assert.ok(callEdge("src/server.go", "boot", "Serve"));
+      assert.ok(callEdge("src/engine.rs", "start", "compute"));
+      assert.ok(callEdge("src/util.c", "Run", "helper"));
+
+      // And the index ranks across languages from one query.
+      const found = await index.query({ query: "Engine", refresh: false });
+      const paths = new Set(found.results.map((slice) => slice.path));
+      assert.ok(paths.has("src/engine.rs"));
+      assert.ok(paths.has("src/app.cpp"));
+    } finally {
+      index.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("the code graph reaches past one hop and persists across a restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "retrieval-cpg-"));
+  try {
+    await mkdir(join(root, "src"), { recursive: true });
+    // A four-deep call chain across four files, plus one disconnected file.
+    // Only `handleRequest` is named by the query; the rest are reachable only
+    // by following calls, and `unrelatedThing` is reachable not at all.
+    const chain: Array<[string, string]> = [
+      [
+        "src/a.go",
+        "package main\n\nfunc handleRequest() {\n\tserviceLayer()\n}\n",
+      ],
+      [
+        "src/b.go",
+        "package main\n\nfunc serviceLayer() {\n\trepositoryFetch()\n}\n",
+      ],
+      [
+        "src/c.go",
+        "package main\n\nfunc repositoryFetch() {\n\tdriverExecute()\n}\n",
+      ],
+      [
+        "src/d.go",
+        "package main\n\nfunc driverExecute() int {\n\treturn 7\n}\n",
+      ],
+      [
+        "src/z.go",
+        "package main\n\nfunc unrelatedThing() int {\n\treturn 0\n}\n",
+      ],
+    ];
+    for (const [path, content] of chain) {
+      await writeFile(join(root, path), content, "utf8");
+    }
+
+    const databasePath = join(root, ".data", "retrieval.db");
+    const first = new SemanticRetrievalIndex({ root, databasePath });
+    try {
+      await first.indexProject();
+      const found = await first.query({
+        query: "handleRequest",
+        refresh: false,
+        limit: 20,
+      });
+      const paths = new Set(found.results.map((slice) => slice.path));
+
+      assert.ok(paths.has("src/a.go"), "the direct match");
+      assert.ok(paths.has("src/b.go"), "one hop");
+      assert.ok(
+        paths.has("src/d.go"),
+        "three hops, which the per-file one-hop expansion cannot reach",
+      );
+      assert.ok(
+        !paths.has("src/z.go"),
+        "a disconnected file must not be pulled in",
+      );
+
+      // The reason names the mechanism, so a user can tell why a file they did
+      // not ask for is in their context.
+      assert.ok(
+        found.results.some((slice) =>
+          slice.reasons.some((reason) => /call-graph proximity/.test(reason)),
+        ),
+      );
+    } finally {
+      first.close();
+    }
+
+    // A new index over the same database uses the graph the sidecar persisted
+    // through its write-ahead log, without rebuilding it.
+    const second = new SemanticRetrievalIndex({ root, databasePath });
+    try {
+      const reopened = await second.query({
+        query: "handleRequest",
+        refresh: false,
+        limit: 20,
+      });
+      assert.ok(
+        reopened.results.some((slice) => slice.path === "src/d.go"),
+        "the persisted graph should still reach three hops",
+      );
+    } finally {
+      second.close();
+    }
+  } finally {
+    stopRustEngine();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
   }
 });

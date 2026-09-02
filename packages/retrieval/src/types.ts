@@ -1,4 +1,12 @@
-export type RetrievalExtractor = "typescript" | "ripgrep-text";
+/**
+ * Which analyser produced a file's symbols and edges.
+ *
+ * `typescript` is the in-process compiler API, used for TS and JS because it
+ * resolves bindings and so produces better reference edges than a syntax tree.
+ * `tree-sitter` is the Rust sidecar, used for Python, Go, Rust, C, and C++.
+ * `ripgrep-text` is the regex fallback that remains for everything else.
+ */
+export type RetrievalExtractor = "typescript" | "tree-sitter" | "ripgrep-text";
 
 export type RetrievalEdgeKind =
   "definition" | "reference" | "call" | "import" | "export";

@@ -16,6 +16,7 @@
     }
   },
   "dependencies": {
+    "@agentic-runtime/core": "workspace:*",
     "@agentic-runtime/search": "workspace:*",
     "@agentic-runtime/workspace": "workspace:*",
     "typescript": "^5.7.2"

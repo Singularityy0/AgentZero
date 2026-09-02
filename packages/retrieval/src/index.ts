@@ -1,11 +1,17 @@
 import { stat } from "node:fs/promises";
-import { extname, join, posix, resolve } from "node:path";
+import { dirname, extname, join, posix, resolve } from "node:path";
 import { findFiles, searchText } from "@agentic-runtime/search";
 import { WorkspaceFileService } from "@agentic-runtime/workspace";
 import { RetrievalDatabase, type StoredEdge } from "./database.js";
+import {
+  rustClient,
+  type CpgEdge,
+  type RankedGraphNode,
+} from "@agentic-runtime/core";
 import { extractTextMetadata, extractTypeScript } from "./extract.js";
 import { createProjectIdentity, sameCanonicalRoot } from "./project.js";
 import type {
+  ExtractedFile,
   IndexedFileMetadata,
   ProjectIdentity,
   RetrievalIndexOptions,
@@ -15,6 +21,7 @@ import type {
   RetrievalRecovery,
   RetrievalSearch,
   RetrievalSlice,
+  RetrievalExtractor,
   RetrievalWorkspace,
 } from "./types.js";
 
@@ -47,6 +54,8 @@ export class SemanticRetrievalIndex {
   private readonly search: RetrievalSearch;
   private readonly maxFileBytes: number;
   private readonly maxFiles: number;
+  /** Revision of the code graph currently held by the sidecar. */
+  private graphRevision?: string;
 
   constructor(options: RetrievalIndexOptions) {
     this.project = createProjectIdentity(options.root);
@@ -147,16 +156,16 @@ export class SemanticRetrievalIndex {
           continue;
         }
         const language = languageForPath(path);
-        const compilerParsed = isCompilerParsed(path);
-        const extracted = compilerParsed
-          ? extractTypeScript(path, file.content)
-          : extractTextMetadata(file.content);
+        const { extracted, extractor } = await this.extractFile(
+          path,
+          file.content,
+        );
         this.database.replaceFile(
           {
             path,
             hash: file.hash,
             language,
-            extractor: compilerParsed ? "typescript" : "ripgrep-text",
+            extractor,
             size: details.size,
             line_count: lineCount(file.content),
             modified_at: modifiedAt,
@@ -173,6 +182,7 @@ export class SemanticRetrievalIndex {
 
     const deleted = this.database.deleteAbsent(seen);
     this.resolveModuleEdges();
+    await this.refreshCodeGraph(indexed > 0 || deleted > 0);
     return {
       projectId: this.project.id,
       databasePath: this.databasePath,
@@ -183,6 +193,126 @@ export class SemanticRetrievalIndex {
       ignored,
       errors,
       durationMs: Date.now() - startedAt,
+    };
+  }
+
+  /**
+   * Rebuild the Rust code property graph when the index has actually moved.
+   *
+   * The graph is what lets ranking follow a chain of calls rather than a single
+   * hop, and it is persisted by the sidecar so a restart does not pay to build
+   * it again. Rebuilding is skipped when nothing was indexed or deleted, since
+   * the graph would be identical.
+   */
+  private async refreshCodeGraph(changed: boolean): Promise<void> {
+    if (!changed && this.graphRevision) return;
+    try {
+      const snapshot = this.database.graphSnapshot();
+      if (snapshot.revision === this.graphRevision) return;
+      if (snapshot.nodes.length === 0) return;
+      rustClient.start();
+      await rustClient.putCodeGraph({
+        projectId: this.project.id,
+        dir: dirname(this.databasePath),
+        revision: snapshot.revision,
+        nodes: snapshot.nodes,
+        edges: snapshot.edges as CpgEdge[],
+      });
+      this.graphRevision = snapshot.revision;
+    } catch {
+      // Graph ranking is an enhancement over the symbol index, not a
+      // prerequisite for it. A machine without the native binary still gets
+      // symbol, edge, path, and text matches.
+      this.graphRevision = undefined;
+    }
+  }
+
+  /**
+   * Symbols the code graph says are closest to the ones the query matched.
+   *
+   * Direct matches answer "where is this named"; the graph answers "what else
+   * does this reach". A one-hop expansion finds a caller, but the function two
+   * calls away is often the one a change actually breaks.
+   */
+  private async graphNeighbours(
+    seeds: string[],
+    limit: number,
+  ): Promise<RankedGraphNode[]> {
+    if (seeds.length === 0) return [];
+    try {
+      rustClient.start();
+      // A fresh index over an existing database has no graph in memory, but the
+      // sidecar may still hold one from a previous run. Adopt it when its
+      // revision matches this index, and rebuild only when it does not - that
+      // is what makes the write-ahead log worth having.
+      if (!this.graphRevision) {
+        const expected = this.database.graphRevisionStamp();
+        const persisted = await rustClient.codeGraphRevision({
+          projectId: this.project.id,
+          dir: dirname(this.databasePath),
+        });
+        if (persisted === expected) {
+          this.graphRevision = persisted;
+        } else {
+          await this.refreshCodeGraph(true);
+        }
+        if (!this.graphRevision) return [];
+      }
+      return await rustClient.rankByCodeGraph({
+        projectId: this.project.id,
+        dir: dirname(this.databasePath),
+        seeds,
+        limit,
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Analyse one file with the strongest analyser available for its language.
+   *
+   * Three tiers, best first. TypeScript and JavaScript go through the compiler
+   * API in-process: it resolves bindings, so its reference edges are real rather
+   * than name matches. Python, Go, Rust, C, and C++ go to the Rust sidecar's
+   * tree-sitter grammars, which give multi-line spans, per-language visibility
+   * rules, and a call graph attributed to the enclosing function. Everything
+   * else keeps the regex fallback.
+   *
+   * A sidecar failure degrades to the regex tier rather than failing the index:
+   * a project should still be searchable on a machine where the native binary
+   * did not build.
+   */
+  private async extractFile(
+    path: string,
+    content: string,
+  ): Promise<{ extracted: ExtractedFile; extractor: RetrievalExtractor }> {
+    if (isCompilerParsed(path)) {
+      return {
+        extracted: extractTypeScript(path, content),
+        extractor: "typescript",
+      };
+    }
+    const extension = extname(path).slice(1).toLowerCase();
+    if (extension && SIDECAR_PARSED_EXTENSIONS.has(extension)) {
+      try {
+        rustClient.start();
+        const parsed = await rustClient.extractSymbols(content, extension);
+        // A null language means no grammar matched, which is not the same as a
+        // file that genuinely has no symbols.
+        if (parsed.language) {
+          return {
+            extracted: { symbols: parsed.symbols, edges: parsed.edges },
+            extractor: "tree-sitter",
+          };
+        }
+      } catch {
+        // Fall through to the regex tier below.
+      }
+    }
+    return {
+      extracted: extractTextMetadata(content),
+      extractor: "ripgrep-text",
     };
   }
 
@@ -248,11 +378,32 @@ export class SemanticRetrievalIndex {
       };
     }
 
-    const directPaths = [...candidates.values()]
-      .sort(compareCandidates)
-      .slice(0, 12)
-      .map((candidate) => candidate.path);
+    const direct = [...candidates.values()].sort(compareCandidates);
+    const directPaths = direct.slice(0, 12).map((candidate) => candidate.path);
     this.addGraphNeighbors(candidates, directPaths, maxCandidates);
+
+    // Then widen by structure. The one-hop expansion above follows edges stored
+    // per file; this follows the whole call graph from the matched symbols, so a
+    // function three calls away from the match still surfaces.
+    const seeds = [
+      ...new Set(direct.slice(0, 12).flatMap((item) => [...item.symbols])),
+    ].slice(0, 24);
+    for (const neighbour of await this.graphNeighbours(seeds, 24)) {
+      addCandidate(candidates, {
+        path: neighbour.path,
+        language: this.database.file(neighbour.path)?.language ?? "text",
+        startLine: neighbour.startLine,
+        endLine: neighbour.endLine,
+        // Below a direct symbol match and above a bare text hit: the graph says
+        // this is related, but the query never named it.
+        score: 64,
+        modifiedAt: this.database.file(neighbour.path)?.modified_at ?? 0,
+        reasons: new Set([
+          `call-graph proximity to ${seeds.slice(0, 3).join(", ")}: ${neighbour.symbol}`,
+        ]),
+        symbols: new Set([neighbour.symbol]),
+      });
+    }
     let ranked = mergeOverlapping(
       [...candidates.values()].sort(compareCandidates),
     );
@@ -663,6 +814,27 @@ function shouldIgnore(path: string): boolean {
  * included deliberately: the same parser yields real symbols and edges for
  * `.js`/`.jsx` sources, and the text fallback below is strictly worse.
  */
+/**
+ * Extensions the Rust sidecar has a tree-sitter grammar for.
+ *
+ * TypeScript and JavaScript are excluded on purpose even though grammars exist:
+ * the compiler API already handles them better, in-process, with no IPC.
+ */
+const SIDECAR_PARSED_EXTENSIONS: ReadonlySet<string> = new Set([
+  "py",
+  "pyi",
+  "go",
+  "rs",
+  "c",
+  "h",
+  "cc",
+  "cpp",
+  "cxx",
+  "hpp",
+  "hh",
+  "hxx",
+]);
+
 const COMPILER_PARSED_EXTENSIONS: readonly string[] = [
   ".ts",
   ".tsx",

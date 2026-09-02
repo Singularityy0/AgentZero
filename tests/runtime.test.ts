@@ -12,6 +12,7 @@ import {
   ToolRegistry,
   analyzeCodeStructureTool,
   computeAstDiffTool,
+  stopRustEngine as stopRustEngineForTests,
   type AgentEvent,
   type LanguageModel,
   type ModelRequest,
@@ -3882,6 +3883,11 @@ test("a question about the opened project is answered with tools, not from memor
       await ask("explain how this project handles retries"),
       DEFAULT_AGENT_ID,
     );
+    assert.equal(
+      await ask("what is @cp.rs doing"),
+      DEFAULT_AGENT_ID,
+      "an @file mention must route to the read-capable workspace agent",
+    );
 
     // A read-only verification request still skips planning and coding.
     assert.equal(await ask("run the test suite"), VERIFIER_AGENT_ID);
@@ -4818,4 +4824,128 @@ test("a mutation survives a compaction that happens after it", async () => {
   // after having successfully edited the file.
   assert.equal(result.mutationCount, 1);
   assert.deepEqual(result.changedFiles, [{ path: "graph.ts", hash: "abc" }]);
+});
+
+test("a workspace that returns to an earlier state is stopped as a loop", async () => {
+  const { RustClient, stopRustEngine: stop } =
+    await import("../packages/core/dist/index.js");
+  const client = new RustClient();
+  client.start();
+  try {
+    await client.resetCycles();
+    const before = ["src/graph.ts:aaa"];
+    const after = ["src/graph.ts:bbb"];
+
+    // Edit, revert, edit again. Every step succeeds and every step's output
+    // differs, so a per-step failure fingerprint never fires - but the
+    // workspace is back where it started, which is the loop.
+    assert.equal(await client.checkWorkspaceCycle(before, "apply_patch"), null);
+    assert.equal(await client.checkWorkspaceCycle(after, "apply_patch"), null);
+    assert.equal(await client.checkWorkspaceCycle(before, "apply_patch"), 2);
+
+    // A new task starts with a clean history.
+    await client.resetCycles();
+    assert.equal(await client.checkWorkspaceCycle(before, "apply_patch"), null);
+
+    // The command is part of the state, so the same files reached by a
+    // different action is not a repeat.
+    assert.equal(await client.checkWorkspaceCycle(before, "write_file"), null);
+  } finally {
+    client.stop();
+    stop();
+  }
+});
+
+test("the dashboard can see which slices retrieval chose, and why", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-context-trace-"));
+  try {
+    await mkdir(join(root, "src"), { recursive: true });
+    await writeFile(
+      join(root, "src", "a.go"),
+      "package main\n\nfunc handleRequest() {\n\tserviceLayer()\n}\n",
+    );
+    await writeFile(
+      join(root, "src", "b.go"),
+      "package main\n\nfunc serviceLayer() {\n\trepositoryFetch()\n}\n",
+    );
+    // A third link, reachable only by following the call graph.
+    await writeFile(
+      join(root, "src", "c.go"),
+      "package main\n\nfunc repositoryFetch() int {\n\treturn 1\n}\n",
+    );
+    const store = new SessionStore({
+      projectRoot: root,
+      dataRoot: join(root, ".runtime-data"),
+    });
+    for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+    const retrieval = new SemanticRetrievalIndex({
+      root,
+      databasePath: join(root, ".runtime-data", "retrieval.db"),
+    });
+    await retrieval.indexProject();
+
+    const service = new HeadlessRuntimeService({
+      store,
+      model: { providerId: "ollama", modelId: "fake" },
+      resolveModel: () => new FakeModel([assistantResponse("ok")]),
+      resolveTools: () => new ToolRegistry(),
+      requestApproval: async () => false,
+      retrieval,
+    });
+
+    try {
+      const session = service.createSession();
+      const result = await service.runTask({
+        sessionId: session.id,
+        agentId: CODING_AGENT_ID,
+        prompt: "fix handleRequest in src/a.go",
+      });
+
+      // The pipeline's retriever is a direct index call rather than a tool
+      // call, so nothing used to record what it put into context - the stage
+      // that chooses most of the coder's context was invisible in the view
+      // meant to show exactly that.
+      const stage = service
+        .listTraceSpans(result.taskId)
+        .find(
+          (span) =>
+            span.kind === "pipeline_step" &&
+            Array.isArray(span.context) &&
+            span.context.length > 0,
+        );
+      assert.ok(stage, "the retrieval stage must record its context");
+
+      const artifacts = stage.context as Array<{
+        path?: string;
+        reasons?: string[];
+        extractor?: string;
+        content?: string;
+      }>;
+      assert.ok(artifacts.every((item) => typeof item.content === "string"));
+
+      // Each slice says why it is there and which analyser produced it, which
+      // is what makes the view answer "why" and not only "what".
+      assert.ok(
+        artifacts.some((item) => (item.reasons ?? []).length > 0),
+        "slices must carry their relevance reasons",
+      );
+      assert.ok(
+        artifacts.some((item) => item.extractor === "tree-sitter"),
+        "the analyser tier must be visible",
+      );
+      assert.ok(
+        artifacts.some((item) =>
+          (item.reasons ?? []).some((reason) =>
+            /call-graph proximity/.test(reason),
+          ),
+        ),
+        "a graph-selected slice must be labelled as one",
+      );
+    } finally {
+      await service.close();
+    }
+  } finally {
+    stopRustEngineForTests();
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
 });

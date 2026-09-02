@@ -56,6 +56,14 @@ export interface ContextArtifact {
   endLine?: number;
   content: string;
   tokenEstimate: number;
+  /**
+   * Why this slice is in context - an exact symbol match, a call-graph hop, a
+   * text hit. The dashboard shows these, because "which files were in this
+   * agent's context" is only half an answer without "and why".
+   */
+  reasons?: string[];
+  /** Analyser that produced the symbols behind this slice, when known. */
+  extractor?: string;
 }
 
 export interface ToolExecutionContext {

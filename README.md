@@ -189,9 +189,13 @@ Detailed project references:
 
 IDE tooling uses established libraries: `diff` for patches and diffs, `ajv` for
 tool argument validation, `@vscode/ripgrep` for fast search, and `execa` for
-process execution. The persistent retrieval package uses the TypeScript compiler
-API for symbols/imports/exports/references/calls across both TypeScript and
-JavaScript, with a regex text fallback for other languages. Indexing is
+process execution. The persistent retrieval package extracts in three tiers: the TypeScript
+compiler API for TypeScript and JavaScript (bindings resolved), tree-sitter
+grammars in the Rust sidecar for Python, Go, Rust, C, and C++, and a regex
+fallback for everything else. Ranking then follows the project's call graph via
+personalised PageRank over `FlatCPG`, so a function several calls from the match
+still surfaces; that graph is persisted between runs in the memory-mapped
+write-ahead log. Indexing is
 incremental and stat-gated: a file whose size and mtime match the index is not
 re-read at all, so the refresh that runs on every query stays cheap. File operations use the workspace service; command execution uses the
 host operating system's native shell.

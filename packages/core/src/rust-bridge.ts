@@ -58,6 +58,51 @@ function modifiedAt(path: string): number | undefined {
   }
 }
 
+export interface ExtractedSymbol {
+  name: string;
+  kind: string;
+  startLine: number;
+  endLine: number;
+  exported: boolean;
+  signature: string;
+}
+
+export interface ExtractedEdge {
+  kind: "definition" | "reference" | "call" | "import" | "export";
+  sourceSymbol?: string;
+  targetName: string;
+  line: number;
+  moduleSpecifier?: string;
+}
+
+export interface ExtractedFile {
+  symbols: ExtractedSymbol[];
+  edges: ExtractedEdge[];
+  /** Grammar that produced this, or null when none matched. */
+  language: string | null;
+}
+
+export interface CpgNode {
+  symbol: string;
+  path: string;
+  start_line: number;
+  end_line: number;
+}
+
+export interface CpgEdge {
+  head: number;
+  tail: number;
+  kind: "definition" | "reference" | "call" | "import" | "export";
+}
+
+export interface RankedGraphNode {
+  symbol: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  score: number;
+}
+
 export interface DiffChunk {
   start_line: number;
   end_line: number;
@@ -229,12 +274,81 @@ export class RustClient {
     });
   }
 
+  /**
+   * Symbols and edges for a source file, via the sidecar's tree-sitter
+   * grammars. `language` is null when no grammar matched, which is the caller's
+   * signal to fall back rather than to treat an empty result as "no symbols".
+   */
+  async extractSymbols(
+    code: string,
+    extension: string,
+  ): Promise<ExtractedFile> {
+    return this.request<ExtractedFile>("extract_symbols", {
+      code,
+      ext: extension,
+    });
+  }
+
+  /** Replace a project's code property graph and persist it through the WAL. */
+  async putCodeGraph(input: {
+    projectId: string;
+    dir: string;
+    revision: string;
+    nodes: CpgNode[];
+    edges: CpgEdge[];
+  }): Promise<{ nodes: number }> {
+    return this.request<{ nodes: number }>("cpg_put", { ...input });
+  }
+
+  /** Revision of the persisted graph on disk, or null when there is none. */
+  async codeGraphRevision(input: {
+    projectId: string;
+    dir: string;
+  }): Promise<string | null> {
+    return this.request<string | null>("cpg_revision", { ...input });
+  }
+
+  /** Symbols the graph says are closest to the ones a query already matched. */
+  async rankByCodeGraph(input: {
+    projectId: string;
+    dir: string;
+    seeds: string[];
+    limit?: number;
+  }): Promise<RankedGraphNode[]> {
+    return this.request<RankedGraphNode[]>("cpg_rank", { ...input });
+  }
+
   async pruneAst(code: string, extension: string): Promise<string> {
     return this.request<string>("prune_ast", { code, ext: extension });
   }
 
   async computeDiff(original: string, proposal: string): Promise<DiffChunk[]> {
     return this.request<DiffChunk[]>("compute_diff", { original, proposal });
+  }
+
+  /**
+   * Record a workspace state and report whether it repeats a recent one.
+   *
+   * Returns how many steps ago the same state was seen, or null. This catches
+   * the failure a per-step fingerprint cannot: a task that edits a file, undoes
+   * it, and edits it again is looping even though every individual step
+   * succeeded and every step's output was different.
+   */
+  async checkWorkspaceCycle(
+    fileHashes: readonly string[],
+    command?: string,
+    exitCode?: number,
+  ): Promise<number | null> {
+    return this.request<number | null>("check_cycle", {
+      file_hashes: [...fileHashes].sort(),
+      ...(command === undefined ? {} : { cmd: command }),
+      ...(exitCode === undefined ? {} : { exit_code: exitCode }),
+    });
+  }
+
+  /** Forget recorded states, so a new task starts with a clean history. */
+  async resetCycles(): Promise<void> {
+    await this.request<boolean>("reset_cycles", {});
   }
 
   async checkCycle(
