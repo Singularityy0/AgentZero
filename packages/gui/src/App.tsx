@@ -266,6 +266,7 @@ interface FileDiffPreview {
   proposedHash: string;
   text: string;
   hunks: ProposedHunk[];
+  warnings?: string[];
 }
 
 interface RuntimeApprovalView {
@@ -2645,6 +2646,16 @@ function ApprovalReview({
           </span>
         )}
       </div>
+
+      {diff?.warnings?.map((warning) => (
+        <div
+          key={warning}
+          className="mt-2 flex items-start gap-2 border border-red-400/30 bg-red-500/10 p-2 text-[10px] text-red-200"
+        >
+          <ShieldCheck size={12} className="mt-0.5 shrink-0" />
+          <span>{warning}</span>
+        </div>
+      ))}
 
       {hunks.length === 0 ? (
         <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-black/25 p-2 font-mono text-[9px] leading-4 text-neutral-500">

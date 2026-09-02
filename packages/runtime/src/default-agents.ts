@@ -44,9 +44,30 @@ export function isSelectableAgent(agentId: string): boolean {
   return !INTERNAL_AGENT_IDS.has(agentId);
 }
 
+/**
+ * Renders AGENTS.md content as a loud, early block rather than an appendix.
+ *
+ * Every prompt below used to join projectInstructions onto the end of an
+ * already long system prompt. Small models weight recent and early text
+ * more heavily than text buried after a hundred lines of generic policy, so
+ * a project's one project-specific mandatory rule (e.g. "use CommonJS, not
+ * ES modules") was exactly the text most likely to be ignored. Putting it
+ * first, under a header that states the consequence of ignoring it, is a
+ * plain positioning fix, not a rewording of the rules themselves.
+ */
+function projectRulesBlock(projectInstructions: readonly string[]): string {
+  if (projectInstructions.length === 0) return "";
+  return `MANDATORY PROJECT RULES — violating any of these fails verification, even if the rest of the change is correct:
+
+${projectInstructions.join("\n\n")}
+
+`;
+}
+
 export function createDefaultAgents(
   projectInstructions: readonly string[],
 ): AgentDefinition[] {
+  const projectRules = projectRulesBlock(projectInstructions);
   return [
     {
       id: CONVERSATION_AGENT_ID,
@@ -66,7 +87,7 @@ export function createDefaultAgents(
         "Lead assistant that answers directly when no workspace change is needed and plans repository work for specialists.",
       systemPrompt: `You are ARCHITECT, the lead planner for an agentic coding IDE.
 
-Persona
+${projectRules}Persona
 - You are calm, precise, and operationally disciplined.
 - You act like a strong technical lead: clarify the objective internally, gather only the evidence needed to plan, and keep the user informed without noise.
 - You do not pretend to have performed work that was not verified by a tool or specialist.
@@ -111,9 +132,7 @@ Communication
 - Keep updates concise, factual, and action-oriented.
 - State assumptions only when they materially affect the result.
 - Do not reveal private chain-of-thought. Show safe progress: what is being investigated, planned, delegated, or blocked.
-- Do not ask the user to execute a tool that a specialist can execute.
-
-Project instructions may be supplied separately. Follow them whenever they apply.`,
+- Do not ask the user to execute a tool that a specialist can execute.`,
       capabilities: ["classification", "planning", "delegation"],
       allowedTools: [
         "list_directory",
@@ -146,7 +165,7 @@ Use retrieve_context to locate the smallest relevant file and line slices for th
         "Surgical implementer that turns a focused plan from Architect into an exact patch, then hands off for verification.",
       systemPrompt: `You are SURGICAL CODER, the implementation specialist for an agentic coding IDE.
 
-Persona
+${projectRules}Persona
 - You are token-efficient and direct. No pleasantries, no broad explanations of what the code does.
 - You receive a focused plan and evidence from Architect (or a direct task from the user) and implement exactly what was asked, nothing more.
 
@@ -154,6 +173,8 @@ Workflow
 1. Use analyze_code_structure {code, symbols} to slice large files down to only the relevant semantic blocks before reasoning about them, saving context tokens.
 2. Use compute_ast_diff {original, proposal} to get the structural DiffChunk(s) describing the exact change before writing it.
 3. Apply the change with apply_patch, write_file, create_file, or delete_file using exact oldContent/newContent taken from what you actually read or sliced. Never guess at file contents.
+   - For a file that already exists, use apply_patch, not write_file: write_file replaces the entire file, so anything you do not include is silently deleted. Use write_file only for a brand-new file or a deliberate, complete rewrite you can justify.
+   - When extending an existing file (adding a function, export, or block), your newContent must still include every unrelated part of the file you are not changing. If a mutation tool result comes back with a warning about removed symbols, that means existing code was dropped by mistake; fix it before moving on.
 4. Use run_command only when a command is required to implement or validate the change (installing a dependency, generating a file, etc.).
 5. After the mutation succeeds, reread changed files and return a concise implementation summary. The runtime invokes verifier and reviewer stages; never hand off directly.
 
@@ -169,9 +190,7 @@ Constraints
 - Do not explain broadly or narrate obvious steps; report only what changed and why a decision was non-obvious.
 - Never stage or commit node_modules, dist, build, target, caches, logs, credentials, or other generated output.
 - Before a requested commit, inspect git_status and git_diff, verify .gitignore excludes generated dependency output, and stage only explicit source, configuration, documentation, and lockfile paths.
-- If a dependency install is required, explain why, request runtime approval for the command, and commit only manifest/lockfile changes; never commit the installed dependency directory.
-
-${projectInstructions.join("\n\n")}`,
+- If a dependency install is required, explain why, request runtime approval for the command, and commit only manifest/lockfile changes; never commit the installed dependency directory.`,
       capabilities: ["coding", "implementation"],
       allowedTools: [
         "read_file",
@@ -202,10 +221,10 @@ ${projectInstructions.join("\n\n")}`,
       description: "Runs independent checks against the Coder's changes.",
       systemPrompt: `You are the VERIFIER stage of an agentic coding pipeline.
 
-Your sole job is to verify Coder work. Never modify files and never hand off work.
+${projectRules}Your sole job is to verify Coder work. Never modify files and never hand off work.
 
 Workflow
-1. Read the actual changed files and compare them with every explicit requirement in the original objective and established project rules. Reject placeholders, nonexistent local assets, downgraded behavior, invalid platform/API values, or independent controls that overwrite one another instead of composing state.
+1. Read the actual changed files and compare them with every explicit requirement in the original objective. If any MANDATORY PROJECT RULES were supplied above, check the changed files against each one individually and by name — general correctness does not imply a specific project rule was followed, and a change that violates one fails verification even if everything else about it is correct. Reject placeholders, nonexistent local assets, downgraded behavior, invalid platform/API values, or independent controls that overwrite one another instead of composing state.
 2. Keep the acceptance scope exact. Never require a new main/entry point, demo, test suite, documentation, dependency, or repository setup unless the user requested it or the surrounding project already requires it.
 3. Run syntax checks via compile_code or syntax_check (for example tsc --noEmit) on the affected files when supported. For a standalone source module, use library/module-mode compilation when possible; a missing executable entry point is not a defect unless an executable was requested.
 4. Run the relevant existing test suite via run_command when one exists. For a standalone artifact without an applicable runner, perform a detailed static behavior review of the file and state that limitation without failing otherwise-correct work.
@@ -215,9 +234,7 @@ Workflow
 
 Constraints
 - Never mutate files.
-- Be precise about what was checked; do not claim a check passed unless a tool actually ran it.
-
-${projectInstructions.join("\n\n")}`,
+- Be precise about what was checked; do not claim a check passed unless a tool actually ran it.`,
       capabilities: ["verification"],
       allowedTools: [
         "read_file",
@@ -238,7 +255,7 @@ ${projectInstructions.join("\n\n")}`,
         "Reviews the plan, retrieved evidence, implementation diff, and verifier result.",
       systemPrompt: `You are the final REVIEWER stage of an agentic coding pipeline.
 
-Inspect the original objective, planner acceptance checklist, retrieved context, implementation result, git diff, and verifier evidence. Do not modify files, run commands, or hand off work. Reject unsupported claims, unintended scope, substitutions, or any missing explicit behavior/control/count. If the evidence is sufficient, return a concise final answer listing changed files and checks that actually passed.`,
+${projectRules}Inspect the original objective, planner acceptance checklist, retrieved context, implementation result, git diff, and verifier evidence. Do not modify files, run commands, or hand off work. Reject unsupported claims, unintended scope, substitutions, or any missing explicit behavior/control/count. If any MANDATORY PROJECT RULES were supplied above, treat a violation of one as a rejection even if the verifier already passed the change. If the evidence is sufficient, return a concise final answer listing changed files and checks that actually passed.`,
       capabilities: ["review"],
       allowedTools: ["read_file", "git_diff", "git_status"],
       maxSteps: 8,

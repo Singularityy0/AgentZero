@@ -290,6 +290,14 @@ function toFileDiffPreview(prepared: PreparedFileChange): FileDiffPreview {
     proposedHash: prepared.proposedHash,
     text: prepared.diff,
     hunks: prepared.hunks,
+    ...(prepared.removedSymbols.length > 0
+      ? {
+          warnings: [
+            `This change removes previously defined: ${prepared.removedSymbols.join(", ")}. ` +
+              "If that code should still exist, use apply_patch instead of overwriting the whole file.",
+          ],
+        }
+      : {}),
   };
 }
 
@@ -300,17 +308,24 @@ async function applyReviewedChange(
   deleteWhenFullyAccepted = false,
 ): Promise<Awaited<ReturnType<Tool["execute"]>>> {
   const approvedPreview = context.approval?.preview;
-  const prepared =
-    typeof approvedPreview === "object" && approvedPreview.kind === "file_diff"
-      ? {
-          kind: approvedPreview.kind,
-          path: approvedPreview.path,
-          baseHash: approvedPreview.baseHash,
-          proposedHash: approvedPreview.proposedHash,
-          diff: approvedPreview.text,
-          hunks: approvedPreview.hunks,
-        }
-      : await service.prepareChange(change);
+  const isApprovedFileDiff =
+    typeof approvedPreview === "object" && approvedPreview.kind === "file_diff";
+  const prepared = isApprovedFileDiff
+    ? {
+        kind: approvedPreview.kind,
+        path: approvedPreview.path,
+        baseHash: approvedPreview.baseHash,
+        proposedHash: approvedPreview.proposedHash,
+        diff: approvedPreview.text,
+        hunks: approvedPreview.hunks,
+        removedSymbols: [] as string[],
+      }
+    : await service.prepareChange(change);
+  const removalWarning = isApprovedFileDiff
+    ? (approvedPreview.warnings?.[0] ?? null)
+    : prepared.removedSymbols.length > 0
+      ? `This change removes previously defined: ${prepared.removedSymbols.join(", ")}.`
+      : null;
   const acceptedHunkIds = context.approval
     ? context.approval.decision.acceptedHunkIds
     : prepared.hunks.map((hunk) => hunk.id);
@@ -337,7 +352,9 @@ async function applyReviewedChange(
     acceptedHunkIds,
   );
   return {
-    output: result.diff || "No changes were necessary.",
+    output: removalWarning
+      ? `${removalWarning}\n\n${result.diff || "No changes were necessary."}`
+      : result.diff || "No changes were necessary.",
     changed: result.changed,
     review: {
       acceptedHunkIds: result.appliedHunkIds,

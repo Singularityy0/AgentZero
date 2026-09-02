@@ -52,6 +52,14 @@ export interface PreparedFileChange {
   proposedHash: string;
   diff: string;
   hunks: FileChangeHunk[];
+  /**
+   * Top-level symbols (function/class/const/exported names) present in the
+   * original file but absent from the proposed content. A full-file rewrite
+   * from a weak model routinely drops unrelated existing code without
+   * noticing; this is a best-effort heuristic to surface that to a reviewer
+   * and the model itself, not a hard block (legitimate removals happen too).
+   */
+  removedSymbols: string[];
 }
 
 export interface FileChangeResult {
@@ -295,6 +303,10 @@ export class WorkspaceFileService {
       proposedHash: hash(change.newContent),
       diff: this.diff(path, original, change.newContent),
       hunks: createFileChangeHunks(path, original, change.newContent),
+      removedSymbols:
+        current === undefined
+          ? []
+          : findRemovedSymbols(original, change.newContent),
     };
   }
 
@@ -631,6 +643,39 @@ export function hash(content: string): string {
 
 function hashBuffer(content: Buffer): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+const SYMBOL_DECLARATION_PATTERN =
+  /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?class\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm;
+const EXPORT_LIST_PATTERN = /(?:export\s*\{([^}]*)\}|module\.exports\s*=\s*\{([^}]*)\})/g;
+
+/**
+ * Best-effort extraction of top-level JS/TS symbol names, so a full-file
+ * rewrite can be checked for accidental loss of unrelated existing code.
+ * Deliberately simple (regex, not a parser): false positives/negatives are
+ * acceptable for a reviewer hint, unlike a correctness-critical check.
+ */
+function extractTopLevelSymbols(content: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of content.matchAll(SYMBOL_DECLARATION_PATTERN)) {
+    const name = match[1] ?? match[2] ?? match[3];
+    if (name) names.add(name);
+  }
+  for (const match of content.matchAll(EXPORT_LIST_PATTERN)) {
+    const list = match[1] ?? match[2] ?? "";
+    for (const entry of list.split(",")) {
+      const name = entry.split(":")[0]?.trim().split(/\s+as\s+/)[0]?.trim();
+      if (name) names.add(name);
+    }
+  }
+  return names;
+}
+
+function findRemovedSymbols(original: string, proposal: string): string[] {
+  const before = extractTopLevelSymbols(original);
+  if (before.size === 0) return [];
+  const after = extractTopLevelSymbols(proposal);
+  return [...before].filter((name) => !after.has(name));
 }
 
 function createFileChangeHunks(
