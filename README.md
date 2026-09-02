@@ -243,6 +243,15 @@ pnpm start
 This opens the desktop IDE. It builds anything missing first, so a fresh clone
 needs no separate build step.
 
+On Linux, Electron's setuid sandbox binary is not root-owned/mode `4755` after
+a plain `pnpm install`, so Electron would otherwise abort at launch with "The
+SUID sandbox helper binary was found, but is not configured correctly." The
+desktop app runs with Chromium's OS-level sandbox disabled on Linux for this
+reason - every side-effecting action still goes through this app's own
+approval flow regardless. To keep the sandbox enabled instead, run
+`sudo chown root:root node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/.pnpm/electron@*/node_modules/electron/dist/chrome-sandbox`
+and remove the `no-sandbox` switch in `packages/desktop/src/main.ts`.
+
 Other entry points:
 
 ```sh
@@ -289,11 +298,26 @@ moved backwards during a git operation and can leave stale output. Run
 
 **A task stops saying it reached its budget.** Expected behaviour. Each task has
 a $0.50 ceiling, a 48 model-request ceiling, and a 30 minute ceiling. The task
-is paused with its work intact and can be resumed from the task list.
+is paused with its work intact rather than lost.
 
 **Ollama routes fail.** Confirm the daemon is reachable with
 `curl http://localhost:11434/api/tags`, and that the model name in Settings
 matches a model in that list exactly, including the tag.
+
+**macOS says the app "cannot be opened" / "is damaged and can't be opened."**
+The installer is not code-signed or notarized (that requires a paid Apple
+Developer account), so Gatekeeper blocks it by default even though the
+install itself succeeded - this is expected for an unsigned build, not a
+broken one. Either right-click (or Control-click) the app in Finder and
+choose **Open**, then confirm **Open** again in the dialog that appears
+(only needed once), or run:
+
+```sh
+xattr -cr "/Applications/Agent Zero.app"
+```
+
+which clears the quarantine attribute macOS attaches to anything downloaded
+or extracted from a `.dmg`.
 
 ---
 

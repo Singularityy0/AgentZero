@@ -16,6 +16,21 @@ import {
   type SettingsServer,
 } from "@agentic-runtime/gui-server";
 
+// Electron's setuid sandbox binary needs root ownership and mode 4755 to
+// enable Chromium's OS-level sandbox. A plain `pnpm install` never sets
+// that up, so on Linux Electron hard-aborts at startup ("SUID sandbox
+// helper binary was found, but is not configured correctly") instead of
+// silently running unsandboxed, unlike every other platform. This is a
+// locally-run developer IDE, not a browser rendering untrusted content,
+// and every side-effecting action already goes through this app's own
+// tool-approval flow - so trading Chromium's renderer sandbox for a
+// `pnpm desktop` that actually launches without a manual
+// `chown root:root chrome-sandbox && chmod 4755 chrome-sandbox` step is
+// the right default here.
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("no-sandbox");
+}
+
 interface DesktopState {
   lastWorkspace?: string;
 }
