@@ -4914,7 +4914,9 @@ function ProviderCard({
         }>;
       }>(`/api/providers/${provider.id}/free-models`);
       setFreeModels(body.models);
-      onMessage(`Found ${body.models.length} free tier <80B models for ${provider.label}.`);
+      onMessage(
+        `Found ${body.models.length} free tier <80B models for ${provider.label}.`,
+      );
     } catch (error) {
       onMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -5021,7 +5023,10 @@ function ProviderCard({
             {freeModels.length > 0 ? (
               <ul className="max-h-40 space-y-1 overflow-y-auto">
                 {freeModels.map((m) => (
-                  <li key={m.id} className="flex items-center justify-between gap-2 rounded px-1.5 py-1 hover:bg-white/5">
+                  <li
+                    key={m.id}
+                    className="flex items-center justify-between gap-2 rounded px-1.5 py-1 hover:bg-white/5"
+                  >
                     <button
                       type="button"
                       onClick={() => setModelId(m.id)}
@@ -5031,7 +5036,9 @@ function ProviderCard({
                       {m.id}
                     </button>
                     <span className="shrink-0 text-[9px] text-neutral-600">
-                      {m.totalParameters ? `${(m.totalParameters / 1e9).toFixed(1)}B` : "unverified"}
+                      {m.totalParameters
+                        ? `${(m.totalParameters / 1e9).toFixed(1)}B`
+                        : "unverified"}
                       {m.unverified ? " · unverified" : ""}
                     </span>
                   </li>

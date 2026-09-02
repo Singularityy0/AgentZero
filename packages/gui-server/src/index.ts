@@ -964,7 +964,10 @@ async function handleRequest(
       sendJson(response, 200, { models: freeModels });
     } catch (error) {
       sendJson(response, 500, {
-        error: error instanceof Error ? error.message : "Failed to scrape free models.",
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to scrape free models.",
       });
     }
     return;
@@ -1188,14 +1191,21 @@ async function scrapeFreeTierModels(
   // Real-time Ollama scrape via `ollama list` CLI and /api/tags (no cache)
   if (providerId === "ollama") {
     const baseUrl =
-      store.getProviderSetting("ollama", "baseUrl")?.trim() || "http://localhost:11434";
-    const normalizedBase = baseUrl.replace(/\/$/, "").replace(/\/api\/chat$/, "");
+      store.getProviderSetting("ollama", "baseUrl")?.trim() ||
+      "http://localhost:11434";
+    const normalizedBase = baseUrl
+      .replace(/\/$/, "")
+      .replace(/\/api\/chat$/, "");
     // Try HTTP /api/tags first (live daemon), fallback to CLI
     try {
       const res = await fetch(`${normalizedBase}/api/tags`);
       if (res.ok) {
         const body = (await res.json()) as {
-          models?: Array<{ name?: string; size?: number; details?: Record<string, unknown> }>;
+          models?: Array<{
+            name?: string;
+            size?: number;
+            details?: Record<string, unknown>;
+          }>;
         };
         if (Array.isArray(body.models)) {
           const live = body.models
@@ -1269,7 +1279,8 @@ async function scrapeFreeTierModels(
     const res = await fetch("https://openrouter.ai/api/v1/models", { headers });
     if (!res.ok) throw new Error(`OpenRouter discovery failed (${res.status})`);
     const body = (await res.json()) as { data?: unknown };
-    if (!Array.isArray(body.data)) throw new Error("Malformed OpenRouter catalog");
+    if (!Array.isArray(body.data))
+      throw new Error("Malformed OpenRouter catalog");
     const free = body.data
       .filter((raw) => {
         if (!raw || typeof raw !== "object") return false;
@@ -1296,11 +1307,15 @@ async function scrapeFreeTierModels(
           name: typeof m.name === "string" ? (m.name as string) : id,
           providerId,
           contextWindow:
-            typeof m.context_length === "number" ? (m.context_length as number) : undefined,
+            typeof m.context_length === "number"
+              ? (m.context_length as number)
+              : undefined,
           totalParameters: total,
           pricing: {
             inputPerMillion:
-              pricing?.prompt !== undefined ? Number(pricing.prompt) * 1_000_000 : undefined,
+              pricing?.prompt !== undefined
+                ? Number(pricing.prompt) * 1_000_000
+                : undefined,
             outputPerMillion:
               pricing?.completion !== undefined
                 ? Number(pricing.completion) * 1_000_000

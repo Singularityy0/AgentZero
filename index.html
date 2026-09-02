@@ -1,740 +1,981 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Agent-0 Docs</title>
-<meta name="description" content="Documentation for Agent-0, an agentic coding runtime for small open-weight models." />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" />
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-  mermaid.initialize({ startOnLoad: true, theme: 'dark', fontFamily: 'Manrope' });
-</script>
-<style>
-  :root {
-    --bg: #000000;
-    --bg-elevated: #111111;
-    --bg-subtle: #222222;
-    --bg-code: #111111;
-    --text: #FFFFFF;
-    --text-2: #E5E7EB;
-    --text-3: #9CA3AF;
-    --text-4: #6B7280;
-    --border: #333333;
-    --border-strong: #444444;
-    --accent: #2563EB;
-    --accent-hover: #3B82F6;
-    --accent-tint: #1E3A8A;
-    --accent-ring: rgba(37, 99, 235, 0.5);
-    --radius: 4px;
-    --radius-lg: 8px;
-    --sans: "Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Agent-0 Docs</title>
+    <meta
+      name="description"
+      content="Documentation for Agent-0, an agentic coding runtime for small open-weight models."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    />
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: "dark",
+        fontFamily: "Manrope",
+      });
+    </script>
+    <style>
+      :root {
+        --bg: #000000;
+        --bg-elevated: #111111;
+        --bg-subtle: #222222;
+        --bg-code: #111111;
+        --text: #ffffff;
+        --text-2: #e5e7eb;
+        --text-3: #9ca3af;
+        --text-4: #6b7280;
+        --border: #333333;
+        --border-strong: #444444;
+        --accent: #2563eb;
+        --accent-hover: #3b82f6;
+        --accent-tint: #1e3a8a;
+        --accent-ring: rgba(37, 99, 235, 0.5);
+        --radius: 4px;
+        --radius-lg: 8px;
+        --sans:
+          "Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono:
+          "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+          monospace;
+      }
 
-  :root[data-theme="light"] {
-    --bg: #FFFFFF;
-    --bg-elevated: #F9FAFB;
-    --bg-subtle: #F3F4F6;
-    --bg-code: #F8FAFC;
-    --text: #111827;
-    --text-2: #374151;
-    --text-3: #6B7280;
-    --text-4: #9CA3AF;
-    --border: #E5E7EB;
-    --border-strong: #D1D5DB;
-    --accent: #2563EB;
-    --accent-hover: #1D4ED8;
-    --accent-tint: #EFF6FF;
-    --accent-ring: rgba(37, 99, 235, 0.3);
-  }
+      :root[data-theme="light"] {
+        --bg: #ffffff;
+        --bg-elevated: #f9fafb;
+        --bg-subtle: #f3f4f6;
+        --bg-code: #f8fafc;
+        --text: #111827;
+        --text-2: #374151;
+        --text-3: #6b7280;
+        --text-4: #9ca3af;
+        --border: #e5e7eb;
+        --border-strong: #d1d5db;
+        --accent: #2563eb;
+        --accent-hover: #1d4ed8;
+        --accent-tint: #eff6ff;
+        --accent-ring: rgba(37, 99, 235, 0.3);
+      }
 
-  *, *::before, *::after { box-sizing: border-box; }
-  html { scroll-behavior: smooth; scroll-padding-top: 80px; }
-  body {
-    margin: 0;
-    font-family: var(--sans);
-    font-size: 15px;
-    line-height: 1.65;
-    color: var(--text-2);
-    background: var(--bg);
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    font-feature-settings: "cv11", "ss01";
-  }
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+        scroll-padding-top: 80px;
+      }
+      body {
+        margin: 0;
+        font-family: var(--sans);
+        font-size: 15px;
+        line-height: 1.65;
+        color: var(--text-2);
+        background: var(--bg);
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        font-feature-settings: "cv11", "ss01";
+      }
 
-  /* Topbar */
-  .topbar {
-    position: sticky; top: 0; z-index: 40;
-    height: 60px;
-    background: var(--bg);
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: center;
-    padding: 0 24px;
-    gap: 20px;
-  }
-  .brand {
-    display: flex; align-items: center; gap: 10px;
-    text-decoration: none;
-    color: var(--text);
-    font-weight: 700;
-    font-size: 15px;
-    letter-spacing: -0.01em;
-  }
-  .brand-mark {
-    width: 24px; height: 24px;
-    background: var(--text);
-    color: var(--bg);
-    border-radius: 5px;
-    display: grid; place-items: center;
-    font-family: var(--mono);
-    font-size: 12px;
-    font-weight: 700;
-  }
-  .brand-slash {
-    color: var(--text-4);
-    font-weight: 400;
-    margin: 0 -4px;
-  }
-  .brand-section {
-    color: var(--text-3);
-    font-weight: 500;
-  }
-  .top-nav {
-    margin-left: 12px;
-    display: flex; align-items: center; gap: 8px;
-  }
-  .top-nav a, .top-nav summary {
-    padding: 6px 10px;
-    border-radius: var(--radius);
-    color: var(--text-3);
-    text-decoration: none;
-    font-size: 13.5px;
-    font-weight: 500;
-    transition: color .15s, background .15s;
-    cursor: pointer;
-  }
-  @media (hover: hover) {
-    .top-nav a:hover, .top-nav summary:hover { color: var(--text); background: var(--bg-subtle); }
-  }
-  
-  /* Dropdown Top Nav */
-  .dropdown-wrapper { position: relative; }
-  details.dropdown summary { list-style: none; display: flex; align-items: center; gap: 6px; }
-  details.dropdown summary::-webkit-details-marker { display: none; }
-  details.dropdown[open] summary { color: var(--text); background: var(--bg-subtle); }
-  .dropdown-menu {
-    position: absolute; top: 100%; left: 0;
-    margin-top: 8px;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 8px;
-    display: flex; flex-direction: column; gap: 4px;
-    min-width: 150px;
-    box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1);
-    z-index: 50;
-  }
-  .dropdown-menu a { display: block; padding: 6px 12px; }
-  .top-right {
-    margin-left: auto;
-    display: flex; align-items: center; gap: 6px;
-  }
-  .search-hint {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 10px 6px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg-elevated);
-    color: var(--text-3);
-    font-size: 13px;
-    min-width: 220px;
-    cursor: pointer;
-    transition: border-color .15s;
-  }
-  @media (hover: hover) {
-    .search-hint:hover { border-color: var(--border-strong); }
-  }
-  .search-hint .kbd {
-    margin-left: auto;
-    font-family: var(--mono);
-    font-size: 11px;
-    padding: 1px 6px;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    color: var(--text-4);
-    background: var(--bg-subtle);
-  }
-  .icon-btn {
-    width: 34px; height: 34px;
-    display: grid; place-items: center;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius);
-    color: var(--text-3);
-    cursor: pointer;
-    transition: all .15s;
-    font-size: 15px;
-    line-height: 1;
-  }
-  @media (hover: hover) {
-    .icon-btn:hover { color: var(--text); background: var(--bg-subtle); }
-  }
-  .menu-btn { display: none; }
+      /* Topbar */
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        height: 60px;
+        background: var(--bg);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 24px;
+        gap: 20px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        text-decoration: none;
+        color: var(--text);
+        font-weight: 700;
+        font-size: 15px;
+        letter-spacing: -0.01em;
+      }
+      .brand-mark {
+        width: 24px;
+        height: 24px;
+        background: var(--text);
+        color: var(--bg);
+        border-radius: 5px;
+        display: grid;
+        place-items: center;
+        font-family: var(--mono);
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .brand-slash {
+        color: var(--text-4);
+        font-weight: 400;
+        margin: 0 -4px;
+      }
+      .brand-section {
+        color: var(--text-3);
+        font-weight: 500;
+      }
+      .top-nav {
+        margin-left: 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .top-nav a,
+      .top-nav summary {
+        padding: 6px 10px;
+        border-radius: var(--radius);
+        color: var(--text-3);
+        text-decoration: none;
+        font-size: 13.5px;
+        font-weight: 500;
+        transition:
+          color 0.15s,
+          background 0.15s;
+        cursor: pointer;
+      }
+      @media (hover: hover) {
+        .top-nav a:hover,
+        .top-nav summary:hover {
+          color: var(--text);
+          background: var(--bg-subtle);
+        }
+      }
 
-  /* Layout */
-  .shell {
-    display: grid;
-    grid-template-columns: 260px minmax(0, 1fr);
-    max-width: 1440px;
-    margin: 0 auto;
-  }
+      /* Dropdown Top Nav */
+      .dropdown-wrapper {
+        position: relative;
+      }
+      details.dropdown summary {
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      details.dropdown summary::-webkit-details-marker {
+        display: none;
+      }
+      details.dropdown[open] summary {
+        color: var(--text);
+        background: var(--bg-subtle);
+      }
+      .dropdown-menu {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        margin-top: 8px;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 150px;
+        box-shadow:
+          0 10px 15px -3px rgba(0, 0, 0, 0.1),
+          0 4px 6px -4px rgba(0, 0, 0, 0.1);
+        z-index: 50;
+      }
+      .dropdown-menu a {
+        display: block;
+        padding: 6px 12px;
+      }
+      .top-right {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .search-hint {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px 6px 12px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--bg-elevated);
+        color: var(--text-3);
+        font-size: 13px;
+        min-width: 220px;
+        cursor: pointer;
+        transition: border-color 0.15s;
+      }
+      @media (hover: hover) {
+        .search-hint:hover {
+          border-color: var(--border-strong);
+        }
+      }
+      .search-hint .kbd {
+        margin-left: auto;
+        font-family: var(--mono);
+        font-size: 11px;
+        padding: 1px 6px;
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        color: var(--text-4);
+        background: var(--bg-subtle);
+      }
+      .icon-btn {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: var(--radius);
+        color: var(--text-3);
+        cursor: pointer;
+        transition: all 0.15s;
+        font-size: 15px;
+        line-height: 1;
+      }
+      @media (hover: hover) {
+        .icon-btn:hover {
+          color: var(--text);
+          background: var(--bg-subtle);
+        }
+      }
+      .menu-btn {
+        display: none;
+      }
 
-  /* Sidebar */
-  nav.side {
-    position: sticky; top: 60px;
-    height: calc(100vh - 60px);
-    overflow-y: auto;
-    padding: 32px 12px 60px 24px;
-    border-right: 1px solid var(--border);
-  }
-  nav.side::-webkit-scrollbar { width: 6px; }
-  nav.side::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
-  details.side-group { margin-bottom: 12px; }
-  details.side-group summary {
-    font-family: var(--sans);
-    font-weight: 700;
-    font-size: 12.5px;
-    color: var(--text);
-    margin: 0 0 4px 0;
-    padding: 8px 12px;
-    letter-spacing: -0.005em;
-    cursor: pointer;
-    border-radius: var(--radius);
-    transition: background .15s;
-    user-select: none;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  details.side-group summary::-webkit-details-marker { display: none; }
-  details.side-group summary::after {
-    content: "▼";
-    font-size: 9px;
-    color: var(--text-4);
-    transition: transform .2s ease;
-  }
-  details.side-group:not([open]) summary::after {
-    transform: rotate(-90deg);
-  }
-  @media (hover: hover) {
-    details.side-group summary:hover {
-      background: var(--bg-subtle);
-    }
-  }
-  .group-content {
-    display: flex;
-    flex-direction: column;
-    margin-bottom: 8px;
-    padding-left: 4px;
-    border-left: 1px solid var(--border);
-    margin-left: 16px;
-  }
-  nav.side a {
-    position: relative;
-    display: flex;
-    align-items: center;
-    padding: 5px 12px;
-    color: var(--text-3);
-    text-decoration: none;
-    font-size: 13.5px;
-    font-weight: 500;
-    border-radius: 5px;
-    transition: color .12s, background .12s;
-    line-height: 1.5;
-  }
-  @media (hover: hover) {
-    nav.side a:hover { color: var(--text); background: var(--bg-subtle); }
-  }
-  nav.side a.active {
-    color: var(--text);
-    background: var(--accent-tint);
-    font-weight: 600;
-  }
-  nav.side a.active::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 6px; bottom: 6px;
-    width: 3px;
-    background: var(--accent);
-    border-radius: 2px;
-  }
+      /* Layout */
+      .shell {
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        max-width: 1440px;
+        margin: 0 auto;
+      }
 
-  /* Main */
-  main {
-    padding: 44px 56px 120px;
-    min-width: 0;
-  }
-  .crumb {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 13px;
-    color: var(--text-3);
-    margin-bottom: 18px;
-    font-weight: 500;
-  }
-  .crumb .sep { color: var(--text-4); }
-  .crumb a {
-    color: var(--text-3);
-    text-decoration: none;
-    transition: color .12s;
-  }
-  @media (hover: hover) {
-    .crumb a:hover { color: var(--text); }
-  }
+      /* Sidebar */
+      nav.side {
+        position: sticky;
+        top: 60px;
+        height: calc(100vh - 60px);
+        overflow-y: auto;
+        padding: 32px 12px 60px 24px;
+        border-right: 1px solid var(--border);
+      }
+      nav.side::-webkit-scrollbar {
+        width: 6px;
+      }
+      nav.side::-webkit-scrollbar-thumb {
+        background: var(--border-strong);
+        border-radius: 3px;
+      }
+      details.side-group {
+        margin-bottom: 12px;
+      }
+      details.side-group summary {
+        font-family: var(--sans);
+        font-weight: 700;
+        font-size: 12.5px;
+        color: var(--text);
+        margin: 0 0 4px 0;
+        padding: 8px 12px;
+        letter-spacing: -0.005em;
+        cursor: pointer;
+        border-radius: var(--radius);
+        transition: background 0.15s;
+        user-select: none;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      details.side-group summary::-webkit-details-marker {
+        display: none;
+      }
+      details.side-group summary::after {
+        content: "▼";
+        font-size: 9px;
+        color: var(--text-4);
+        transition: transform 0.2s ease;
+      }
+      details.side-group:not([open]) summary::after {
+        transform: rotate(-90deg);
+      }
+      @media (hover: hover) {
+        details.side-group summary:hover {
+          background: var(--bg-subtle);
+        }
+      }
+      .group-content {
+        display: flex;
+        flex-direction: column;
+        margin-bottom: 8px;
+        padding-left: 4px;
+        border-left: 1px solid var(--border);
+        margin-left: 16px;
+      }
+      nav.side a {
+        position: relative;
+        display: flex;
+        align-items: center;
+        padding: 5px 12px;
+        color: var(--text-3);
+        text-decoration: none;
+        font-size: 13.5px;
+        font-weight: 500;
+        border-radius: 5px;
+        transition:
+          color 0.12s,
+          background 0.12s;
+        line-height: 1.5;
+      }
+      @media (hover: hover) {
+        nav.side a:hover {
+          color: var(--text);
+          background: var(--bg-subtle);
+        }
+      }
+      nav.side a.active {
+        color: var(--text);
+        background: var(--accent-tint);
+        font-weight: 600;
+      }
+      nav.side a.active::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 6px;
+        bottom: 6px;
+        width: 3px;
+        background: var(--accent);
+        border-radius: 2px;
+      }
 
-  .hero-card {
-    padding: 36px 40px;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    margin: 0 0 44px;
-  }
+      /* Main */
+      main {
+        padding: 44px 56px 120px;
+        min-width: 0;
+      }
+      .crumb {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: var(--text-3);
+        margin-bottom: 18px;
+        font-weight: 500;
+      }
+      .crumb .sep {
+        color: var(--text-4);
+      }
+      .crumb a {
+        color: var(--text-3);
+        text-decoration: none;
+        transition: color 0.12s;
+      }
+      @media (hover: hover) {
+        .crumb a:hover {
+          color: var(--text);
+        }
+      }
 
+      .hero-card {
+        padding: 36px 40px;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        margin: 0 0 44px;
+      }
 
-  h1 {
-    font-family: var(--sans);
-    font-weight: 800;
-    font-size: 36px;
-    line-height: 1.1;
-    letter-spacing: -0.025em;
-    color: var(--text);
-    margin: 0 0 10px;
-    text-wrap: balance;
-  }
-  .lede {
-    font-size: 17px;
-    line-height: 1.55;
-    color: var(--text-3);
-    max-width: 60ch;
-    margin: 0;
-    font-weight: 400;
-  }
+      h1 {
+        font-family: var(--sans);
+        font-weight: 800;
+        font-size: 36px;
+        line-height: 1.1;
+        letter-spacing: -0.025em;
+        color: var(--text);
+        margin: 0 0 10px;
+        text-wrap: balance;
+      }
+      .lede {
+        font-size: 17px;
+        line-height: 1.55;
+        color: var(--text-3);
+        max-width: 60ch;
+        margin: 0;
+        font-weight: 400;
+      }
 
-  h2 {
-    font-family: var(--sans);
-    font-weight: 700;
-    font-size: 26px;
-    line-height: 1.2;
-    letter-spacing: -0.02em;
-    color: var(--text);
-    margin: 56px 0 12px;
-    scroll-margin-top: 80px;
-  }
-  h3 {
-    font-family: var(--sans);
-    font-weight: 700;
-    font-size: 18px;
-    line-height: 1.3;
-    letter-spacing: -0.01em;
-    color: var(--text);
-    margin: 32px 0 8px;
-    scroll-margin-top: 80px;
-  }
-  h4 {
-    font-family: var(--sans);
-    font-weight: 600;
-    font-size: 14px;
-    color: var(--text);
-    margin: 20px 0 4px;
-  }
-  p { margin: 0 0 14px; }
-  strong { color: var(--text); font-weight: 600; }
-  em { font-style: italic; color: var(--text); }
-  a {
-    color: var(--accent);
-    text-decoration: none;
-    font-weight: 500;
-    transition: color .12s;
-  }
-  @media (hover: hover) {
-    a:hover { color: var(--accent-hover); }
-  }
-  a:focus-visible {
-    outline: 2px solid var(--accent-ring);
-    outline-offset: 2px;
-    border-radius: 3px;
-  }
+      h2 {
+        font-family: var(--sans);
+        font-weight: 700;
+        font-size: 26px;
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+        color: var(--text);
+        margin: 56px 0 12px;
+        scroll-margin-top: 80px;
+      }
+      h3 {
+        font-family: var(--sans);
+        font-weight: 700;
+        font-size: 18px;
+        line-height: 1.3;
+        letter-spacing: -0.01em;
+        color: var(--text);
+        margin: 32px 0 8px;
+        scroll-margin-top: 80px;
+      }
+      h4 {
+        font-family: var(--sans);
+        font-weight: 600;
+        font-size: 14px;
+        color: var(--text);
+        margin: 20px 0 4px;
+      }
+      p {
+        margin: 0 0 14px;
+      }
+      strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+      em {
+        font-style: italic;
+        color: var(--text);
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 500;
+        transition: color 0.12s;
+      }
+      @media (hover: hover) {
+        a:hover {
+          color: var(--accent-hover);
+        }
+      }
+      a:focus-visible {
+        outline: 2px solid var(--accent-ring);
+        outline-offset: 2px;
+        border-radius: 3px;
+      }
 
-  ul, ol {
-    margin: 0 0 16px;
-    padding-left: 20px;
-  }
-  li { margin: 5px 0; padding-left: 4px; }
-  li::marker { color: var(--text-4); }
+      ul,
+      ol {
+        margin: 0 0 16px;
+        padding-left: 20px;
+      }
+      li {
+        margin: 5px 0;
+        padding-left: 4px;
+      }
+      li::marker {
+        color: var(--text-4);
+      }
 
-  code {
-    font-family: var(--mono);
-    font-size: 0.86em;
-    background: var(--bg-code);
-    border: 1px solid var(--border);
-    padding: 1px 6px;
-    border-radius: 4px;
-    color: var(--text);
-    font-weight: 500;
-  }
+      code {
+        font-family: var(--mono);
+        font-size: 0.86em;
+        background: var(--bg-code);
+        border: 1px solid var(--border);
+        padding: 1px 6px;
+        border-radius: 4px;
+        color: var(--text);
+        font-weight: 500;
+      }
 
-  /* Code block with filename */
-  .code-block {
-    margin: 16px 0 22px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    background: var(--bg-code);
-  }
-  .code-title {
-    font-family: var(--mono);
-    font-size: 11.5px;
-    color: var(--text-3);
-    padding: 8px 14px;
-    background: var(--bg-subtle);
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 8px;
-    font-weight: 500;
-  }
-  .code-title::before {
-    content: "";
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--accent);
-    opacity: 0.6;
-  }
-  .code-block pre {
-    margin: 0;
-    padding: 14px 16px;
-    overflow-x: auto;
-    font-family: var(--mono);
-    font-size: 13px;
-    line-height: 1.6;
-    background: transparent;
-    border: none;
-    border-radius: 0;
-    color: var(--text);
-  }
-  pre {
-    background: var(--bg-code);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-    overflow-x: auto;
-    font-family: var(--mono);
-    font-size: 13px;
-    line-height: 1.6;
-    margin: 14px 0 22px;
-    color: var(--text);
-  }
-  pre code {
-    background: transparent; border: none; padding: 0;
-    font-size: inherit; font-weight: inherit;
-  }
+      /* Code block with filename */
+      .code-block {
+        margin: 16px 0 22px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--bg-code);
+      }
+      .code-title {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--text-3);
+        padding: 8px 14px;
+        background: var(--bg-subtle);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 500;
+      }
+      .code-title::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+        opacity: 0.6;
+      }
+      .code-block pre {
+        margin: 0;
+        padding: 14px 16px;
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 13px;
+        line-height: 1.6;
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        color: var(--text);
+      }
+      pre {
+        background: var(--bg-code);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px 16px;
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 13px;
+        line-height: 1.6;
+        margin: 14px 0 22px;
+        color: var(--text);
+      }
+      pre code {
+        background: transparent;
+        border: none;
+        padding: 0;
+        font-size: inherit;
+        font-weight: inherit;
+      }
 
-  /* Feature cards */
-  .features {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-    margin: 8px 0 24px;
-  }
-  .feature {
-    padding: 24px;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    transition: all .15s ease;
-  }
-  @media (hover: hover) {
-    .feature:hover {
-      background: var(--bg-subtle);
-      border-color: var(--border-strong);
-    }
-  }
-  .feature h4 {
-    margin: 0 0 4px;
-    font-size: 14.5px;
-    font-weight: 700;
-    color: var(--text);
-  }
-  .feature p {
-    margin: 0;
-    font-size: 13.5px;
-    color: var(--text-3);
-    line-height: 1.55;
-  }
+      /* Feature cards */
+      .features {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+        margin: 8px 0 24px;
+      }
+      .feature {
+        padding: 24px;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        transition: all 0.15s ease;
+      }
+      @media (hover: hover) {
+        .feature:hover {
+          background: var(--bg-subtle);
+          border-color: var(--border-strong);
+        }
+      }
+      .feature h4 {
+        margin: 0 0 4px;
+        font-size: 14.5px;
+        font-weight: 700;
+        color: var(--text);
+      }
+      .feature p {
+        margin: 0;
+        font-size: 13.5px;
+        color: var(--text-3);
+        line-height: 1.55;
+      }
 
-  /* Tables */
-  .table-wrap {
-    overflow-x: auto;
-    margin: 14px 0 24px;
-    border-radius: var(--radius);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13.5px;
-  }
-  th, td {
-    padding: 11px 14px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
-  }
-  tr:last-child td { border-bottom: none; }
-  th {
-    font-weight: 600;
-    color: var(--text);
-    background: var(--bg-subtle);
-    font-size: 12.5px;
-  }
-  tbody tr { transition: background .1s; }
-  @media (hover: hover) {
-    tbody tr:hover { background: var(--bg-subtle); }
-  }
-  td code { font-size: 12.5px; }
+      /* Tables */
+      .table-wrap {
+        overflow-x: auto;
+        margin: 14px 0 24px;
+        border-radius: var(--radius);
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        padding: 11px 14px;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      th {
+        font-weight: 600;
+        color: var(--text);
+        background: var(--bg-subtle);
+        font-size: 12.5px;
+      }
+      tbody tr {
+        transition: background 0.1s;
+      }
+      @media (hover: hover) {
+        tbody tr:hover {
+          background: var(--bg-subtle);
+        }
+      }
+      td code {
+        font-size: 12.5px;
+      }
 
-  /* Note */
-  .note {
-    display: flex; gap: 12px;
-    padding: 14px 16px;
-    background: var(--accent-tint);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-    border-radius: var(--radius);
-    margin: 18px 0;
-    font-size: 14px;
-    color: var(--text-2);
-  }
-  .note::before {
-    content: "→";
-    color: var(--text);
-    font-weight: 700;
-    flex-shrink: 0;
-  }
-  .note strong { color: var(--text); }
-  .note p:last-child { margin: 0; }
+      /* Note */
+      .note {
+        display: flex;
+        gap: 12px;
+        padding: 14px 16px;
+        background: var(--accent-tint);
+        border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+        border-radius: var(--radius);
+        margin: 18px 0;
+        font-size: 14px;
+        color: var(--text-2);
+      }
+      .note::before {
+        content: "→";
+        color: var(--text);
+        font-weight: 700;
+        flex-shrink: 0;
+      }
+      .note strong {
+        color: var(--text);
+      }
+      .note p:last-child {
+        margin: 0;
+      }
 
+      /* Footer */
+      footer {
+        grid-column: 2 / 3;
+        padding: 40px 56px 60px;
+        color: var(--text-4);
+        font-size: 12.5px;
+        border-top: 1px solid var(--border);
+        margin-top: 60px;
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        flex-wrap: wrap;
+      }
+      footer a {
+        color: var(--text-3);
+      }
+      @media (hover: hover) {
+        footer a:hover {
+          color: var(--text);
+        }
+      }
 
+      /* Responsive */
+      @media (max-width: 1200px) {
+        .shell {
+          grid-template-columns: 240px minmax(0, 1fr);
+        }
+        footer {
+          grid-column: 2 / 3;
+        }
+      }
+      @media (max-width: 860px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+        nav.side {
+          position: fixed;
+          left: 0;
+          top: 60px;
+          width: 280px;
+          height: calc(100vh - 60px);
+          transform: translateX(-100%);
+          transition: transform 0.22s ease;
+          z-index: 30;
+          background: var(--bg);
+          box-shadow: var(--shadow-md);
+        }
+        nav.side.open {
+          transform: translateX(0);
+        }
+        .menu-btn {
+          display: grid;
+        }
+        .top-nav,
+        .search-hint {
+          display: none;
+        }
+        main {
+          padding: 28px 20px 80px;
+        }
+        h1 {
+          font-size: 28px;
+        }
+        h2 {
+          font-size: 22px;
+        }
+        footer {
+          padding: 32px 20px 60px;
+          grid-column: 1 / -1;
+        }
+        .features {
+          grid-template-columns: 1fr;
+        }
+        .brand-section,
+        .brand-slash {
+          display: none;
+        }
+      }
 
-  /* Footer */
-  footer {
-    grid-column: 2 / 3;
-    padding: 40px 56px 60px;
-    color: var(--text-4);
-    font-size: 12.5px;
-    border-top: 1px solid var(--border);
-    margin-top: 60px;
-    display: flex; justify-content: space-between; gap: 20px;
-    flex-wrap: wrap;
-  }
-  footer a { color: var(--text-3); }
-  @media (hover: hover) {
-    footer a:hover { color: var(--text); }
-  }
-
-  /* Responsive */
-  @media (max-width: 1200px) {
-    .shell { grid-template-columns: 240px minmax(0, 1fr); }
-    footer { grid-column: 2 / 3; }
-  }
-  @media (max-width: 860px) {
-    .shell { grid-template-columns: 1fr; }
-    nav.side {
-      position: fixed; left: 0; top: 60px;
-      width: 280px;
-      height: calc(100vh - 60px);
-      transform: translateX(-100%);
-      transition: transform .22s ease;
-      z-index: 30;
-      background: var(--bg);
-      box-shadow: var(--shadow-md);
-    }
-    nav.side.open { transform: translateX(0); }
-    .menu-btn { display: grid; }
-    .top-nav, .search-hint { display: none; }
-    main { padding: 28px 20px 80px; }
-    h1 { font-size: 28px; }
-    h2 { font-size: 22px; }
-    footer { padding: 32px 20px 60px; grid-column: 1 / -1; }
-    .features { grid-template-columns: 1fr; }
-    .brand-section, .brand-slash { display: none; }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
-  }
-</style>
-</head>
-<body>
-
-<header class="topbar">
-  <button class="icon-btn menu-btn" id="menuBtn" aria-label="Open navigation">☰</button>
-  <a href="#top" class="brand">
-    <span class="brand-mark">A0</span>
-    Agent-0
-    <span class="brand-slash">/</span>
-    <span class="brand-section">docs</span>
-  </a>
-  <nav class="top-nav dropdown-wrapper">
-    <details class="dropdown">
-      <summary>
-        Quick Links
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-      </summary>
-      <div class="dropdown-menu">
-        <a href="#architecture">Architecture</a>
-        <a href="#setup">Setup</a>
-        <a href="#pipeline">Pipeline</a>
-        <a href="#tools">Tools</a>
-        <a href="#databases">Deploy</a>
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          transition: none !important;
+          animation: none !important;
+          scroll-behavior: auto !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <button
+        class="icon-btn menu-btn"
+        id="menuBtn"
+        aria-label="Open navigation"
+      >
+        ☰
+      </button>
+      <a href="#top" class="brand">
+        <span class="brand-mark">A0</span>
+        Agent-0
+        <span class="brand-slash">/</span>
+        <span class="brand-section">docs</span>
+      </a>
+      <nav class="top-nav dropdown-wrapper">
+        <details class="dropdown">
+          <summary>
+            Quick Links
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </summary>
+          <div class="dropdown-menu">
+            <a href="#architecture">Architecture</a>
+            <a href="#setup">Setup</a>
+            <a href="#pipeline">Pipeline</a>
+            <a href="#tools">Tools</a>
+            <a href="#databases">Deploy</a>
+          </div>
+        </details>
+      </nav>
+      <div class="top-right">
+        <div
+          class="search-hint"
+          onclick="document.getElementById('side').classList.toggle('open')"
+        >
+          Search docs
+          <!-- <span class="kbd">⌘K</span> -->
+        </div>
+        <button
+          class="icon-btn"
+          id="themeBtn"
+          aria-label="Toggle theme"
+          title="Toggle theme"
+        >
+          ◐
+        </button>
       </div>
-    </details>
-  </nav>
-  <div class="top-right">
-    <div class="search-hint" onclick="document.getElementById('side').classList.toggle('open')">
-      Search docs
-      <!-- <span class="kbd">⌘K</span> -->
-    </div>
-    <button class="icon-btn" id="themeBtn" aria-label="Toggle theme" title="Toggle theme">◐</button>
-  </div>
-</header>
+    </header>
 
-<div class="shell">
+    <div class="shell">
+      <nav class="side" id="side">
+        <details class="side-group" open>
+          <summary>Getting started</summary>
+          <div class="group-content">
+            <a href="#top">Overview</a>
+            <a href="#problem">Problem statement</a>
+            <a href="#features">Key features</a>
+          </div>
+        </details>
+        <details class="side-group" open>
+          <summary>Architecture</summary>
+          <div class="group-content">
+            <a href="#architecture">System overview</a>
+            <a href="#topology">Topology</a>
+            <a href="#data-flow">Task flow</a>
+          </div>
+        </details>
+        <details class="side-group" open>
+          <summary>Setup &amp; installation</summary>
+          <div class="group-content">
+            <a href="#requirements">Requirements</a>
+            <a href="#build">Build</a>
+            <a href="#api-keys">API keys</a>
+          </div>
+        </details>
+        <details class="side-group" open>
+          <summary>Agentic pipeline</summary>
+          <div class="group-content">
+            <a href="#pipeline">Overview</a>
+            <a href="#five-stages">The five stages</a>
+            <a href="#recovery">Recovery</a>
+            <a href="#loop-safety">Loop safety</a>
+            <a href="#provider-routing">Provider routing</a>
+            <a href="#compaction">Context compaction</a>
+            <a href="#retrieval">Semantic retrieval</a>
+          </div>
+        </details>
+        <details class="side-group" open>
+          <summary>Tool reference</summary>
+          <div class="group-content">
+            <a href="#tools">Tool registry</a>
+            <a href="#approval">Approval policy</a>
+            <a href="#hitl">HITL diff review</a>
+          </div>
+        </details>
+        <details class="side-group" open>
+          <summary>Deployment</summary>
+          <div class="group-content">
+            <a href="#databases">Databases</a>
+            <a href="#resume">Long-horizon resume</a>
+          </div>
+        </details>
+      </nav>
 
-  <nav class="side" id="side">
-    <details class="side-group" open>
-      <summary>Getting started</summary>
-      <div class="group-content">
-        <a href="#top">Overview</a>
-        <a href="#problem">Problem statement</a>
-        <a href="#features">Key features</a>
-      </div>
-    </details>
-    <details class="side-group" open>
-      <summary>Architecture</summary>
-      <div class="group-content">
-        <a href="#architecture">System overview</a>
-        <a href="#topology">Topology</a>
-        <a href="#data-flow">Task flow</a>
-      </div>
-    </details>
-    <details class="side-group" open>
-      <summary>Setup &amp; installation</summary>
-      <div class="group-content">
-        <a href="#requirements">Requirements</a>
-        <a href="#build">Build</a>
-        <a href="#api-keys">API keys</a>
-      </div>
-    </details>
-    <details class="side-group" open>
-      <summary>Agentic pipeline</summary>
-      <div class="group-content">
-        <a href="#pipeline">Overview</a>
-        <a href="#five-stages">The five stages</a>
-        <a href="#recovery">Recovery</a>
-        <a href="#loop-safety">Loop safety</a>
-        <a href="#provider-routing">Provider routing</a>
-        <a href="#compaction">Context compaction</a>
-        <a href="#retrieval">Semantic retrieval</a>
-      </div>
-    </details>
-    <details class="side-group" open>
-      <summary>Tool reference</summary>
-      <div class="group-content">
-        <a href="#tools">Tool registry</a>
-        <a href="#approval">Approval policy</a>
-        <a href="#hitl">HITL diff review</a>
-      </div>
-    </details>
-    <details class="side-group" open>
-      <summary>Deployment</summary>
-      <div class="group-content">
-        <a href="#databases">Databases</a>
-        <a href="#resume">Long-horizon resume</a>
-      </div>
-    </details>
-  </nav>
+      <main id="top">
+        <div class="crumb">
+          <a href="#top">Documentation</a>
+          <span class="sep">/</span>
+          <span>Introduction</span>
+        </div>
 
-  <main id="top">
+        <div class="hero-card">
+          <h1>Agent-0</h1>
+          <p class="lede">
+            An agentic coding runtime built around the limits of small
+            open-weight models. Many small specialists, tight context, hard
+            guardrails.
+          </p>
+        </div>
 
-    <div class="crumb">
-      <a href="#top">Documentation</a>
-      <span class="sep">/</span>
-      <span>Introduction</span>
-    </div>
+        <p>
+          Agent-0 is a coding runtime for small and medium open-weight models.
+          It combines specialist agents, targeted code context, visible model
+          routing, and approval-gated tools to handle multi-step software tasks
+          under the Takneek constraints.
+        </p>
 
-    <div class="hero-card">
-      <h1>Agent-0</h1>
-      <p class="lede">An agentic coding runtime built around the limits of small open-weight models. Many small specialists, tight context, hard guardrails.</p>
-    </div>
+        <h2 id="problem">Problem statement</h2>
 
-    <p>Agent-0 is a coding runtime for small and medium open-weight models. It combines specialist agents, targeted code context, visible model routing, and approval-gated tools to handle multi-step software tasks under the Takneek constraints.</p>
+        <p>
+          Small models can be inexpensive and capable, but they are less
+          reliable when one model must plan, edit, test, and recover from
+          failure in a large context. Agent-0 splits these responsibilities,
+          limits the context supplied to each stage, and keeps the user in
+          control of changes.
+        </p>
 
-    <h2 id="problem">Problem statement</h2>
+        <h2 id="features">Key features</h2>
 
-    <p>Small models can be inexpensive and capable, but they are less reliable when one model must plan, edit, test, and recover from failure in a large context. Agent-0 splits these responsibilities, limits the context supplied to each stage, and keeps the user in control of changes.</p>
+        <div class="features">
+          <div class="feature">
+            <h4>Multi-agent orchestration</h4>
+            <p>
+              Fixed 5-stage coding pipeline (Planner → Retriever → Coder →
+              Verifier → Reviewer) plus a registry-driven multi-agent path for
+              everything else. Both share the same tool registry and approval
+              boundary.
+            </p>
+          </div>
+          <div class="feature">
+            <h4>Smart provider routing</h4>
+            <p>
+              Chooses a configured model and provider using context fit,
+              availability, cooldown, and cost. Route decisions are shown to the
+              user, and retryable failures fall back without losing progress.
+            </p>
+          </div>
+          <div class="feature">
+            <h4>Automatic context compaction</h4>
+            <p>
+              Reduces history before a model reaches its context limit while
+              retaining the objective, completed work, failures, changed files,
+              and project rules.
+            </p>
+          </div>
+          <div class="feature">
+            <h4>Semantic code retrieval</h4>
+            <p>
+              Finds relevant files, symbols, and compact code slices so agents
+              get useful context rather than the full repository.
+            </p>
+          </div>
+          <div class="feature">
+            <h4>Long-horizon resume</h4>
+            <p>
+              Completed stages are checkpointed so interrupted tasks can resume
+              without repeating finished work.
+            </p>
+          </div>
+          <div class="feature">
+            <h4>Manual context + /bytheway</h4>
+            <p>
+              Pin files or line ranges to the task.
+              <code>/bytheway</code> handles side questions in an isolated call,
+              keeping the main task focused.
+            </p>
+          </div>
+          <div class="feature">
+            <h4>Autonomous tools + HITL</h4>
+            <p>
+              Agents can inspect the workspace and run approved actions. File
+              changes are previewed as diffs and can be accepted or rejected
+              hunk by hunk.
+            </p>
+          </div>
+          <div class="feature">
+            <h4>AGENTS.md project rules</h4>
+            <p>
+              Root <code>AGENTS.md</code> instructions are loaded into the
+              workflow and retained when context is compacted.
+            </p>
+          </div>
+          <div class="feature">
+            <h4>Persisted trace spans</h4>
+            <p>
+              Task events record stages, routing, approvals, and failures so
+              work can be inspected and resumed.
+            </p>
+          </div>
+        </div>
 
-    <h2 id="features">Key features</h2>
+        <h2 id="architecture">System overview</h2>
 
-    <div class="features">
-      <div class="feature">
-        <h4>Multi-agent orchestration</h4>
-        <p>Fixed 5-stage coding pipeline (Planner → Retriever → Coder → Verifier → Reviewer) plus a registry-driven multi-agent path for everything else. Both share the same tool registry and approval boundary.</p>
-      </div>
-      <div class="feature">
-        <h4>Smart provider routing</h4>
-        <p>Chooses a configured model and provider using context fit, availability, cooldown, and cost. Route decisions are shown to the user, and retryable failures fall back without losing progress.</p>
-      </div>
-      <div class="feature">
-        <h4>Automatic context compaction</h4>
-        <p>Reduces history before a model reaches its context limit while retaining the objective, completed work, failures, changed files, and project rules.</p>
-      </div>
-      <div class="feature">
-        <h4>Semantic code retrieval</h4>
-        <p>Finds relevant files, symbols, and compact code slices so agents get useful context rather than the full repository.</p>
-      </div>
-      <div class="feature">
-        <h4>Long-horizon resume</h4>
-        <p>Completed stages are checkpointed so interrupted tasks can resume without repeating finished work.</p>
-      </div>
-      <div class="feature">
-        <h4>Manual context + /bytheway</h4>
-        <p>Pin files or line ranges to the task. <code>/bytheway</code> handles side questions in an isolated call, keeping the main task focused.</p>
-      </div>
-      <div class="feature">
-        <h4>Autonomous tools + HITL</h4>
-        <p>Agents can inspect the workspace and run approved actions. File changes are previewed as diffs and can be accepted or rejected hunk by hunk.</p>
-      </div>
-      <div class="feature">
-        <h4>AGENTS.md project rules</h4>
-        <p>Root <code>AGENTS.md</code> instructions are loaded into the workflow and retained when context is compacted.</p>
-      </div>
-      <div class="feature">
-        <h4>Persisted trace spans</h4>
-        <p>Task events record stages, routing, approvals, and failures so work can be inspected and resumed.</p>
-      </div>
-    </div>
+        <p>
+          Three layers, one boundary. <code>HeadlessRuntimeService</code> is the
+          application boundary; every client goes through it, and no
+          orchestration lives in the clients themselves.
+        </p>
 
-    <h2 id="architecture">System overview</h2>
+        <h3 id="topology">Topology</h3>
 
-    <p>Three layers, one boundary. <code>HeadlessRuntimeService</code> is the application boundary; every client goes through it, and no orchestration lives in the clients themselves.</p>
-
-    <h3 id="topology">Topology</h3>
-
-    <div class="code-block">
-      <div class="code-title">architecture.txt</div>
-<pre><code>Clients        Electron Desktop ─┐
+        <div class="code-block">
+          <div class="code-title">architecture.txt</div>
+          <pre><code>Clients        Electron Desktop ─┐
                Browser workbench ─┤─▶ Loopback GUI server (node:http 127.0.0.1:4737, RuntimeTransport, SSE)
                Ink TUI ───────────┘   (DTOs only, nodeIntegration disabled, sandbox on)
                                     │
@@ -750,143 +991,435 @@ Runtime core   HeadlessRuntimeService (application boundary)
 Rust sidecar   JSON-RPC line-delimited stdin/stdout (request IDs, 30s timeout)
                slice_ast · prune_ast · extract_symbols · cpg_put/cpg_rank/cpg_revision
                compute_diff (LCS) · check_cycle (BLAKE3 StateTree, 10-state history, task-namespaced)</code></pre>
-    </div>
+        </div>
 
-    <p>The TypeScript layer owns policy: session and task lifecycle, built-in + project agent registration from <code>.agentic/agents/*.md</code>, provider selection, tool composition with hidden <code>handoff_agent</code> delegation proxies, approval requests, event delivery, checkpointing with plan expansions, recovery, manual context and isolated <code>/bytheway</code>, and trace persistence. The Rust sidecar is the syntax and diff boundary — eight RPCs where a native parser or BLAKE3/memmap2 is materially faster than pure JavaScript; it is optional at runtime (tool error + regex fallback) and required at build. Browser/Electron renderer code depends only on DTOs served over the small loopback HTTP server, never on Node-only packages (contextIsolation + sandbox, free port, read-only app resources).</p>
+        <p>
+          The TypeScript layer owns policy: session and task lifecycle, built-in
+          + project agent registration from <code>.agentic/agents/*.md</code>,
+          provider selection, tool composition with hidden
+          <code>handoff_agent</code> delegation proxies, approval requests,
+          event delivery, checkpointing with plan expansions, recovery, manual
+          context and isolated <code>/bytheway</code>, and trace persistence.
+          The Rust sidecar is the syntax and diff boundary — eight RPCs where a
+          native parser or BLAKE3/memmap2 is materially faster than pure
+          JavaScript; it is optional at runtime (tool error + regex fallback)
+          and required at build. Browser/Electron renderer code depends only on
+          DTOs served over the small loopback HTTP server, never on Node-only
+          packages (contextIsolation + sandbox, free port, read-only app
+          resources).
+        </p>
 
-    <h3 id="packages">Package layout</h3>
+        <h3 id="packages">Package layout</h3>
 
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Package</th><th>Responsibility</th></tr></thead>
-      <tbody>
-        <tr><td><code>@agentic-runtime/core</code></td><td>Provider-neutral contracts, agent runner, task and multi-agent orchestrators, tool registry, Rust bridge client</td></tr>
-        <tr><td><code>@agentic-runtime/gateway</code></td><td>Provider registrations, model registry, ranked route selection, credential resolution, failover, cooldown</td></tr>
-        <tr><td><code>@agentic-runtime/openai</code></td><td>OpenAI Responses adapter and generic OpenAI-compatible chat adapter</td></tr>
-        <tr><td><code>@agentic-runtime/ollama</code></td><td>Ollama chat adapter and tool-call fallback parser</td></tr>
-        <tr><td><code>@agentic-runtime/retrieval</code></td><td>Per-project SQLite semantic index, incremental indexing, ranked slice queries</td></tr>
-        <tr><td><code>@agentic-runtime/workspace</code></td><td>Root-sandboxed file reads and writes, hashing, hunk generation, rollback primitives</td></tr>
-        <tr><td><code>@agentic-runtime/search</code></td><td>Ripgrep-backed file and text search via <code>@vscode/ripgrep</code></td></tr>
-        <tr><td><code>@agentic-runtime/command</code></td><td>Bounded cross-platform shell execution via Execa</td></tr>
-        <tr><td><code>@agentic-runtime/tools</code></td><td>Concrete workspace, shell, web, crawl, and Git tools</td></tr>
-        <tr><td><code>@agentic-runtime/session</code></td><td>Global and per-project SQLite persistence</td></tr>
-        <tr><td><code>@agentic-runtime/runtime</code></td><td>Application composition - <code>HeadlessRuntimeService</code> assembly and lifecycle</td></tr>
-        <tr><td><code>@agentic-runtime/tui</code></td><td>Ink presentation and approval adapter, current interactive client</td></tr>
-        <tr><td><code>@agentic-runtime/gui-server</code></td><td>Loopback <code>node:http</code> boundary: <code>RuntimeTransport</code> init, task/cancel via HTTP, SSE correlated events, approval resolve, workspace/session/context/provider/task/event/trace DTOs, static GUI host</td></tr>
-        <tr><td><code>@agentic-runtime/gui</code></td><td>Vite + Monaco browser workbench (read-only editor, explorer, provider settings, local chat preview)</td></tr>
-        <tr><td><code>@agentic-runtime/desktop</code></td><td>Thin Electron host (sandbox, contextIsolation, free loopback port, owns server lifecycle, read-only app resources, staged ripgrep/sidecar)</td></tr>
-        <tr><td><code>rust/</code></td><td>Rust sidecar (8 RPCs): tree-sitter slicing/extract_symbols, signature pruning, FlatCPG/WAL (bincode, memmap2), line diff (LCS), BLAKE3 StateTree cycle detection</td></tr>
-      </tbody>
-    </table>
-    </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Package</th>
+                <th>Responsibility</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>@agentic-runtime/core</code></td>
+                <td>
+                  Provider-neutral contracts, agent runner, task and multi-agent
+                  orchestrators, tool registry, Rust bridge client
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/gateway</code></td>
+                <td>
+                  Provider registrations, model registry, ranked route
+                  selection, credential resolution, failover, cooldown
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/openai</code></td>
+                <td>
+                  OpenAI Responses adapter and generic OpenAI-compatible chat
+                  adapter
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/ollama</code></td>
+                <td>Ollama chat adapter and tool-call fallback parser</td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/retrieval</code></td>
+                <td>
+                  Per-project SQLite semantic index, incremental indexing,
+                  ranked slice queries
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/workspace</code></td>
+                <td>
+                  Root-sandboxed file reads and writes, hashing, hunk
+                  generation, rollback primitives
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/search</code></td>
+                <td>
+                  Ripgrep-backed file and text search via
+                  <code>@vscode/ripgrep</code>
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/command</code></td>
+                <td>Bounded cross-platform shell execution via Execa</td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/tools</code></td>
+                <td>Concrete workspace, shell, web, crawl, and Git tools</td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/session</code></td>
+                <td>Global and per-project SQLite persistence</td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/runtime</code></td>
+                <td>
+                  Application composition -
+                  <code>HeadlessRuntimeService</code> assembly and lifecycle
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/tui</code></td>
+                <td>
+                  Ink presentation and approval adapter, current interactive
+                  client
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/gui-server</code></td>
+                <td>
+                  Loopback <code>node:http</code> boundary:
+                  <code>RuntimeTransport</code> init, task/cancel via HTTP, SSE
+                  correlated events, approval resolve,
+                  workspace/session/context/provider/task/event/trace DTOs,
+                  static GUI host
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/gui</code></td>
+                <td>
+                  Vite + Monaco browser workbench (read-only editor, explorer,
+                  provider settings, local chat preview)
+                </td>
+              </tr>
+              <tr>
+                <td><code>@agentic-runtime/desktop</code></td>
+                <td>
+                  Thin Electron host (sandbox, contextIsolation, free loopback
+                  port, owns server lifecycle, read-only app resources, staged
+                  ripgrep/sidecar)
+                </td>
+              </tr>
+              <tr>
+                <td><code>rust/</code></td>
+                <td>
+                  Rust sidecar (8 RPCs): tree-sitter slicing/extract_symbols,
+                  signature pruning, FlatCPG/WAL (bincode, memmap2), line diff
+                  (LCS), BLAKE3 StateTree cycle detection
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-    <h3 id="data-flow">Data flow</h3>
+        <h3 id="data-flow">Data flow</h3>
 
-    <p>A coding task moves through the system as follows:</p>
+        <p>A coding task moves through the system as follows:</p>
 
-    <ol>
-      <li>The client (TUI in-process, or Browser/Desktop via Loopback GUI server <code>POST /api/task</code> + SSE) posts a user prompt to <code>HeadlessRuntimeService.executeTask()</code> / <code>resumeTask({taskId})</code>.</li>
-      <li>The runtime resolves the caller's agent (<code>isSelectableAgent</code>: only <code>Architect</code>/<code>Coder</code> + <code>.agentic/agents/*.md</code>), checks the routing heuristics, and picks one of four paths plus the focused specialization: <em>verification-only</em> → Verifier; <em>coding pipeline</em> (Planner→Retriever→Coder→Verifier→Reviewer, with Planner-driven 1→2-4 subtask rewrite); <em>Architect read-only</em> (tools + context, no mutation); <em>Chat</em> (no tools, no system prompt, no context) — plus focused single-file <code>implement/add @path</code> with preloaded hash, 2-turn Coder cap, 3-turn Verifier, no rollback.</li>
-      <li>The chosen orchestrator runs its stages sequentially (parallel read-only later). Each stage builds a scoped request — Planner read-only, Retriever deterministic not LLM (up to 10 × 40-line slices), Coder per-subtask slice — and hands it to <code>AgentRunner</code>. Verifier must end with exact <code>VERIFICATION_PASSED</code> on its own line and only counts with real tool evidence; Reviewer is read-only and deterministic for bounded single-file work.</li>
-      <li>Inside the runner, request size is estimated (~4 chars/token, reserve 1024), compaction may fire (trigger 75% → 60%, after error →45%, keep ≥2 exchanges, ≤4 passes, ≤2 recoveries, fallback 8k, via <code>prune_ast</code>), the provider gateway picks a route by eligibility (tool support, context fit, stage minimum window floor, cooldown) then bias (<code>capacity</code>=largest params, <code>economy</code>=cheapest, <code>balanced</code>=operator order; unknown params=0), and the model responds with text and any tool calls.</li>
-      <li>Tool arguments are validated by Ajv before preview, previews are prepared with stable base-hash hunks, approval is requested for side-effect tools (fail-safe default <code>ask</code>), hidden <code>handoff_agent</code> proxies enforce <code>allowedTools+delegatesTo</code>, and approved calls are executed. Results are returned to the model as structured tool messages with matching call IDs; duplicate tool-call cache (4× identical → skip) and failure fingerprints guard loops.</li>
-      <li>Every state transition is written to the databases — global <code>global.db</code> (settings/credentials/baseUrls/modelIds/validation), per-project <code>projects/&lt;projectId&gt;/project.db</code> (sessions/transcripts/tasks/state/events/context/checkpoints/recovery/traces/agent definitions incl. project <code>.agentic/agents</code>), and per-project <code>retrieval.db</code> (or <code>.agentic/data/retrieval.db</code> standalone) with FlatCPG WAL; all in SQLite WAL journal mode.</li>
-      <li>The runtime emits and persists events (route with reason/contextTokens/cost/failure class, tool cards, approval requests, stage transitions, compaction) and streams them over SSE via <code>RuntimeTransport</code> to the workbench/TUI route pane.</li>
-    </ol>
+        <ol>
+          <li>
+            The client (TUI in-process, or Browser/Desktop via Loopback GUI
+            server <code>POST /api/task</code> + SSE) posts a user prompt to
+            <code>HeadlessRuntimeService.executeTask()</code> /
+            <code>resumeTask({taskId})</code>.
+          </li>
+          <li>
+            The runtime resolves the caller's agent
+            (<code>isSelectableAgent</code>: only <code>Architect</code>/<code
+              >Coder</code
+            >
+            + <code>.agentic/agents/*.md</code>), checks the routing heuristics,
+            and picks one of four paths plus the focused specialization:
+            <em>verification-only</em> → Verifier;
+            <em>coding pipeline</em> (Planner→Retriever→Coder→Verifier→Reviewer,
+            with Planner-driven 1→2-4 subtask rewrite);
+            <em>Architect read-only</em> (tools + context, no mutation);
+            <em>Chat</em> (no tools, no system prompt, no context) — plus
+            focused single-file <code>implement/add @path</code> with preloaded
+            hash, 2-turn Coder cap, 3-turn Verifier, no rollback.
+          </li>
+          <li>
+            The chosen orchestrator runs its stages sequentially (parallel
+            read-only later). Each stage builds a scoped request — Planner
+            read-only, Retriever deterministic not LLM (up to 10 × 40-line
+            slices), Coder per-subtask slice — and hands it to
+            <code>AgentRunner</code>. Verifier must end with exact
+            <code>VERIFICATION_PASSED</code> on its own line and only counts
+            with real tool evidence; Reviewer is read-only and deterministic for
+            bounded single-file work.
+          </li>
+          <li>
+            Inside the runner, request size is estimated (~4 chars/token,
+            reserve 1024), compaction may fire (trigger 75% → 60%, after error
+            →45%, keep ≥2 exchanges, ≤4 passes, ≤2 recoveries, fallback 8k, via
+            <code>prune_ast</code>), the provider gateway picks a route by
+            eligibility (tool support, context fit, stage minimum window floor,
+            cooldown) then bias (<code>capacity</code>=largest params,
+            <code>economy</code>=cheapest, <code>balanced</code>=operator order;
+            unknown params=0), and the model responds with text and any tool
+            calls.
+          </li>
+          <li>
+            Tool arguments are validated by Ajv before preview, previews are
+            prepared with stable base-hash hunks, approval is requested for
+            side-effect tools (fail-safe default <code>ask</code>), hidden
+            <code>handoff_agent</code> proxies enforce
+            <code>allowedTools+delegatesTo</code>, and approved calls are
+            executed. Results are returned to the model as structured tool
+            messages with matching call IDs; duplicate tool-call cache (4×
+            identical → skip) and failure fingerprints guard loops.
+          </li>
+          <li>
+            Every state transition is written to the databases — global
+            <code>global.db</code>
+            (settings/credentials/baseUrls/modelIds/validation), per-project
+            <code>projects/&lt;projectId&gt;/project.db</code>
+            (sessions/transcripts/tasks/state/events/context/checkpoints/recovery/traces/agent
+            definitions incl. project <code>.agentic/agents</code>), and
+            per-project <code>retrieval.db</code> (or
+            <code>.agentic/data/retrieval.db</code> standalone) with FlatCPG
+            WAL; all in SQLite WAL journal mode.
+          </li>
+          <li>
+            The runtime emits and persists events (route with
+            reason/contextTokens/cost/failure class, tool cards, approval
+            requests, stage transitions, compaction) and streams them over SSE
+            via <code>RuntimeTransport</code> to the workbench/TUI route pane.
+          </li>
+        </ol>
 
-    <h3 id="persistence">Persistence</h3>
+        <h3 id="persistence">Persistence</h3>
 
-    <p>Three SQLite databases, each with a specific job:</p>
+        <p>Three SQLite databases, each with a specific job:</p>
 
-    <ul>
-      <li><strong>Global database</strong> (<code>global.db</code> in <code>%LOCALAPPDATA%\agentic-runtime</code> or <code>$XDG_DATA_HOME/agentic-runtime</code>). Settings, provider credentials (plaintext, keychain follow-up), provider base URLs and model IDs, last provider validation result. <em>Agent definitions no longer live here</em> — moved to project DB for isolation (global <code>agents</code> table dropped on first open).</li>
-      <li><strong>Project database</strong> (one per canonical project root, <code>projects/&lt;projectId&gt;/project.db</code> where <code>projectId=SHA256(realpath).slice(0,32)</code>). Sessions and transcripts, tasks and serialized task state, runtime events, manual and generated context items, orchestration checkpoints with plan expansions, recovery state, trace spans (<code>trace_spans</code>), and agent definitions including any the project ships itself.</li>
-      <li><strong>Retrieval database</strong> (one per project, <code>projects/&lt;projectId&gt;/retrieval.db</code> when composed, or <code>.agentic/data/retrieval.db</code> standalone). File hashes and metadata, symbols with line spans, and the definition/reference/call/import/export edge graph plus <code>FlatCPG</code> persisted via Rust <code>Wal</code> (bincode, 8-byte LE len, memmap2).</li>
-    </ul>
+        <ul>
+          <li>
+            <strong>Global database</strong> (<code>global.db</code> in
+            <code>%LOCALAPPDATA%\agentic-runtime</code> or
+            <code>$XDG_DATA_HOME/agentic-runtime</code>). Settings, provider
+            credentials (plaintext, keychain follow-up), provider base URLs and
+            model IDs, last provider validation result.
+            <em>Agent definitions no longer live here</em> — moved to project DB
+            for isolation (global <code>agents</code> table dropped on first
+            open).
+          </li>
+          <li>
+            <strong>Project database</strong> (one per canonical project root,
+            <code>projects/&lt;projectId&gt;/project.db</code> where
+            <code>projectId=SHA256(realpath).slice(0,32)</code>). Sessions and
+            transcripts, tasks and serialized task state, runtime events, manual
+            and generated context items, orchestration checkpoints with plan
+            expansions, recovery state, trace spans (<code>trace_spans</code>),
+            and agent definitions including any the project ships itself.
+          </li>
+          <li>
+            <strong>Retrieval database</strong> (one per project,
+            <code>projects/&lt;projectId&gt;/retrieval.db</code> when composed,
+            or <code>.agentic/data/retrieval.db</code> standalone). File hashes
+            and metadata, symbols with line spans, and the
+            definition/reference/call/import/export edge graph plus
+            <code>FlatCPG</code> persisted via Rust <code>Wal</code> (bincode,
+            8-byte LE len, memmap2).
+          </li>
+        </ul>
 
-    <p>SQLite databases run in WAL journal mode — readers see a stable snapshot from the main file while writers append to the WAL, so the TUI can read task state while the runtime writes checkpoints. Rust FlatCPG uses a separate memory-mapped <code>Wal</code>. Isolation is by file-per-project <em>plus</em> <code>projectId</code> filter on every project-scoped query; two projects sharing a database path in tests (file + filter) still cannot see each other's data, covering files/symbols/edges, sessions/tasks/traces, agents/rules, and filesystem root.</p>
+        <p>
+          SQLite databases run in WAL journal mode — readers see a stable
+          snapshot from the main file while writers append to the WAL, so the
+          TUI can read task state while the runtime writes checkpoints. Rust
+          FlatCPG uses a separate memory-mapped <code>Wal</code>. Isolation is
+          by file-per-project <em>plus</em> <code>projectId</code> filter on
+          every project-scoped query; two projects sharing a database path in
+          tests (file + filter) still cannot see each other's data, covering
+          files/symbols/edges, sessions/tasks/traces, agents/rules, and
+          filesystem root.
+        </p>
 
-    <h3 id="security">Security &amp; isolation</h3>
+        <h3 id="security">Security &amp; isolation</h3>
 
-    <ul>
-      <li><strong>Workspace sandboxing.</strong> All file paths are resolved against a single canonical workspace root. Paths outside the root and symlink traversal are rejected. Reads are UTF-8 only and bounded by size; writes are atomic and conflict-checked.</li>
-      <li><strong>Network policy.</strong> Web tools accept only HTTP and HTTPS, reject private and reserved network targets, do not execute page scripts, cap response size at 2 MB, and bound crawls to 25 pages on the same domain.</li>
-      <li><strong>Shell policy.</strong> Commands receive a restricted environment, run under a timeout with bounded output, and inherit the runtime's abort signal. Windows uses <code>cmd.exe</code>; Linux and macOS use <code>/bin/sh</code>.</li>
-      <li><strong>Approval boundary.</strong> Every side-effect tool is approval-gated; the runtime cannot mutate files, run shell commands, or push to Git without explicit user consent.</li>
-      <li><strong>Trace redaction.</strong> Secrets and sensitive field names are stripped before trace persistence.</li>
-    </ul>
+        <ul>
+          <li>
+            <strong>Workspace sandboxing.</strong> All file paths are resolved
+            against a single canonical workspace root. Paths outside the root
+            and symlink traversal are rejected. Reads are UTF-8 only and bounded
+            by size; writes are atomic and conflict-checked.
+          </li>
+          <li>
+            <strong>Network policy.</strong> Web tools accept only HTTP and
+            HTTPS, reject private and reserved network targets, do not execute
+            page scripts, cap response size at 2 MB, and bound crawls to 25
+            pages on the same domain.
+          </li>
+          <li>
+            <strong>Shell policy.</strong> Commands receive a restricted
+            environment, run under a timeout with bounded output, and inherit
+            the runtime's abort signal. Windows uses <code>cmd.exe</code>; Linux
+            and macOS use <code>/bin/sh</code>.
+          </li>
+          <li>
+            <strong>Approval boundary.</strong> Every side-effect tool is
+            approval-gated; the runtime cannot mutate files, run shell commands,
+            or push to Git without explicit user consent.
+          </li>
+          <li>
+            <strong>Trace redaction.</strong> Secrets and sensitive field names
+            are stripped before trace persistence.
+          </li>
+        </ul>
 
-    <div class="note">
-      <div>
-        <p><strong>Known limitation.</strong> Provider credentials are stored plaintext in the global SQLite; the database file is the current secret boundary. Moving credentials to OS keychain-backed storage is a documented follow-up.</p>
-      </div>
-    </div>
+        <div class="note">
+          <div>
+            <p>
+              <strong>Known limitation.</strong> Provider credentials are stored
+              plaintext in the global SQLite; the database file is the current
+              secret boundary. Moving credentials to OS keychain-backed storage
+              is a documented follow-up.
+            </p>
+          </div>
+        </div>
 
-    <h3 id="tradeoffs">Trade-offs</h3>
+        <h3 id="tradeoffs">Trade-offs</h3>
 
-    <p>The architecture reflects a set of deliberate choices, each of which had a plausible alternative:</p>
+        <p>
+          The architecture reflects a set of deliberate choices, each of which
+          had a plausible alternative:
+        </p>
 
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Choice</th><th>Alternative considered</th><th>Reasoning</th></tr></thead>
-      <tbody>
-        <tr>
-          <td>TypeScript orchestration with a small Rust sidecar</td>
-          <td>Full Rust runtime, or pure TypeScript</td>
-          <td>TypeScript iterates faster across providers, tools, and persistence. Rust wins on tree-sitter and signature pruning where a native library is materially cheaper. Process isolation keeps native parser crashes out of the runtime.</td>
-        </tr>
-        <tr>
-          <td>Sequential 5-stage pipeline</td>
-          <td>Parallel-agent scheduler</td>
-          <td>Multiple agents mutating one working tree in parallel are hard to recover safely. Sequential stages checkpoint cleanly. The cost is latency on independent work.</td>
-        </tr>
-        <tr>
-          <td>TypeScript compiler API plus edge-graph retrieval</td>
-          <td>Vector-DB embeddings, or a full code-property graph</td>
-          <td>Embeddings alone miss structural cross-file relationships. A full CPG is expensive to populate incrementally. The compiler-API path is deterministic, cheap, and gives real caller/callee signals.</td>
-        </tr>
-        <tr>
-          <td>Base-hash-bound line hunks for HITL</td>
-          <td>Structural AST merge</td>
-          <td>Line hunks are language-neutral, testable, and fail closed on a stale base. They support partial approval today.</td>
-        </tr>
-        <tr>
-          <td>Three SQLite databases</td>
-          <td>Postgres or a custom store</td>
-          <td>SQLite installs nowhere, inspects with any tool, and gives clean transactional boundaries per scope. Credentials sit plaintext; schema evolution is manual.</td>
-        </tr>
-        <tr>
-          <td>Same-model compaction</td>
-          <td>Dedicated summarization model</td>
-          <td>A separate summarizer adds a round-trip cost and latency. Structured extraction is heuristic, not free-form summarization.</td>
-        </tr>
-        <tr>
-          <td>Structured JSON tool-calling format with Ajv validation</td>
-          <td>Free-form string prompting or uncontrolled text parsing</td>
-          <td><strong>Tool-calling format used:</strong> Small open-weight models produce more reliable output on narrow, explicit tool surfaces. By enforcing a strict JSON Schema for tool calls and validating arguments via Ajv <em>before</em> the user sees an approval prompt, we prevent hallucinated arguments and ensure execution safety.</td>
-        </tr>
-      </tbody>
-    </table>
-    </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Choice</th>
+                <th>Alternative considered</th>
+                <th>Reasoning</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>TypeScript orchestration with a small Rust sidecar</td>
+                <td>Full Rust runtime, or pure TypeScript</td>
+                <td>
+                  TypeScript iterates faster across providers, tools, and
+                  persistence. Rust wins on tree-sitter and signature pruning
+                  where a native library is materially cheaper. Process
+                  isolation keeps native parser crashes out of the runtime.
+                </td>
+              </tr>
+              <tr>
+                <td>Sequential 5-stage pipeline</td>
+                <td>Parallel-agent scheduler</td>
+                <td>
+                  Multiple agents mutating one working tree in parallel are hard
+                  to recover safely. Sequential stages checkpoint cleanly. The
+                  cost is latency on independent work.
+                </td>
+              </tr>
+              <tr>
+                <td>TypeScript compiler API plus edge-graph retrieval</td>
+                <td>Vector-DB embeddings, or a full code-property graph</td>
+                <td>
+                  Embeddings alone miss structural cross-file relationships. A
+                  full CPG is expensive to populate incrementally. The
+                  compiler-API path is deterministic, cheap, and gives real
+                  caller/callee signals.
+                </td>
+              </tr>
+              <tr>
+                <td>Base-hash-bound line hunks for HITL</td>
+                <td>Structural AST merge</td>
+                <td>
+                  Line hunks are language-neutral, testable, and fail closed on
+                  a stale base. They support partial approval today.
+                </td>
+              </tr>
+              <tr>
+                <td>Three SQLite databases</td>
+                <td>Postgres or a custom store</td>
+                <td>
+                  SQLite installs nowhere, inspects with any tool, and gives
+                  clean transactional boundaries per scope. Credentials sit
+                  plaintext; schema evolution is manual.
+                </td>
+              </tr>
+              <tr>
+                <td>Same-model compaction</td>
+                <td>Dedicated summarization model</td>
+                <td>
+                  A separate summarizer adds a round-trip cost and latency.
+                  Structured extraction is heuristic, not free-form
+                  summarization.
+                </td>
+              </tr>
+              <tr>
+                <td>Structured JSON tool-calling format with Ajv validation</td>
+                <td>Free-form string prompting or uncontrolled text parsing</td>
+                <td>
+                  <strong>Tool-calling format used:</strong> Small open-weight
+                  models produce more reliable output on narrow, explicit tool
+                  surfaces. By enforcing a strict JSON Schema for tool calls and
+                  validating arguments via Ajv <em>before</em> the user sees an
+                  approval prompt, we prevent hallucinated arguments and ensure
+                  execution safety.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-    <h2 id="setup">Setup &amp; installation</h2>
+        <h2 id="setup">Setup &amp; installation</h2>
 
-    <h3 id="requirements">Requirements</h3>
+        <h3 id="requirements">Requirements</h3>
 
-    <ul>
-      <li>Node.js 22.5.0 or newer (uses built-in <code>node:sqlite</code>; verified with 24)</li>
-      <li>pnpm 9.15.5 pinned (<code>corepack enable &amp;&amp; corepack prepare pnpm@9.15.5 --activate</code>; npm/yarn will not resolve workspaces)</li>
-      <li>Rust ≥1.85.0 (crate uses <code>edition = "2024"</code>; required to build, optional at runtime — missing sidecar degrades to regex/tool error)</li>
-      <li>Git (for clone + <code>git_*</code> tools) and <code>ripgrep</code> (<code>rg</code>) for search; or set <code>AGENTIC_RIPGREP_PATH</code></li>
-      <li>Optional: <a href="https://ollama.com">Ollama</a> for zero-cost local inference</li>
-      <li>Recommended: 16 GB RAM and 8 GB VRAM for the local model tier</li>
-    </ul>
+        <ul>
+          <li>
+            Node.js 22.5.0 or newer (uses built-in <code>node:sqlite</code>;
+            verified with 24)
+          </li>
+          <li>
+            pnpm 9.15.5 pinned (<code
+              >corepack enable &amp;&amp; corepack prepare pnpm@9.15.5
+              --activate</code
+            >; npm/yarn will not resolve workspaces)
+          </li>
+          <li>
+            Rust ≥1.85.0 (crate uses <code>edition = "2024"</code>; required to
+            build, optional at runtime — missing sidecar degrades to regex/tool
+            error)
+          </li>
+          <li>
+            Git (for clone + <code>git_*</code> tools) and
+            <code>ripgrep</code> (<code>rg</code>) for search; or set
+            <code>AGENTIC_RIPGREP_PATH</code>
+          </li>
+          <li>
+            Optional: <a href="https://ollama.com">Ollama</a> for zero-cost
+            local inference
+          </li>
+          <li>Recommended: 16 GB RAM and 8 GB VRAM for the local model tier</li>
+        </ul>
 
-    <h3>Linux (Ubuntu 22.04+)</h3>
+        <h3>Linux (Ubuntu 22.04+)</h3>
 
-    <div class="code-block">
-      <div class="code-title">bash</div>
-<pre><code># System packages
+        <div class="code-block">
+          <div class="code-title">bash</div>
+          <pre><code># System packages
 sudo apt update &amp;&amp; sudo apt install -y curl git build-essential ripgrep
 
 # Rust toolchain (≥1.85)
@@ -911,418 +1444,1130 @@ pnpm --version  # expect 9.15.5
 curl -fsSL https://ollama.com/install.sh | sh
 ollama serve &amp;
 ollama pull qwen2.5-coder:7b  # ~4.7 GB, default local route</code></pre>
-    </div>
+        </div>
 
-    <h3 id="setup-other">Windows &amp; macOS</h3>
-    <p>Install Node.js 22.5+ via <a href="https://github.com/Schniz/fnm">fnm</a> (<code>fnm install 22</code> + <code>fnm use 22</code>), then <code>corepack enable &amp;&amp; corepack prepare pnpm@9.15.5 --activate</code> (not <code>npm i -g pnpm</code>), then the Rust toolchain from <a href="https://rustup.rs">rustup.rs</a> (≥1.85). If <code>pnpm: command not found</code> after, re-run <code>fnm use 22</code> or add <code>eval "$(fnm env --use-on-cd)"</code> to your shell profile. Ollama has native installers for both platforms.</p>
+        <h3 id="setup-other">Windows &amp; macOS</h3>
+        <p>
+          Install Node.js 22.5+ via
+          <a href="https://github.com/Schniz/fnm">fnm</a> (<code
+            >fnm install 22</code
+          >
+          + <code>fnm use 22</code>), then
+          <code
+            >corepack enable &amp;&amp; corepack prepare pnpm@9.15.5
+            --activate</code
+          >
+          (not <code>npm i -g pnpm</code>), then the Rust toolchain from
+          <a href="https://rustup.rs">rustup.rs</a> (≥1.85). If
+          <code>pnpm: command not found</code> after, re-run
+          <code>fnm use 22</code> or add
+          <code>eval "$(fnm env --use-on-cd)"</code> to your shell profile.
+          Ollama has native installers for both platforms.
+        </p>
 
-    <h3 id="build">Build</h3>
+        <h3 id="build">Build</h3>
 
-    <div class="code-block">
-      <div class="code-title">bash</div>
-<pre><code>pnpm install
+        <div class="code-block">
+          <div class="code-title">bash</div>
+          <pre><code>pnpm install
 pnpm build     # cargo build --manifest-path rust/Cargo.toml && tsc -b 12 packages (core, gateway, etc.)
 # Browser GUI not part of pnpm build:
 pnpm --filter @agentic-runtime/gui build
 # After git pull with timestamp skew:
 pnpm build:force</code></pre>
-    </div>
+        </div>
 
-    <p>Other scripts:</p>
-    <ul>
-      <li><code>pnpm typecheck</code> - TypeScript build in checking mode</li>
-      <li><code>pnpm test</code> - forces full rebuild, then 47 TS tests (<code>tests/tsconfig.json</code> → <code>node --test dist-tests/*.js</code>) — does not run Rust tests</li>
-      <li><code>pnpm test:rust</code> - 8 Rust unit tests (<code>cargo test --manifest-path rust/Cargo.toml</code>)</li>
-      <li><code>pnpm build:force</code> - recompiles everything (Rust + <code>tsc -b --force</code>)</li>
-      <li><code>pnpm build:rust:release</code> - release sidecar for installers</li>
-      <li><code>pnpm clean</code> - cleans TS outputs (not <code>rust/target</code> or <code>gui/dist</code>)</li>
-      <li><code>pnpm start</code> / <code>pnpm desktop</code> - builds (if needed) and opens Electron desktop</li>
-      <li><code>pnpm desktop:quick</code> - opens already-built desktop</li>
-      <li><code>pnpm desktop:package</code> - release sidecar + GUI, stages ripgrep/binary, builds installer</li>
-      <li><code>pnpm tui</code> - <code>node scripts/build-sidecar.mjs && pnpm build:ts && node packages/tui/dist/index.js</code></li>
-      <li><code>pnpm settings</code> - loopback server only (<code>127.0.0.1:4737</code>, <code>AGENTIC_GUI_PORT</code>/<code>AGENTIC_PROJECT_ROOT</code> overrides)</li>
-      <li><code>pnpm lint</code> - ESLint</li>
-      <li><code>pnpm format</code> / <code>pnpm format:check</code> - Prettier</li>
-    </ul>
+        <p>Other scripts:</p>
+        <ul>
+          <li>
+            <code>pnpm typecheck</code> - TypeScript build in checking mode
+          </li>
+          <li>
+            <code>pnpm test</code> - forces full rebuild, then 47 TS tests
+            (<code>tests/tsconfig.json</code> →
+            <code>node --test dist-tests/*.js</code>) — does not run Rust tests
+          </li>
+          <li>
+            <code>pnpm test:rust</code> - 8 Rust unit tests (<code
+              >cargo test --manifest-path rust/Cargo.toml</code
+            >)
+          </li>
+          <li>
+            <code>pnpm build:force</code> - recompiles everything (Rust +
+            <code>tsc -b --force</code>)
+          </li>
+          <li>
+            <code>pnpm build:rust:release</code> - release sidecar for
+            installers
+          </li>
+          <li>
+            <code>pnpm clean</code> - cleans TS outputs (not
+            <code>rust/target</code> or <code>gui/dist</code>)
+          </li>
+          <li>
+            <code>pnpm start</code> / <code>pnpm desktop</code> - builds (if
+            needed) and opens Electron desktop
+          </li>
+          <li><code>pnpm desktop:quick</code> - opens already-built desktop</li>
+          <li>
+            <code>pnpm desktop:package</code> - release sidecar + GUI, stages
+            ripgrep/binary, builds installer
+          </li>
+          <li>
+            <code>pnpm tui</code> -
+            <code
+              >node scripts/build-sidecar.mjs && pnpm build:ts && node
+              packages/tui/dist/index.js</code
+            >
+          </li>
+          <li>
+            <code>pnpm settings</code> - loopback server only
+            (<code>127.0.0.1:4737</code>, <code>AGENTIC_GUI_PORT</code>/<code
+              >AGENTIC_PROJECT_ROOT</code
+            >
+            overrides)
+          </li>
+          <li><code>pnpm lint</code> - ESLint</li>
+          <li>
+            <code>pnpm format</code> / <code>pnpm format:check</code> - Prettier
+          </li>
+        </ul>
 
-    <h3 id="first-run">First run</h3>
+        <h3 id="first-run">First run</h3>
 
-    <div class="code-block">
-      <div class="code-title">bash</div>
-<pre><code>cp .env.example .env
+        <div class="code-block">
+          <div class="code-title">bash</div>
+          <pre><code>cp .env.example .env
 # Edit .env to set MODEL_PROVIDER and matching provider settings.
 
 pnpm start                                        # launches the Electron desktop IDE
 pnpm tui                                          # opens the CLI TUI in .
 pnpm tui -- "D:/path/to/target/workspace"         # sandbox to another workspace</code></pre>
-    </div>
+        </div>
 
-    <p>The workspace passed after <code>--</code> is stripped from pnpm's <code>--</code>, validated (exists, is directory, canonicalized via <code>realpath</code>), and becomes the only root for workspace file tools, ripgrep search, command and Git tools, semantic retrieval, project session persistence, project <code>AGENTS.md</code>, and <code>.agentic/agents/*.md</code>. Its own <code>.env</code> supplies provider configuration unless <code>ENV_FILE</code> points elsewhere; the desktop app will launch and allow you to select workspaces visually. On Windows, agent commands still run through <code>cmd.exe</code> (not Bash) regardless of launching shell.</p>
+        <p>
+          The workspace passed after <code>--</code> is stripped from pnpm's
+          <code>--</code>, validated (exists, is directory, canonicalized via
+          <code>realpath</code>), and becomes the only root for workspace file
+          tools, ripgrep search, command and Git tools, semantic retrieval,
+          project session persistence, project <code>AGENTS.md</code>, and
+          <code>.agentic/agents/*.md</code>. Its own <code>.env</code> supplies
+          provider configuration unless <code>ENV_FILE</code> points elsewhere;
+          the desktop app will launch and allow you to select workspaces
+          visually. On Windows, agent commands still run through
+          <code>cmd.exe</code> (not Bash) regardless of launching shell.
+        </p>
 
-    <div class="note">
-      <div>
-        <p><strong>Git Bash on Windows.</strong> Use a relative path or quoted forward slashes so backslashes are not consumed as escape characters: <code>pnpm tui -- ./tmp/target</code> or <code>pnpm tui -- "C:/path/to/target"</code>.</p>
-      </div>
-    </div>
+        <div class="note">
+          <div>
+            <p>
+              <strong>Git Bash on Windows.</strong> Use a relative path or
+              quoted forward slashes so backslashes are not consumed as escape
+              characters: <code>pnpm tui -- ./tmp/target</code> or
+              <code>pnpm tui -- "C:/path/to/target"</code>.
+            </p>
+          </div>
+        </div>
 
-    <h3 id="api-keys">API keys per provider</h3>
+        <h3 id="api-keys">API keys per provider</h3>
 
-    <p>Keys can be entered through <code>/settings</code> in the TUI or written into the workspace <code>.env</code>. Stored keys take precedence over environment variables.</p>
+        <p>
+          Keys can be entered through <code>/settings</code> in the TUI or
+          written into the workspace <code>.env</code>. Stored keys take
+          precedence over environment variables.
+        </p>
 
-    <h4>Groq (default hosted route)</h4>
-    <div class="code-block">
-      <div class="code-title">.env</div>
-<pre><code>MODEL_PROVIDER=groq
+        <h4>Groq (default hosted route)</h4>
+        <div class="code-block">
+          <div class="code-title">.env</div>
+          <pre><code>MODEL_PROVIDER=groq
 GROQ_API_KEY=your-key
 GROQ_MODEL=qwen/qwen3.6-27b</code></pre>
-    </div>
-    <p>Free tier, no card required. Gateway allowlist enforces free-tier/pay-as-you-go only; models &gt;80B dropped, unknown sizes marked <code>unverified</code>.</p>
+        </div>
+        <p>
+          Free tier, no card required. Gateway allowlist enforces
+          free-tier/pay-as-you-go only; models &gt;80B dropped, unknown sizes
+          marked <code>unverified</code>.
+        </p>
 
-    <h4>OpenRouter</h4>
-    <div class="code-block">
-      <div class="code-title">.env</div>
-<pre><code>MODEL_PROVIDER=openrouter
+        <h4>OpenRouter</h4>
+        <div class="code-block">
+          <div class="code-title">.env</div>
+          <pre><code>MODEL_PROVIDER=openrouter
 OPENROUTER_API_KEY=your-key
 OPENROUTER_MODEL=nvidia/nemotron-3.5-lightning:free  # use :free suffix to stay free</code></pre>
-    </div>
-    <p>The gateway discovers OpenRouter models dynamically from its <code>/models</code> API and normalizes capability, context, and pricing metadata.</p>
+        </div>
+        <p>
+          The gateway discovers OpenRouter models dynamically from its
+          <code>/models</code> API and normalizes capability, context, and
+          pricing metadata.
+        </p>
 
-    <h4>Mistral</h4>
-    <div class="code-block">
-      <div class="code-title">.env</div>
-<pre><code>MODEL_PROVIDER=openrouter  # or via Settings
+        <h4>Mistral</h4>
+        <div class="code-block">
+          <div class="code-title">.env</div>
+          <pre><code>MODEL_PROVIDER=openrouter  # or via Settings
 MISTRAL_API_KEY=your-key
 MISTRAL_MODEL=ministral-14b-latest</code></pre>
-    </div>
+        </div>
 
-    <h4>Cerebras</h4>
-    <div class="code-block">
-      <div class="code-title">.env</div>
-<pre><code>CEREBRAS_API_KEY=your-key
+        <h4>Cerebras</h4>
+        <div class="code-block">
+          <div class="code-title">.env</div>
+          <pre><code>CEREBRAS_API_KEY=your-key
 CEREBRAS_MODEL=gemma-4-31b</code></pre>
-    </div>
+        </div>
 
-    <h4>Hugging Face</h4>
-    <div class="code-block">
-      <div class="code-title">.env</div>
-<pre><code>HF_TOKEN=your-key
+        <h4>Hugging Face</h4>
+        <div class="code-block">
+          <div class="code-title">.env</div>
+          <pre><code>HF_TOKEN=your-key
 HUGGINGFACE_MODEL=Qwen/Qwen3-Coder-30B-A3B-Instruct  # Inference Providers, small monthly credit</code></pre>
-    </div>
+        </div>
 
-    <h4>Ollama (local, no key required)</h4>
-    <div class="code-block">
-      <div class="code-title">.env</div>
-<pre><code>MODEL_PROVIDER=ollama
+        <h4>Ollama (local, no key required)</h4>
+        <div class="code-block">
+          <div class="code-title">.env</div>
+          <pre><code>MODEL_PROVIDER=ollama
 OLLAMA_ENDPOINT=http://localhost:11434  # base URL; trailing /api/chat stripped
 OLLAMA_MODEL=qwen2.5-coder:7b  # must match `ollama list` exactly incl. tag</code></pre>
-    </div>
-    <p>Local endpoint is <code>http://localhost:11434</code> (<code>OLLAMA_ENDPOINT</code> defaults there; <code>/api/chat</code> stripped before building provider URLs). Verify with <code>curl http://localhost:11434/api/tags</code>.</p>
+        </div>
+        <p>
+          Local endpoint is <code>http://localhost:11434</code> (<code
+            >OLLAMA_ENDPOINT</code
+          >
+          defaults there; <code>/api/chat</code> stripped before building
+          provider URLs). Verify with
+          <code>curl http://localhost:11434/api/tags</code>.
+        </p>
 
-    <h4>OpenAI-compatible endpoint</h4>
-    <div class="code-block">
-      <div class="code-title">.env</div>
-<pre><code>MODEL_PROVIDER=openai-compatible
+        <h4>OpenAI-compatible endpoint</h4>
+        <div class="code-block">
+          <div class="code-title">.env</div>
+          <pre><code>MODEL_PROVIDER=openai-compatible
 OPENAI_COMPATIBLE_BASE_URL=https://your-endpoint/v1  # required, include /v1
 OPENAI_COMPATIBLE_API_KEY=your-key   # only if required
 OPENAI_COMPATIBLE_MODEL=your-model-id</code></pre>
-    </div>
-    <p><code>MODEL_PROVIDER</code> enum: <code>ollama</code> | <code>groq</code> | <code>openrouter</code> | <code>openai-compatible</code> (defaults <code>ollama</code>; direct <code>openai</code> not supported). <code>ENV_FILE</code> can override dotenv path; <code>OPENAI_MODEL</code> is final fallback for OpenRouter/compatible.</p>
+        </div>
+        <p>
+          <code>MODEL_PROVIDER</code> enum: <code>ollama</code> |
+          <code>groq</code> | <code>openrouter</code> |
+          <code>openai-compatible</code> (defaults <code>ollama</code>; direct
+          <code>openai</code> not supported). <code>ENV_FILE</code> can override
+          dotenv path; <code>OPENAI_MODEL</code> is final fallback for
+          OpenRouter/compatible.
+        </p>
 
-    <h2 id="pipeline">Agentic pipeline</h2>
+        <h2 id="pipeline">Agentic pipeline</h2>
 
-    <p>Two orchestrators coexist in the runtime. <code>TaskOrchestrator</code> runs the fixed five-stage coding pipeline. <code>MultiAgentOrchestrator</code> runs registry-driven agents through <code>AgentRunner</code>, supports bounded handoffs, and is the general execution boundary for everything that isn't a mutation-oriented coding request.</p>
+        <p>
+          Two orchestrators coexist in the runtime.
+          <code>TaskOrchestrator</code> runs the fixed five-stage coding
+          pipeline. <code>MultiAgentOrchestrator</code> runs registry-driven
+          agents through <code>AgentRunner</code>, supports bounded handoffs,
+          and is the general execution boundary for everything that isn't a
+          mutation-oriented coding request.
+        </p>
 
-    <div class="mermaid" style="margin: 32px 0;">
-      flowchart TD
-        Prompt[Persisted user task] --> Eligible{Built-in Architect or Coder?}
-        Eligible -->|No| Direct[Direct registry-driven path]
-        Eligible -->|Yes| VerifyOnly{Read-only verification request?}
-        VerifyOnly -->|Yes| Verifier[Direct Verifier path]
-        VerifyOnly -->|No| Work{Workspace work requested?}
-        Work -->|Yes| Pipeline[Coding pipeline 1.Planner→2.Retriever→3.Coder→4.Verifier→5.Reviewer]
-        Work -->|No| About{Refers to opened project?}
-        About -->|Yes| Architect[Architect: read-only tools + context]
-        About -->|No| Chat[Chat: no tools, no system prompt]
-        Verifier --> Finish[Persist transcript, task state, events, traces]
-        Pipeline --> Finish
-        Direct --> Finish
-        Architect --> Finish
-        Chat --> Finish
-    </div>
-    <p style="font-size:13px;color:var(--text-3);margin-top:-16px;">Focused specialization: <code>implement/add @path</code> with single <code>@file</code> preloads hash, 2-turn Coder (no <code>read_file</code>), 3-turn Verifier, no rollback.</p>
+        <div class="mermaid" style="margin: 32px 0">
+          flowchart TD Prompt[Persisted user task] --> Eligible{Built-in
+          Architect or Coder?} Eligible -->|No| Direct[Direct registry-driven
+          path] Eligible -->|Yes| VerifyOnly{Read-only verification request?}
+          VerifyOnly -->|Yes| Verifier[Direct Verifier path] VerifyOnly -->|No|
+          Work{Workspace work requested?} Work -->|Yes| Pipeline[Coding pipeline
+          1.Planner→2.Retriever→3.Coder→4.Verifier→5.Reviewer] Work -->|No|
+          About{Refers to opened project?} About -->|Yes| Architect[Architect:
+          read-only tools + context] About -->|No| Chat[Chat: no tools, no
+          system prompt] Verifier --> Finish[Persist transcript, task state,
+          events, traces] Pipeline --> Finish Direct --> Finish Architect -->
+          Finish Chat --> Finish
+        </div>
+        <p style="font-size: 13px; color: var(--text-3); margin-top: -16px">
+          Focused specialization: <code>implement/add @path</code> with single
+          <code>@file</code> preloads hash, 2-turn Coder (no
+          <code>read_file</code>), 3-turn Verifier, no rollback.
+        </p>
 
-    <h3 id="routing-decision">Task routing</h3>
+        <h3 id="routing-decision">Task routing</h3>
 
-    <p>Routing lives in <code>HeadlessRuntimeService.executeTask()</code> and applies in this precedence (automatic; Architect is entry point, user never classifies; only <code>Architect</code>/<code>Coder</code> + <code>.agentic/agents/*.md</code> are selectable via <code>isSelectableAgent</code>):</p>
+        <p>
+          Routing lives in <code>HeadlessRuntimeService.executeTask()</code> and
+          applies in this precedence (automatic; Architect is entry point, user
+          never classifies; only <code>Architect</code>/<code>Coder</code> +
+          <code>.agentic/agents/*.md</code> are selectable via
+          <code>isSelectableAgent</code>):
+        </p>
 
-    <ol>
-      <li><strong>Verification-only routing.</strong> If the selected agent is built-in Architect or Coder, and the request asks to run, execute, rerun, check, or verify tests, a suite, a build, lint, type checking, syntax checking, or format checking — and the request either explicitly forbids mutation or does not contain a mutation keyword — the runtime routes straight to the Verifier with verifier-scoped tools. Handoffs and workflow continuation disabled. Prevents “run the tests” from triggering the full pipeline. Example: “Run the tests without modifying files.”</li>
-      <li><strong>Coding-pipeline routing.</strong> After verification-only is ruled out, prompts from built-in Architect/Coder enter the fixed pipeline when <code>requestsWorkspaceWork</code> is true — requires an artifact request, a workspace reference, or a bare action verb, and returns false outright for anything shaped as a question. Keywords include add, build, change, create, debug, delete, edit, fix, implement, migrate, modify, patch, refactor, remove, rename, test, update, write. This is a regex heuristic, not semantic — ambiguous prompts can still take the wrong path, and custom agents never enter the pipeline even with those keywords.</li>
-      <li><strong>Direct registry-driven routing.</strong> Everything else — conversation, research, read-only questions not matching verification, custom agents, requests not matching coding heuristic — goes to <code>MultiAgentOrchestrator</code> (registry-driven). Two sub-paths: if the prompt refers to the opened project → <code>Architect</code> (read-only tools + session context, no mutation); otherwise → <code>Chat</code> (tool-free, no system prompt, no context). Handoffs to other enabled agents allowed subject to depth/count/budget/cancellation. “What is a closure” → Chat; “What files are in this repo” → Architect (workspace reference separates them).</li>
-    </ol>
+        <ol>
+          <li>
+            <strong>Verification-only routing.</strong> If the selected agent is
+            built-in Architect or Coder, and the request asks to run, execute,
+            rerun, check, or verify tests, a suite, a build, lint, type
+            checking, syntax checking, or format checking — and the request
+            either explicitly forbids mutation or does not contain a mutation
+            keyword — the runtime routes straight to the Verifier with
+            verifier-scoped tools. Handoffs and workflow continuation disabled.
+            Prevents “run the tests” from triggering the full pipeline. Example:
+            “Run the tests without modifying files.”
+          </li>
+          <li>
+            <strong>Coding-pipeline routing.</strong> After verification-only is
+            ruled out, prompts from built-in Architect/Coder enter the fixed
+            pipeline when <code>requestsWorkspaceWork</code> is true — requires
+            an artifact request, a workspace reference, or a bare action verb,
+            and returns false outright for anything shaped as a question.
+            Keywords include add, build, change, create, debug, delete, edit,
+            fix, implement, migrate, modify, patch, refactor, remove, rename,
+            test, update, write. This is a regex heuristic, not semantic —
+            ambiguous prompts can still take the wrong path, and custom agents
+            never enter the pipeline even with those keywords.
+          </li>
+          <li>
+            <strong>Direct registry-driven routing.</strong> Everything else —
+            conversation, research, read-only questions not matching
+            verification, custom agents, requests not matching coding heuristic
+            — goes to <code>MultiAgentOrchestrator</code> (registry-driven). Two
+            sub-paths: if the prompt refers to the opened project →
+            <code>Architect</code> (read-only tools + session context, no
+            mutation); otherwise → <code>Chat</code> (tool-free, no system
+            prompt, no context). Handoffs to other enabled agents allowed
+            subject to depth/count/budget/cancellation. “What is a closure” →
+            Chat; “What files are in this repo” → Architect (workspace reference
+            separates them).
+          </li>
+        </ol>
 
-    <h3 id="five-stages">The five stages</h3>
-    <p>Fixed shape, not fixed length. The static plan carries one placeholder <code>code</code> step; the Planner may replace it with 2–4 subtasks.</p>
+        <h3 id="five-stages">The five stages</h3>
+        <p>
+          Fixed shape, not fixed length. The static plan carries one placeholder
+          <code>code</code> step; the Planner may replace it with 2–4 subtasks.
+        </p>
 
-    <p><strong>1. Planner.</strong> LLM with read-only tools, using built-in <code>general</code> (Architect) definition. Receives objective, prior session history, project context, and earlier stage results. Emits a small testable plan. May end with a fenced <code>subtasks</code> block — orchestrator replaces the placeholder with one <code>code-N</code> step per subtask (bounded at 4, “do not split one-file work”), first inherits retrieval dep, Verifier now depends on last. Degrades to single generic step on missing/malformed/single-entry/no-prompt; survives restart via orchestration state replay; emits <code>plan_expanded</code> event / <code>plan_expansion</code> trace.</p>
+        <p>
+          <strong>1. Planner.</strong> LLM with read-only tools, using built-in
+          <code>general</code> (Architect) definition. Receives objective, prior
+          session history, project context, and earlier stage results. Emits a
+          small testable plan. May end with a fenced <code>subtasks</code> block
+          — orchestrator replaces the placeholder with one
+          <code>code-N</code> step per subtask (bounded at 4, “do not split
+          one-file work”), first inherits retrieval dep, Verifier now depends on
+          last. Degrades to single generic step on
+          missing/malformed/single-entry/no-prompt; survives restart via
+          orchestration state replay; emits <code>plan_expanded</code> event /
+          <code>plan_expansion</code> trace.
+        </p>
 
-    <p><strong>2. Retriever.</strong> Deterministic — <em>not</em> an LLM call and does not use the registered Retriever agent definition. Queries the semantic retrieval index with the objective and the Planner output, returns up to ten compact slices at forty lines each (compact file+line slices, not whole files).</p>
+        <p>
+          <strong>2. Retriever.</strong> Deterministic — <em>not</em> an LLM
+          call and does not use the registered Retriever agent definition.
+          Queries the semantic retrieval index with the objective and the
+          Planner output, returns up to ten compact slices at forty lines each
+          (compact file+line slices, not whole files).
+        </p>
 
-    <p><strong>3. Coder.</strong> One call per coding step — each sees only its own slice of the objective plus the shared retrieval evidence. Receives objective, current project + manual context, Planner output, retrieval slices, and prior stage summaries. Has workspace-mutation tools, read-only Git inspection, shell tools, semantic retrieval, and Rust analysis tools. Mutations and shell-backed calls pass through approval.</p>
+        <p>
+          <strong>3. Coder.</strong> One call per coding step — each sees only
+          its own slice of the objective plus the shared retrieval evidence.
+          Receives objective, current project + manual context, Planner output,
+          retrieval slices, and prior stage summaries. Has workspace-mutation
+          tools, read-only Git inspection, shell tools, semantic retrieval, and
+          Rust analysis tools. Mutations and shell-backed calls pass through
+          approval.
+        </p>
 
-    <p><strong>4. Verifier.</strong> Runs syntax and compile checks, runs relevant tests, inspects the Git diff (receives the list of files the run actually produced), reports exact commands and failures. Must end with exact <code>VERIFICATION_PASSED</code> on its own line — markdown decoration/trailing checklist does not fail a pass, prose mention does not pass — and counts as evidence only if a real verification tool actually executed (prevents hallucinated <code>js_verify/py_verify</code> success). Receives root <code>AGENTS.md</code> so it enforces project rules even under compaction.</p>
+        <p>
+          <strong>4. Verifier.</strong> Runs syntax and compile checks, runs
+          relevant tests, inspects the Git diff (receives the list of files the
+          run actually produced), reports exact commands and failures. Must end
+          with exact <code>VERIFICATION_PASSED</code> on its own line — markdown
+          decoration/trailing checklist does not fail a pass, prose mention does
+          not pass — and counts as evidence only if a real verification tool
+          actually executed (prevents hallucinated
+          <code>js_verify/py_verify</code> success). Receives root
+          <code>AGENTS.md</code> so it enforces project rules even under
+          compaction.
+        </p>
 
-    <p><strong>5. Reviewer.</strong> Receives the plan, retrieval evidence, implementation result, and verification result. Read-only. Produces the final user-facing summary. Cannot run commands or modify files. For bounded single-file work it completes deterministically instead of paying for a second model call.</p>
+        <p>
+          <strong>5. Reviewer.</strong> Receives the plan, retrieval evidence,
+          implementation result, and verification result. Read-only. Produces
+          the final user-facing summary. Cannot run commands or modify files.
+          For bounded single-file work it completes deterministically instead of
+          paying for a second model call.
+        </p>
 
-    <p>Execution is intentionally sequential (parallel read-only later). Every stage is checkpointed to project SQLite before and after; <code>resumeTask({taskId})</code> reloads the checkpoint and skips completed stages. The static plan + expansions and failure fingerprints survive resume; focused single-file edits skip the general recovery graph.</p>
+        <p>
+          Execution is intentionally sequential (parallel read-only later).
+          Every stage is checkpointed to project SQLite before and after;
+          <code>resumeTask({taskId})</code> reloads the checkpoint and skips
+          completed stages. The static plan + expansions and failure
+          fingerprints survive resume; focused single-file edits skip the
+          general recovery graph.
+        </p>
 
-    <h3 id="recovery">Recovery</h3>
+        <h3 id="recovery">Recovery</h3>
 
-    <p>When the Verifier reports failure, the recovery state machine takes over (not a failed task):</p>
+        <p>
+          When the Verifier reports failure, the recovery state machine takes
+          over (not a failed task):
+        </p>
 
-    <ol>
-      <li>Check the mutation journal for unsafe external side effects — approved workspace file mutations are reversible; shell, Git, network, package-manager, or other external-process effects are not. If any are present, automatic recovery stops and the failure is surfaced (do not guess).</li>
-      <li>Otherwise, roll back file mutations in reverse order with <code>preserveCreatedFiles</code> — edits to pre-existing files are reverted, newly created artifacts are kept for the corrective pass to overwrite (early bug deleted the only copy). Each rollback re-verifies the pre-image hash; if the current file hash doesn't match, the user edited it and their content is preserved — stop replanning.</li>
-      <li>Refresh the semantic index for the changed files (stat→hash→re-extract, 750ms→131ms warm).</li>
-      <li>Ask the Planner for a materially different plan — not a blind retry — with verifier evidence attached.</li>
-      <li>Retrieve fresh context for the revised plan.</li>
-      <li>The Coder applies a freshly approved correction.</li>
-      <li>The Verifier runs again.</li>
-    </ol>
+        <ol>
+          <li>
+            Check the mutation journal for unsafe external side effects —
+            approved workspace file mutations are reversible; shell, Git,
+            network, package-manager, or other external-process effects are not.
+            If any are present, automatic recovery stops and the failure is
+            surfaced (do not guess).
+          </li>
+          <li>
+            Otherwise, roll back file mutations in reverse order with
+            <code>preserveCreatedFiles</code> — edits to pre-existing files are
+            reverted, newly created artifacts are kept for the corrective pass
+            to overwrite (early bug deleted the only copy). Each rollback
+            re-verifies the pre-image hash; if the current file hash doesn't
+            match, the user edited it and their content is preserved — stop
+            replanning.
+          </li>
+          <li>
+            Refresh the semantic index for the changed files
+            (stat→hash→re-extract, 750ms→131ms warm).
+          </li>
+          <li>
+            Ask the Planner for a materially different plan — not a blind retry
+            — with verifier evidence attached.
+          </li>
+          <li>Retrieve fresh context for the revised plan.</li>
+          <li>The Coder applies a freshly approved correction.</li>
+          <li>The Verifier runs again.</li>
+        </ol>
 
-    <p>The workspace service holds real mutation pre-images and hash-guarded rollback primitives. Note that in the current build the default file tools do not yet forward their <code>workspaceMutation</code> records to the runtime journal — a Priority-0 wiring gap tracked in the implementation-status document — so end-to-end hash-guarded rollback is not complete. A focused single-file verifier failure also does not launch this graph; it reports the written artifact intact.</p>
+        <p>
+          The workspace service holds real mutation pre-images and hash-guarded
+          rollback primitives. Note that in the current build the default file
+          tools do not yet forward their <code>workspaceMutation</code> records
+          to the runtime journal — a Priority-0 wiring gap tracked in the
+          implementation-status document — so end-to-end hash-guarded rollback
+          is not complete. A focused single-file verifier failure also does not
+          launch this graph; it reports the written artifact intact.
+        </p>
 
-    <h3 id="loop-safety">Loop safety</h3>
+        <h3 id="loop-safety">Loop safety</h3>
 
-    <p>Twelve independent limits at four scopes (not round numbers — set against the $0.50 ×10 accuracy / time-cost scoring formula, below the 2700s/$0.50 hard ceilings):</p>
+        <p>
+          Twelve independent limits at four scopes (not round numbers — set
+          against the $0.50 ×10 accuracy / time-cost scoring formula, below the
+          2700s/$0.50 hard ceilings):
+        </p>
 
-    <ul>
-      <li><strong>Duplicate tool-call cache.</strong> <code>AgentRunner</code> caches tool calls by name, arguments, and workspace revision; identical call against unchanged workspace reuses a concise skip. After four identical duplicates, the run stops with a visible safety message.</li>
-      <li><strong>Merkle state tree.</strong> Rust <code>StateTree</code> (BLAKE3) hashes each post-mutation workspace state into a rolling 10-state history, task-namespaced; a run that edits→reverts→re-edits succeeds per-step but repeats a prior workspace state and stops as non-retryable — complements failure fingerprints.</li>
-      <li><strong>Failure fingerprints.</strong> Identical failure twice stops the step; repeated failure signatures in the same task stop the loop.</li>
-      <li><strong>Step and request budgets.</strong> 2 attempts per stage (1 when focused), 10 stage attempts total, 48 model requests per task, 192 tool calls per multi-agent run, $0.50 real provider spend per task, 30 minutes per runtime execution/resume invocation (wall clock restarts fresh; spend and model-request count survive resume).</li>
-      <li><strong>Handoff budgets.</strong> Depth 4, 8 handoffs total, 2 per agent pair, duplicate active-handoff detection, shared model-request and duration budgets.</li>
-    </ul>
+        <ul>
+          <li>
+            <strong>Duplicate tool-call cache.</strong>
+            <code>AgentRunner</code> caches tool calls by name, arguments, and
+            workspace revision; identical call against unchanged workspace
+            reuses a concise skip. After four identical duplicates, the run
+            stops with a visible safety message.
+          </li>
+          <li>
+            <strong>Merkle state tree.</strong> Rust
+            <code>StateTree</code> (BLAKE3) hashes each post-mutation workspace
+            state into a rolling 10-state history, task-namespaced; a run that
+            edits→reverts→re-edits succeeds per-step but repeats a prior
+            workspace state and stops as non-retryable — complements failure
+            fingerprints.
+          </li>
+          <li>
+            <strong>Failure fingerprints.</strong> Identical failure twice stops
+            the step; repeated failure signatures in the same task stop the
+            loop.
+          </li>
+          <li>
+            <strong>Step and request budgets.</strong> 2 attempts per stage (1
+            when focused), 10 stage attempts total, 48 model requests per task,
+            192 tool calls per multi-agent run, $0.50 real provider spend per
+            task, 30 minutes per runtime execution/resume invocation (wall clock
+            restarts fresh; spend and model-request count survive resume).
+          </li>
+          <li>
+            <strong>Handoff budgets.</strong> Depth 4, 8 handoffs total, 2 per
+            agent pair, duplicate active-handoff detection, shared model-request
+            and duration budgets.
+          </li>
+        </ul>
 
-    <h3 id="provider-routing">Provider routing &amp; failover</h3>
+        <h3 id="provider-routing">Provider routing &amp; failover</h3>
 
-    <p>The gateway ranks configured routes for each request in two layers. Eligibility is absolute first:</p>
+        <p>
+          The gateway ranks configured routes for each request in two layers.
+          Eligibility is absolute first:
+        </p>
 
-    <ol>
-      <li>Tool support (if the stage requires tools)</li>
-      <li>Estimated context fit against the model's window (request + reserved output)</li>
-      <li>Stage-specific minimum window floor — a preference, not a hard constraint (if nothing clears it, ranking repeats without it)</li>
-      <li>Cooldown state (recently failed routes are demoted)</li>
-    </ol>
+        <ol>
+          <li>Tool support (if the stage requires tools)</li>
+          <li>
+            Estimated context fit against the model's window (request + reserved
+            output)
+          </li>
+          <li>
+            Stage-specific minimum window floor — a preference, not a hard
+            constraint (if nothing clears it, ranking repeats without it)
+          </li>
+          <li>Cooldown state (recently failed routes are demoted)</li>
+        </ol>
 
-    <p>Order among eligible routes is then decided by the request's <code>bias</code>:</p>
-    <div class="table-wrap">
-    <table><thead><tr><th>Bias</th><th>First sort key</th><th>Used for</th></tr></thead>
-    <tbody>
-      <tr><td><code>balanced</code></td><td>operator preference order</td><td>ordinary coding work (default)</td></tr>
-      <tr><td><code>capacity</code></td><td>largest known total parameter count</td><td>planning a complex task, verification, review</td></tr>
-      <tr><td><code>economy</code></td><td>lowest estimated cost</td><td>retrieval summarisation, chat, trivial requests</td></tr>
-    </tbody></table>
-    </div>
-    <p>Remaining ties fall through preference → estimated cost → context-window size → stable provider/model ordering. A bias only reorders eligible routes, never promotes an ineligible one; <code>capacity</code> treats unknown parameter counts as 0. Task complexity is classified syntactically (prompt length, concrete file refs, conjunctions, multi-step vocab) — <code>simple</code> is narrow; anything pointing at concrete code stays on the operator's order.</p>
+        <p>
+          Order among eligible routes is then decided by the request's
+          <code>bias</code>:
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Bias</th>
+                <th>First sort key</th>
+                <th>Used for</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>balanced</code></td>
+                <td>operator preference order</td>
+                <td>ordinary coding work (default)</td>
+              </tr>
+              <tr>
+                <td><code>capacity</code></td>
+                <td>largest known total parameter count</td>
+                <td>planning a complex task, verification, review</td>
+              </tr>
+              <tr>
+                <td><code>economy</code></td>
+                <td>lowest estimated cost</td>
+                <td>retrieval summarisation, chat, trivial requests</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Remaining ties fall through preference → estimated cost →
+          context-window size → stable provider/model ordering. A bias only
+          reorders eligible routes, never promotes an ineligible one;
+          <code>capacity</code> treats unknown parameter counts as 0. Task
+          complexity is classified syntactically (prompt length, concrete file
+          refs, conjunctions, multi-step vocab) — <code>simple</code> is narrow;
+          anything pointing at concrete code stays on the operator's order.
+        </p>
 
-    <p>Retryable failures place the failing route on cooldown and trigger a failover to the next ranked route <em>without rebuilding the request</em> (same message/tool state, costs latency not progress): rate limits (HTTP 429) / transient 5xx / timeouts / connection errors / context-length errors → <strong>2 min</strong> cooldown; quota/billing exhaustion incl. HTTP 402 → <strong>30 min</strong> cooldown and continue fallback. Authentication and invalid-request failures are terminal (do not hide behind fallback). Judgment stages (Verifier/Reviewer) briefly wait for a preferred hosted route before falling back to the excluded local route as last resort.</p>
+        <p>
+          Retryable failures place the failing route on cooldown and trigger a
+          failover to the next ranked route
+          <em>without rebuilding the request</em> (same message/tool state,
+          costs latency not progress): rate limits (HTTP 429) / transient 5xx /
+          timeouts / connection errors / context-length errors →
+          <strong>2 min</strong> cooldown; quota/billing exhaustion incl. HTTP
+          402 → <strong>30 min</strong> cooldown and continue fallback.
+          Authentication and invalid-request failures are terminal (do not hide
+          behind fallback). Judgment stages (Verifier/Reviewer) briefly wait for
+          a preferred hosted route before falling back to the excluded local
+          route as last resort.
+        </p>
 
-    <p>Every routing decision emits an event with provider, model, attempt number, human-readable reason, estimated context tokens, estimated cost when available, and failure classification. The TUI renders this activity in a route pane.</p>
+        <p>
+          Every routing decision emits an event with provider, model, attempt
+          number, human-readable reason, estimated context tokens, estimated
+          cost when available, and failure classification. The TUI renders this
+          activity in a route pane.
+        </p>
 
-    <h4>Registered providers</h4>
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Provider</th><th>Protocol</th><th>Credential resolution</th></tr></thead>
-      <tbody>
-        <tr><td>Groq</td><td>OpenAI-compatible chat</td><td>Stored key, then env var</td></tr>
-        <tr><td>OpenRouter</td><td>OpenAI-compatible chat</td><td>Stored key, then env var</td></tr>
-        <tr><td>Ollama</td><td><code>/api/chat</code></td><td>Local endpoint, no key required by default</td></tr>
-        <tr><td>OpenAI-compatible</td><td>OpenAI-compatible chat</td><td>Configurable URL, optional key</td></tr>
-      </tbody>
-    </table>
-    </div>
+        <h4>Registered providers</h4>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Protocol</th>
+                <th>Credential resolution</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Groq</td>
+                <td>OpenAI-compatible chat</td>
+                <td>Stored key, then env var</td>
+              </tr>
+              <tr>
+                <td>OpenRouter</td>
+                <td>OpenAI-compatible chat</td>
+                <td>Stored key, then env var</td>
+              </tr>
+              <tr>
+                <td>Ollama</td>
+                <td><code>/api/chat</code></td>
+                <td>Local endpoint, no key required by default</td>
+              </tr>
+              <tr>
+                <td>OpenAI-compatible</td>
+                <td>OpenAI-compatible chat</td>
+                <td>Configurable URL, optional key</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-    <h3 id="compaction">Context compaction</h3>
+        <h3 id="compaction">Context compaction</h3>
 
-    <p>Compaction is deterministic — it never calls a model (costly when context is largest and risks hallucination). It runs inside <code>AgentRunner</code> before every model request and again after a provider returns a context-length error. Defaults:</p>
+        <p>
+          Compaction is deterministic — it never calls a model (costly when
+          context is largest and risks hallucination). It runs inside
+          <code>AgentRunner</code> before every model request and again after a
+          provider returns a context-length error. Defaults:
+        </p>
 
-    <ul>
-      <li>Trigger at 75% of the model's usable window</li>
-      <li>Compact toward 60% on the normal threshold path</li>
-      <li>Compact toward 45% after a context-limit error (aggressive recovery)</li>
-      <li>Keep at least two recent exchanges; the most recent exchanges and the last user message are never folded; project rules survive every compaction</li>
-      <li>Up to four compaction passes per turn</li>
-      <li>Up to two context-limit recovery attempts (re-enter with tighter target)</li>
-      <li>Fallback window of 8,192 tokens when the model declares no window</li>
-      <li>Reserve 1,024 output tokens by default; ~4 chars/token estimate</li>
-    </ul>
+        <ul>
+          <li>Trigger at 75% of the model's usable window</li>
+          <li>Compact toward 60% on the normal threshold path</li>
+          <li>
+            Compact toward 45% after a context-limit error (aggressive recovery)
+          </li>
+          <li>
+            Keep at least two recent exchanges; the most recent exchanges and
+            the last user message are never folded; project rules survive every
+            compaction
+          </li>
+          <li>Up to four compaction passes per turn</li>
+          <li>
+            Up to two context-limit recovery attempts (re-enter with tighter
+            target)
+          </li>
+          <li>
+            Fallback window of 8,192 tokens when the model declares no window
+          </li>
+          <li>
+            Reserve 1,024 output tokens by default; ~4 chars/token estimate
+          </li>
+        </ul>
 
-    <p>Each pass runs six steps:</p>
+        <p>Each pass runs six steps:</p>
 
-    <ol>
-      <li>Find <code>read_file</code> tool results in history.</li>
-      <li>Ask the Rust sidecar to prune those source files to signatures via <code>prune_ast</code> (supported extensions only; unsupported returns original).</li>
-      <li>Group assistant tool calls with their corresponding tool results.</li>
-      <li>Select older exchanges to remove while keeping recent and current user exchanges intact.</li>
-      <li>Build a structured <code>CompactedTaskState</code> (fields, not prose) and replace the removed history with a single compaction system message. Successive compactions merge into the existing state rather than summarising a summary.</li>
-      <li>Repeat if the request still exceeds the target; stop folding if a pass did not shrink the request.</li>
-    </ol>
+        <ol>
+          <li>Find <code>read_file</code> tool results in history.</li>
+          <li>
+            Ask the Rust sidecar to prune those source files to signatures via
+            <code>prune_ast</code> (supported extensions only; unsupported
+            returns original).
+          </li>
+          <li>
+            Group assistant tool calls with their corresponding tool results.
+          </li>
+          <li>
+            Select older exchanges to remove while keeping recent and current
+            user exchanges intact.
+          </li>
+          <li>
+            Build a structured <code>CompactedTaskState</code> (fields, not
+            prose) and replace the removed history with a single compaction
+            system message. Successive compactions merge into the existing state
+            rather than summarising a summary.
+          </li>
+          <li>
+            Repeat if the request still exceeds the target; stop folding if a
+            pass did not shrink the request.
+          </li>
+        </ol>
 
-    <p>The structured state preserves — in bounded form — the current objective, plans (including plan expansions), completed work, failures and rejected hunks, changed files and their hashes, verification status, retrieved slices with reasons, project rules from <code>AGENTS.md</code>, and open questions. Compaction checkpoints are emitted as events and stored as task context/state, so a restart or resume sees the compacted view too.</p>
+        <p>
+          The structured state preserves — in bounded form — the current
+          objective, plans (including plan expansions), completed work, failures
+          and rejected hunks, changed files and their hashes, verification
+          status, retrieved slices with reasons, project rules from
+          <code>AGENTS.md</code>, and open questions. Compaction checkpoints are
+          emitted as events and stored as task context/state, so a restart or
+          resume sees the compacted view too.
+        </p>
 
-    <h3 id="retrieval">Semantic retrieval</h3>
+        <h3 id="retrieval">Semantic retrieval</h3>
 
-    <p>The retrieval database contains:</p>
-    <ul>
-      <li>Project records (keyed by canonical <code>projectId</code>=SHA-256(realpath))</li>
-      <li>File hashes and metadata</li>
-      <li>Symbols and their line spans (real multi-line spans for tree-sitter)</li>
-      <li>Definition, reference, call, import, and export edges plus FlatCPG graph edges</li>
-    </ul>
+        <p>The retrieval database contains:</p>
+        <ul>
+          <li>
+            Project records (keyed by canonical
+            <code>projectId</code>=SHA-256(realpath))
+          </li>
+          <li>File hashes and metadata</li>
+          <li>
+            Symbols and their line spans (real multi-line spans for tree-sitter)
+          </li>
+          <li>
+            Definition, reference, call, import, and export edges plus FlatCPG
+            graph edges
+          </li>
+        </ul>
 
-    <p>Extraction runs in three tiers, strongest first:</p>
-    <div class="table-wrap"><table><thead><tr><th>Tier</th><th>Languages</th><th>Produces</th></tr></thead>
-    <tbody>
-      <tr><td><code>typescript</code></td><td>TS, TSX, JS, JSX, MJS, CJS</td><td>Bindings-resolved symbols, imports/exports, references, calls, relative module edges, compact signatures (compiler API)</td></tr>
-      <tr><td><code>tree-sitter</code> (Rust sidecar)</td><td>Python, Go, Rust, C, C++</td><td>Parsed symbols, multi-line spans, attributed calls with visibility rules (<code>pub</code>/capital/<code>static</code>/_), real spans</td></tr>
-      <tr><td><code>ripgrep-text</code></td><td>everything else</td><td>Regex declaration and import lines + path/text fallback</td></tr>
-    </tbody></table></div>
-    <p>Missing or failing sidecar degrades that tier to the regex fallback. Ripgrep supplies path and text fallback across all languages.</p>
+        <p>Extraction runs in three tiers, strongest first:</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tier</th>
+                <th>Languages</th>
+                <th>Produces</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>typescript</code></td>
+                <td>TS, TSX, JS, JSX, MJS, CJS</td>
+                <td>
+                  Bindings-resolved symbols, imports/exports, references, calls,
+                  relative module edges, compact signatures (compiler API)
+                </td>
+              </tr>
+              <tr>
+                <td><code>tree-sitter</code> (Rust sidecar)</td>
+                <td>Python, Go, Rust, C, C++</td>
+                <td>
+                  Parsed symbols, multi-line spans, attributed calls with
+                  visibility rules
+                  (<code>pub</code>/capital/<code>static</code>/_), real spans
+                </td>
+              </tr>
+              <tr>
+                <td><code>ripgrep-text</code></td>
+                <td>everything else</td>
+                <td>Regex declaration and import lines + path/text fallback</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Missing or failing sidecar degrades that tier to the regex fallback.
+          Ripgrep supplies path and text fallback across all languages.
+        </p>
 
-    <p>Incremental indexing is stat→hash→re-extract, cheapest first: <code>stat</code> (size+mtime) without reading; if changed, read+hash; if hash differs, re-extract transactionally. Agent writes move mtime so are never missed. Generated, dependency, database, archive, binary, and common build directories are ignored at discovery (no positive glob in wildcard case, otherwise ignores would be disabled by ripgrep's override).</p>
+        <p>
+          Incremental indexing is stat→hash→re-extract, cheapest first:
+          <code>stat</code> (size+mtime) without reading; if changed, read+hash;
+          if hash differs, re-extract transactionally. Agent writes move mtime
+          so are never missed. Generated, dependency, database, archive, binary,
+          and common build directories are ignored at discovery (no positive
+          glob in wildcard case, otherwise ignores would be disabled by
+          ripgrep's override).
+        </p>
 
-    <h4>Ranking</h4>
-    <p>Ranking blends eight signals: exact symbol match, partial symbol match, exported-definition weight, edge weight across the five edge kinds (definition/call/import/export/reference), file-path match, ripgrep text match, one-hop graph neighbors, and recent file modification — plus personalised PageRank (restart 0.15, 10 iters, ordered by descending mass, ties by index) over FlatCPG. Bands are explicit: exact 120, exported 88, ordinary 76, graph-only 64–75, text 52; a named symbol always outranks a graph-only hit. Results come back as compact file+line slices with file, lines, and reason; the API does not normally return whole files; overlapping spans merged and capped at 2 per file.</p>
+        <h4>Ranking</h4>
+        <p>
+          Ranking blends eight signals: exact symbol match, partial symbol
+          match, exported-definition weight, edge weight across the five edge
+          kinds (definition/call/import/export/reference), file-path match,
+          ripgrep text match, one-hop graph neighbors, and recent file
+          modification — plus personalised PageRank (restart 0.15, 10 iters,
+          ordered by descending mass, ties by index) over FlatCPG. Bands are
+          explicit: exact 120, exported 88, ordinary 76, graph-only 64–75, text
+          52; a named symbol always outranks a graph-only hit. Results come back
+          as compact file+line slices with file, lines, and reason; the API does
+          not normally return whole files; overlapping spans merged and capped
+          at 2 per file.
+        </p>
 
-    <h4>Poor-result recovery</h4>
-    <p>If the exact query returns zero candidates, retrieval splits the query into identifier terms and prompt terms and retries (marked <code>broadened</code>). If a query produces excessive candidates, results are ranked and capped at 2 per file (marked <code>narrowed</code>). If nothing survives, the response says so rather than returning noise. The response records whether retrieval was broadened, narrowed, or remained empty, and slices carry their reason so the Planner/dashboard can revise and show why each chunk was included.</p>
+        <h4>Poor-result recovery</h4>
+        <p>
+          If the exact query returns zero candidates, retrieval splits the query
+          into identifier terms and prompt terms and retries (marked
+          <code>broadened</code>). If a query produces excessive candidates,
+          results are ranked and capped at 2 per file (marked
+          <code>narrowed</code>). If nothing survives, the response says so
+          rather than returning noise. The response records whether retrieval
+          was broadened, narrowed, or remained empty, and slices carry their
+          reason so the Planner/dashboard can revise and show why each chunk was
+          included.
+        </p>
 
-    <h2 id="tools">Tool reference</h2>
+        <h2 id="tools">Tool reference</h2>
 
-    <p>All tools implement provider-neutral core contracts. Each declares a name, description, JSON Schema for arguments, approval policy, an optional preview function, and an execute function. Ajv validates model-generated arguments before approval or execution.</p>
+        <p>
+          All tools implement provider-neutral core contracts. Each declares a
+          name, description, JSON Schema for arguments, approval policy, an
+          optional preview function, and an execute function. Ajv validates
+          model-generated arguments before approval or execution.
+        </p>
 
-    <h3 id="tools-workspace">Workspace tools</h3>
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Tool</th><th>Purpose</th><th>Approval</th></tr></thead>
-      <tbody>
-        <tr><td><code>list_directory</code></td><td>List files and directories inside the workspace</td><td>Auto</td></tr>
-        <tr><td><code>read_file</code></td><td>Read a UTF-8 text file inside the workspace (path + SHA-256 hash)</td><td>Auto</td></tr>
-        <tr><td><code>find_files</code></td><td>Ripgrep-backed file search (glob)</td><td>Auto</td></tr>
-        <tr><td><code>search_text</code></td><td>Ripgrep-backed content search (regex)</td><td>Auto</td></tr>
-        <tr><td><code>write_file</code></td><td>Atomic write with conflict check (diff preview)</td><td>Required</td></tr>
-        <tr><td><code>create_file</code></td><td>Create a file only when it does not already exist (baseHash null)</td><td>Required</td></tr>
-        <tr><td><code>delete_file</code></td><td>Delete a file with a deletion preview</td><td>Required</td></tr>
-        <tr><td><code>apply_patch</code></td><td>Apply an exact oldContent → newContent replacement (conflict-checked; diff is output)</td><td>Required</td></tr>
-      </tbody>
-    </table>
-    </div>
+        <h3 id="tools-workspace">Workspace tools</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Purpose</th>
+                <th>Approval</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>list_directory</code></td>
+                <td>List files and directories inside the workspace</td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>read_file</code></td>
+                <td>
+                  Read a UTF-8 text file inside the workspace (path + SHA-256
+                  hash)
+                </td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>find_files</code></td>
+                <td>Ripgrep-backed file search (glob)</td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>search_text</code></td>
+                <td>Ripgrep-backed content search (regex)</td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>write_file</code></td>
+                <td>Atomic write with conflict check (diff preview)</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>create_file</code></td>
+                <td>
+                  Create a file only when it does not already exist (baseHash
+                  null)
+                </td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>delete_file</code></td>
+                <td>Delete a file with a deletion preview</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>apply_patch</code></td>
+                <td>
+                  Apply an exact oldContent → newContent replacement
+                  (conflict-checked; diff is output)
+                </td>
+                <td>Required</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-    <h3 id="tools-shell">Shell tools</h3>
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Tool</th><th>Purpose</th><th>Approval</th></tr></thead>
-      <tbody>
-        <tr><td><code>run_command</code></td><td>Bounded shell command</td><td>Required</td></tr>
-        <tr><td><code>compile_code</code></td><td>Language-appropriate compile (model-selected)</td><td>Required</td></tr>
-        <tr><td><code>run_code</code></td><td>Run a model-selected project command</td><td>Required</td></tr>
-        <tr><td><code>format_code</code></td><td>Format via configured formatter (model-selected)</td><td>Required</td></tr>
-        <tr><td><code>syntax_check</code></td><td>Language-appropriate syntax pass (model-selected)</td><td>Required</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p>Windows uses <code>cmd.exe /d /s /c</code> (<code>COMSPEC</code> override); Linux and macOS use <code>/bin/sh -c</code> (<code>SHELL</code> override). Commands run with 30s timeout, 100KB output cap, restricted allowlist, and the runtime abort signal; provider credentials are not forwarded.</p>
+        <h3 id="tools-shell">Shell tools</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Purpose</th>
+                <th>Approval</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>run_command</code></td>
+                <td>Bounded shell command</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>compile_code</code></td>
+                <td>Language-appropriate compile (model-selected)</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>run_code</code></td>
+                <td>Run a model-selected project command</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>format_code</code></td>
+                <td>Format via configured formatter (model-selected)</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>syntax_check</code></td>
+                <td>Language-appropriate syntax pass (model-selected)</td>
+                <td>Required</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Windows uses <code>cmd.exe /d /s /c</code> (<code>COMSPEC</code>
+          override); Linux and macOS use <code>/bin/sh -c</code> (<code
+            >SHELL</code
+          >
+          override). Commands run with 30s timeout, 100KB output cap, restricted
+          allowlist, and the runtime abort signal; provider credentials are not
+          forwarded.
+        </p>
 
-    <h3 id="tools-web">Web tools</h3>
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Tool</th><th>Purpose</th><th>Approval</th></tr></thead>
-      <tbody>
-        <tr><td><code>web_search</code></td><td>Search the web (fallback live crawl)</td><td>Required</td></tr>
-        <tr><td><code>browse_url</code></td><td>Extract readable article content from a URL (Mozilla Readability + JSDOM, no script execution)</td><td>Required</td></tr>
-        <tr><td><code>crawl_site</code></td><td>Bounded same-domain crawl (Crawlee, max 25 pages, concurrency 2, 20s handler timeout)</td><td>Required</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p>Web requests accept only HTTP/HTTPS, reject private and reserved network targets, do not execute page scripts, cap responses at 2 MB, follow at most 5 redirects (<code>browse_url</code>), and bound crawl concurrency.</p>
+        <h3 id="tools-web">Web tools</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Purpose</th>
+                <th>Approval</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>web_search</code></td>
+                <td>Search the web (fallback live crawl)</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>browse_url</code></td>
+                <td>
+                  Extract readable article content from a URL (Mozilla
+                  Readability + JSDOM, no script execution)
+                </td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>crawl_site</code></td>
+                <td>
+                  Bounded same-domain crawl (Crawlee, max 25 pages, concurrency
+                  2, 20s handler timeout)
+                </td>
+                <td>Required</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Web requests accept only HTTP/HTTPS, reject private and reserved
+          network targets, do not execute page scripts, cap responses at 2 MB,
+          follow at most 5 redirects (<code>browse_url</code>), and bound crawl
+          concurrency.
+        </p>
 
-    <h3 id="tools-runtime">Runtime tools</h3>
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Tool</th><th>Purpose</th><th>Approval</th></tr></thead>
-      <tbody>
-        <tr><td><code>retrieve_context</code></td><td>Refresh and query the persistent semantic index; returns ranked compact file slices with line ranges and relevance reasons</td><td>Auto</td></tr>
-        <tr><td><code>analyze_code_structure</code></td><td>Extract semantic blocks matching named symbols from source (params: code, symbols, extension) via Rust tree-sitter</td><td>Auto</td></tr>
-        <tr><td><code>compute_ast_diff</code></td><td>Compute minimal line replacement chunks through Rust (LCS; fallback if &gt;4M cells)</td><td>Auto</td></tr>
-        <tr><td><code>handoff_agent</code></td><td>Dynamically injected when handoffs enabled; delegates to another registered agent (hidden from schema, auto-approved; specialist mutations still require approval)</td><td>Auto</td></tr>
-      </tbody>
-    </table>
-    </div>
+        <h3 id="tools-runtime">Runtime tools</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Purpose</th>
+                <th>Approval</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>retrieve_context</code></td>
+                <td>
+                  Refresh and query the persistent semantic index; returns
+                  ranked compact file slices with line ranges and relevance
+                  reasons
+                </td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>analyze_code_structure</code></td>
+                <td>
+                  Extract semantic blocks matching named symbols from source
+                  (params: code, symbols, extension) via Rust tree-sitter
+                </td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>compute_ast_diff</code></td>
+                <td>
+                  Compute minimal line replacement chunks through Rust (LCS;
+                  fallback if &gt;4M cells)
+                </td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>handoff_agent</code></td>
+                <td>
+                  Dynamically injected when handoffs enabled; delegates to
+                  another registered agent (hidden from schema, auto-approved;
+                  specialist mutations still require approval)
+                </td>
+                <td>Auto</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-    <h3 id="tools-git">Git tools</h3>
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Tool</th><th>Purpose</th><th>Approval</th></tr></thead>
-      <tbody>
-        <tr><td><code>git_status</code></td><td>Working-tree and branch status</td><td>Auto</td></tr>
-        <tr><td><code>git_diff</code></td><td>Show unstaged changes (use <code>git_commit</code> for staged)</td><td>Auto</td></tr>
-        <tr><td><code>git_log</code></td><td>Up to 20 recent commits</td><td>Auto</td></tr>
-        <tr><td><code>git_branches</code></td><td>List local and remote branches</td><td>Auto</td></tr>
-        <tr><td><code>git_add</code></td><td>Stage explicit paths after generated-output checks</td><td>Required</td></tr>
-        <tr><td><code>git_commit</code></td><td>Commit staged changes after checking staged paths</td><td>Required</td></tr>
-        <tr><td><code>git_checkout</code></td><td>Checkout an existing branch or create a local branch</td><td>Required</td></tr>
-        <tr><td><code>git_merge</code></td><td>Merge a branch (approval-gated)</td><td>Required</td></tr>
-        <tr><td><code>git_push</code></td><td>Push an explicit branch to an explicit remote</td><td>Required</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p>Generated dependency and build directories are blocked from Git staging by the specialized tool checks. The built-in Coder exposes read-only Git inspection plus <code>git_merge</code>; most Git mutations still require an appropriately configured custom agent.</p>
+        <h3 id="tools-git">Git tools</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Purpose</th>
+                <th>Approval</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>git_status</code></td>
+                <td>Working-tree and branch status</td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>git_diff</code></td>
+                <td>
+                  Show unstaged changes (use <code>git_commit</code> for staged)
+                </td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>git_log</code></td>
+                <td>Up to 20 recent commits</td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>git_branches</code></td>
+                <td>List local and remote branches</td>
+                <td>Auto</td>
+              </tr>
+              <tr>
+                <td><code>git_add</code></td>
+                <td>Stage explicit paths after generated-output checks</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>git_commit</code></td>
+                <td>Commit staged changes after checking staged paths</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>git_checkout</code></td>
+                <td>Checkout an existing branch or create a local branch</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>git_merge</code></td>
+                <td>Merge a branch (approval-gated)</td>
+                <td>Required</td>
+              </tr>
+              <tr>
+                <td><code>git_push</code></td>
+                <td>Push an explicit branch to an explicit remote</td>
+                <td>Required</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Generated dependency and build directories are blocked from Git
+          staging by the specialized tool checks. The built-in Coder exposes
+          read-only Git inspection plus <code>git_merge</code>; most Git
+          mutations still require an appropriately configured custom agent.
+        </p>
 
-    <h3 id="approval">Approval policy</h3>
+        <h3 id="approval">Approval policy</h3>
 
-    <p>The runtime uses a fail-safe policy: read-only workspace, search, retrieval, Rust-analysis, and Git-inspection tools run automatically; web tools (<code>web_search</code>, <code>browse_url</code>, <code>crawl_site</code>) and every other tool require approval even though they are read-adjacent — conservative network policy. New tools require approval unless they explicitly declare <code>approval: "auto"</code> in their core tool definition; a missing <code>approval</code> defaults to <code>ask</code> (<code>AgentRunner</code> fail-safe).</p>
+        <p>
+          The runtime uses a fail-safe policy: read-only workspace, search,
+          retrieval, Rust-analysis, and Git-inspection tools run automatically;
+          web tools (<code>web_search</code>, <code>browse_url</code>,
+          <code>crawl_site</code>) and every other tool require approval even
+          though they are read-adjacent — conservative network policy. New tools
+          require approval unless they explicitly declare
+          <code>approval: "auto"</code> in their core tool definition; a missing
+          <code>approval</code> defaults to <code>ask</code> (<code
+            >AgentRunner</code
+          >
+          fail-safe).
+        </p>
 
-    <p>Tool arguments are validated by Ajv against the tool's JSON Schema <em>before</em> preview or approval — a hallucinated call is rejected with a readable error the model can act on rather than being executed. Successful mutation-tool calls by the Coder are recorded as untracked external side effects when they touch state the runtime cannot reverse (Git pushes, package installs, arbitrary shell state). Presence of such a record blocks automatic rollback, since guessing at reversal would be worse than surfacing the failure.</p>
+        <p>
+          Tool arguments are validated by Ajv against the tool's JSON Schema
+          <em>before</em> preview or approval — a hallucinated call is rejected
+          with a readable error the model can act on rather than being executed.
+          Successful mutation-tool calls by the Coder are recorded as untracked
+          external side effects when they touch state the runtime cannot reverse
+          (Git pushes, package installs, arbitrary shell state). Presence of
+          such a record blocks automatic rollback, since guessing at reversal
+          would be worse than surfacing the failure.
+        </p>
 
-    <h3 id="hitl">HITL diff review</h3>
+        <h3 id="hitl">HITL diff review</h3>
 
-    <p>Before a file mutation, <code>WorkspaceFileService</code> produces a diff preview containing:</p>
+        <p>
+          Before a file mutation, <code>WorkspaceFileService</code> produces a
+          diff preview containing:
+        </p>
 
-    <ul>
-      <li>Workspace-relative path</li>
-      <li>Base SHA-256 hash of the current file contents (or <code>null</code> for a new file via <code>create_file</code>)</li>
-      <li>Proposed hash after the change</li>
-      <li>Unified text diff</li>
-      <li>Stable line-hunk IDs (<code>h1:${hash(identity)}</code> with <code>version:1</code>; path + line range + content hashes)</li>
-      <li>Original and replacement text for each hunk</li>
-      <li>Optional <code>warnings</code> (e.g., <code>This change removes previously defined: add, subtract</code> when a full-file rewrite would drop exported symbols)</li>
-    </ul>
+        <ul>
+          <li>Workspace-relative path</li>
+          <li>
+            Base SHA-256 hash of the current file contents (or
+            <code>null</code> for a new file via <code>create_file</code>)
+          </li>
+          <li>Proposed hash after the change</li>
+          <li>Unified text diff</li>
+          <li>
+            Stable line-hunk IDs (<code>h1:${hash(identity)}</code> with
+            <code>version:1</code>; path + line range + content hashes)
+          </li>
+          <li>Original and replacement text for each hunk</li>
+          <li>
+            Optional <code>warnings</code> (e.g.,
+            <code>This change removes previously defined: add, subtract</code>
+            when a full-file rewrite would drop exported symbols)
+          </li>
+        </ul>
 
-    <p>Approval can be boolean (<code>true</code>=accept all, <code>false</code>=deny) or structured (<code>acceptedHunkIds</code>/<code>rejectedHunkIds</code>); rejected hunks are returned into model context so the Coder works around them instead of retrying the same patch. For <code>delete_file</code>, a fully accepted preview deletes the file rather than applying hunks. The TUI supports per-hunk navigation, toggle accept/reject, apply selected, accept-all, and reject-all. Before applying:</p>
+        <p>
+          Approval can be boolean (<code>true</code>=accept all,
+          <code>false</code>=deny) or structured
+          (<code>acceptedHunkIds</code>/<code>rejectedHunkIds</code>); rejected
+          hunks are returned into model context so the Coder works around them
+          instead of retrying the same patch. For <code>delete_file</code>, a
+          fully accepted preview deletes the file rather than applying hunks.
+          The TUI supports per-hunk navigation, toggle accept/reject, apply
+          selected, accept-all, and reject-all. Before applying:
+        </p>
 
-    <ol>
-      <li>Re-read the file.</li>
-      <li>Verify the base hash still matches (stale file fails closed).</li>
-      <li>Rebuild the proposal and verify the approved preview still matches (<code>proposedHash</code> + <code>hunks</code> JSON equality).</li>
-      <li>Validate hunk IDs: reject duplicate <code>acceptedHunkIds</code>, unknown IDs, and overlapping hunks (sorted reverse by <code>startLine</code>); verify <code>original</code> slice still matches file content.</li>
-      <li>Apply accepted, non-overlapping hunks in reverse order.</li>
-      <li>Write atomically.</li>
-      <li>Return rejected hunks to the model context so the Coder can continue around them.</li>
-    </ol>
+        <ol>
+          <li>Re-read the file.</li>
+          <li>Verify the base hash still matches (stale file fails closed).</li>
+          <li>
+            Rebuild the proposal and verify the approved preview still matches
+            (<code>proposedHash</code> + <code>hunks</code> JSON equality).
+          </li>
+          <li>
+            Validate hunk IDs: reject duplicate <code>acceptedHunkIds</code>,
+            unknown IDs, and overlapping hunks (sorted reverse by
+            <code>startLine</code>); verify <code>original</code> slice still
+            matches file content.
+          </li>
+          <li>Apply accepted, non-overlapping hunks in reverse order.</li>
+          <li>Write atomically.</li>
+          <li>
+            Return rejected hunks to the model context so the Coder can continue
+            around them.
+          </li>
+        </ol>
 
-    <p>A partial approval never silently applies rejected content; a base-hash mismatch never overwrites a user's concurrent edit. A stale preview or content mismatch throws before any write.</p>
+        <p>
+          A partial approval never silently applies rejected content; a
+          base-hash mismatch never overwrites a user's concurrent edit. A stale
+          preview or content mismatch throws before any write.
+        </p>
 
-    <h2 id="databases">Persistence &amp; deployment</h2>
+        <h2 id="databases">Persistence &amp; deployment</h2>
 
-    <h3>Databases</h3>
-    <p>See <a href="#persistence">Architecture → Persistence</a> for the schema-by-schema breakdown. All three databases use SQLite in WAL journal mode.</p>
+        <h3>Databases</h3>
+        <p>
+          See <a href="#persistence">Architecture → Persistence</a> for the
+          schema-by-schema breakdown. All three databases use SQLite in WAL
+          journal mode.
+        </p>
 
-    <h3 id="data-paths">Default data paths</h3>
+        <h3 id="data-paths">Default data paths</h3>
 
-    <div class="code-block">
-      <div class="code-title">filesystem</div>
-<pre><code>Windows        %LOCALAPPDATA%\agentic-runtime\global.db
+        <div class="code-block">
+          <div class="code-title">filesystem</div>
+          <pre><code>Windows        %LOCALAPPDATA%\agentic-runtime\global.db
                %LOCALAPPDATA%\agentic-runtime\projects\&lt;project-id&gt;\project.db
                %LOCALAPPDATA%\agentic-runtime\projects\&lt;project-id&gt;\retrieval.db
                # standalone SemanticRetrievalIndex (no project DB):
@@ -1332,118 +2577,202 @@ Linux / macOS  $XDG_DATA_HOME/agentic-runtime/global.db  # or ~/.local/share/age
                $XDG_DATA_HOME/agentic-runtime/projects/&lt;project-id&gt;/project.db
                $XDG_DATA_HOME/agentic-runtime/projects/&lt;project-id&gt;/retrieval.db
                # standalone: &lt;project&gt;/.agentic/data/retrieval.db</code></pre>
-    </div>
-    <p>Composed headless runtime places retrieval beside <code>project.db</code>; a standalone <code>SemanticRetrievalIndex</code> defaults to <code>.agentic/data/retrieval.db</code> (<code>packages/retrieval/src/index.ts:82-86</code>).</p>
+        </div>
+        <p>
+          Composed headless runtime places retrieval beside
+          <code>project.db</code>; a standalone
+          <code>SemanticRetrievalIndex</code> defaults to
+          <code>.agentic/data/retrieval.db</code>
+          (<code>packages/retrieval/src/index.ts:82-86</code>).
+        </p>
 
-    <h3 id="resume">Long-horizon resume</h3>
+        <h3 id="resume">Long-horizon resume</h3>
 
-    <p>Pipeline stages checkpoint before and after each stage. Stage attempts and failure fingerprints are persisted; plan expansions (<code>code-1…code-4</code> from Planner <code>subtasks</code>) are persisted and replayed on resume; the task-wide model-request count and real provider spend (<code>$0.50</code> budget) are persisted; pending recovery state is persisted. Paused model work restarts from the durable stage boundary.</p>
+        <p>
+          Pipeline stages checkpoint before and after each stage. Stage attempts
+          and failure fingerprints are persisted; plan expansions (<code
+            >code-1…code-4</code
+          >
+          from Planner <code>subtasks</code>) are persisted and replayed on
+          resume; the task-wide model-request count and real provider spend
+          (<code>$0.50</code> budget) are persisted; pending recovery state is
+          persisted. Paused model work restarts from the durable stage boundary.
+        </p>
 
-    <p>To resume programmatically:</p>
+        <p>To resume programmatically:</p>
 
-    <div class="code-block">
-      <div class="code-title">typescript</div>
-<pre><code>const runtime = await createHeadlessRuntime(config);
+        <div class="code-block">
+          <div class="code-title">typescript</div>
+          <pre><code>const runtime = await createHeadlessRuntime(config);
 const result  = await runtime.resumeTask({ taskId });  // ResumeTaskInput {taskId, agentId?}</code></pre>
+        </div>
+
+        <p>
+          <code>resumeTask()</code> reloads the checkpoint and skips
+          already-completed stages. The 30-minute wall-clock window (not 10)
+          starts fresh on each invocation; the per-task model-request (48) and
+          spend ($0.50) budgets survive resume so a task cannot escape its caps
+          by being restarted. Note: an arbitrary shell process, an in-flight
+          provider HTTP request, or an exact mid-tool state is not resumable in
+          place — resume happens from the nearest durable stage boundary.
+        </p>
+
+        <div class="note">
+          <div>
+            <p>
+              <strong>Not resumable in place.</strong> An arbitrary shell
+              process, an in-flight provider HTTP request, or an exact mid-tool
+              state. Resume happens from the nearest durable stage boundary, not
+              mid-tool - pretending otherwise risks corruption.
+            </p>
+          </div>
+        </div>
+
+        <h3 id="trace">Trace data</h3>
+
+        <p>The <code>trace_spans</code> table stores:</p>
+
+        <ul>
+          <li>
+            Project, session, task, trace (<code>traceId == taskId</code>), and
+            span IDs, plus parent span ID
+          </li>
+          <li>
+            Span kind and name (<code>task</code>, <code>pipeline_step</code>,
+            <code>plan_expansion</code>, <code>agent</code>,
+            <code>model_call</code>, <code>tool</code>,
+            <code>provider_attempt</code>, <code>compaction</code>,
+            <code>isolated_question</code>), status, separate
+            <code>error</code> text
+          </li>
+          <li>
+            Serialized input and output (separate <code>usage_json</code> vs
+            <code>cost</code>)
+          </li>
+          <li>Context artifacts</li>
+          <li>Usage and cost</li>
+          <li>Start, end, and duration</li>
+          <li>Provider, model, agent, stage, and tool identifiers</li>
+        </ul>
+
+        <p>
+          Secrets and sensitive field names are redacted before persistence
+          (upstream runtime, not DB layer). Query the current hierarchy with:
+        </p>
+
+        <div class="code-block">
+          <div class="code-title">typescript</div>
+          <pre><code>const spans = await runtime.listTraceSpans(taskId);  // SessionStore.listTraceSpans(traceId) where traceId==taskId</code></pre>
+        </div>
+
+        <p>
+          Spans are currently created for tasks, pipeline stages, agents,
+          provider attempts, context compaction, and isolated questions;
+          routing, task, pipeline, approval, agent, and tool events are also
+          stored in the project event log.
+          <strong>Known incompleteness:</strong> <code>AgentRunner</code> does
+          not yet populate correlation fields (<code>model_request</code> lacks
+          <code>callId</code>/complete request,
+          <code>model_response</code> lacks matching <code>callId</code>,
+          <code>tool_requested</code>/<code>tool_completed</code> lack
+          <code>spanId/parentSpanId</code>, <code>toToolMessage()</code> does
+          not copy <code>contextArtifacts</code>) — so model-call and tool spans
+          are not created through the intended path, provider-attempt spans
+          attach above the missing level, and per-model usage is not reliably
+          captured. The headless runtime has
+          <code>listTraceSpans(taskId)</code> and the IDE dashboard can display
+          traces, but rendering a full correlated hierarchy remains follow-up
+          work.
+        </p>
+      </main>
+
+      <footer>
+        <div>Agent-0 documentation · single-page, self-contained</div>
+        <div>
+          Sources of truth: <code>docs/MULTI_AGENT_ARCHITECTURE.md</code>,
+          <code>docs/ARCHITECTURE_DECISIONS.md</code>,
+          <code>docs/ARCHITECTURE_AND_STATUS.md</code> (current implementation),
+          <code>agent-context/ARCHITECTURE.md</code> + code
+        </div>
+      </footer>
     </div>
 
-    <p><code>resumeTask()</code> reloads the checkpoint and skips already-completed stages. The 30-minute wall-clock window (not 10) starts fresh on each invocation; the per-task model-request (48) and spend ($0.50) budgets survive resume so a task cannot escape its caps by being restarted. Note: an arbitrary shell process, an in-flight provider HTTP request, or an exact mid-tool state is not resumable in place — resume happens from the nearest durable stage boundary.</p>
+    <script>
+      // Theme
+      const root = document.documentElement;
+      const themeBtn = document.getElementById("themeBtn");
+      const apply = (t) => {
+        if (t === "light") root.setAttribute("data-theme", "light");
+        else root.removeAttribute("data-theme");
+        themeBtn.textContent = t === "light" ? "☾" : "☀";
+      };
+      let stored = null;
+      try {
+        stored = localStorage.getItem("a0-theme");
+      } catch (e) {}
+      apply(stored);
+      themeBtn.addEventListener("click", () => {
+        const cur = root.getAttribute("data-theme");
+        const next = cur === "light" ? null : "light";
+        apply(next);
+        try {
+          localStorage.setItem("a0-theme", next || "");
+        } catch (e) {}
+      });
 
-    <div class="note">
-      <div>
-        <p><strong>Not resumable in place.</strong> An arbitrary shell process, an in-flight provider HTTP request, or an exact mid-tool state. Resume happens from the nearest durable stage boundary, not mid-tool - pretending otherwise risks corruption.</p>
-      </div>
-    </div>
+      // Scroll spy
+      const sideLinks = document.querySelectorAll('nav.side a[href^="#"]');
+      const idToSide = {};
+      sideLinks.forEach((a) => {
+        idToSide[a.getAttribute("href").slice(1)] = a;
+      });
 
-    <h3 id="trace">Trace data</h3>
+      const spy = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((en) => {
+            if (!en.isIntersecting) return;
+            const id = en.target.id;
+            Object.values(idToSide).forEach((x) =>
+              x.classList.remove("active"),
+            );
+            if (idToSide[id]) idToSide[id].classList.add("active");
+          });
+        },
+        { rootMargin: "-40% 0px -55% 0px", threshold: 0 },
+      );
+      document.querySelectorAll("main [id]").forEach((h) => spy.observe(h));
 
-    <p>The <code>trace_spans</code> table stores:</p>
+      // Mobile menu
+      const menuBtn = document.getElementById("menuBtn");
+      const side = document.getElementById("side");
+      menuBtn?.addEventListener("click", () => side.classList.toggle("open"));
+      side?.addEventListener("click", (e) => {
+        if (e.target.tagName === "A") side.classList.remove("open");
+      });
 
-    <ul>
-      <li>Project, session, task, trace (<code>traceId == taskId</code>), and span IDs, plus parent span ID</li>
-      <li>Span kind and name (<code>task</code>, <code>pipeline_step</code>, <code>plan_expansion</code>, <code>agent</code>, <code>model_call</code>, <code>tool</code>, <code>provider_attempt</code>, <code>compaction</code>, <code>isolated_question</code>), status, separate <code>error</code> text</li>
-      <li>Serialized input and output (separate <code>usage_json</code> vs <code>cost</code>)</li>
-      <li>Context artifacts</li>
-      <li>Usage and cost</li>
-      <li>Start, end, and duration</li>
-      <li>Provider, model, agent, stage, and tool identifiers</li>
-    </ul>
+      // Close mobile menu on outside click
+      document.addEventListener("click", (e) => {
+        if (
+          side &&
+          side.classList.contains("open") &&
+          !side.contains(e.target) &&
+          (!menuBtn || !menuBtn.contains(e.target))
+        ) {
+          side.classList.remove("open");
+        }
+      });
 
-    <p>Secrets and sensitive field names are redacted before persistence (upstream runtime, not DB layer). Query the current hierarchy with:</p>
-
-    <div class="code-block">
-      <div class="code-title">typescript</div>
-<pre><code>const spans = await runtime.listTraceSpans(taskId);  // SessionStore.listTraceSpans(traceId) where traceId==taskId</code></pre>
-    </div>
-
-    <p>Spans are currently created for tasks, pipeline stages, agents, provider attempts, context compaction, and isolated questions; routing, task, pipeline, approval, agent, and tool events are also stored in the project event log. <strong>Known incompleteness:</strong> <code>AgentRunner</code> does not yet populate correlation fields (<code>model_request</code> lacks <code>callId</code>/complete request, <code>model_response</code> lacks matching <code>callId</code>, <code>tool_requested</code>/<code>tool_completed</code> lack <code>spanId/parentSpanId</code>, <code>toToolMessage()</code> does not copy <code>contextArtifacts</code>) — so model-call and tool spans are not created through the intended path, provider-attempt spans attach above the missing level, and per-model usage is not reliably captured. The headless runtime has <code>listTraceSpans(taskId)</code> and the IDE dashboard can display traces, but rendering a full correlated hierarchy remains follow-up work.</p>
-
-  </main>
-
-
-
-  <footer>
-    <div>Agent-0 documentation · single-page, self-contained</div>
-    <div>Sources of truth: <code>docs/MULTI_AGENT_ARCHITECTURE.md</code>, <code>docs/ARCHITECTURE_DECISIONS.md</code>, <code>docs/ARCHITECTURE_AND_STATUS.md</code> (current implementation), <code>agent-context/ARCHITECTURE.md</code> + code</div>
-  </footer>
-</div>
-
-<script>
-  // Theme
-  const root = document.documentElement;
-  const themeBtn = document.getElementById('themeBtn');
-  const apply = t => {
-    if (t === 'light') root.setAttribute('data-theme', 'light');
-    else root.removeAttribute('data-theme');
-    themeBtn.textContent = t === 'light' ? '☾' : '☀';
-  };
-  let stored = null;
-  try { stored = localStorage.getItem('a0-theme'); } catch(e) {}
-  apply(stored);
-  themeBtn.addEventListener('click', () => {
-    const cur = root.getAttribute('data-theme');
-    const next = cur === 'light' ? null : 'light';
-    apply(next);
-    try { localStorage.setItem('a0-theme', next || ''); } catch(e) {}
-  });
-
-  // Scroll spy
-  const sideLinks = document.querySelectorAll('nav.side a[href^="#"]');
-  const idToSide = {};
-  sideLinks.forEach(a => { idToSide[a.getAttribute('href').slice(1)] = a; });
-
-  const spy = new IntersectionObserver(entries => {
-    entries.forEach(en => {
-      if (!en.isIntersecting) return;
-      const id = en.target.id;
-      Object.values(idToSide).forEach(x => x.classList.remove('active'));
-      if (idToSide[id]) idToSide[id].classList.add('active');
-    });
-  }, { rootMargin: '-40% 0px -55% 0px', threshold: 0 });
-  document.querySelectorAll('main [id]').forEach(h => spy.observe(h));
-
-  // Mobile menu
-  const menuBtn = document.getElementById('menuBtn');
-  const side = document.getElementById('side');
-  menuBtn?.addEventListener('click', () => side.classList.toggle('open'));
-  side?.addEventListener('click', e => {
-    if (e.target.tagName === 'A') side.classList.remove('open');
-  });
-
-  // Close mobile menu on outside click
-  document.addEventListener('click', e => {
-    if (side && side.classList.contains('open') && !side.contains(e.target) && (!menuBtn || !menuBtn.contains(e.target))) {
-      side.classList.remove('open');
-    }
-  });
-
-  // Close dropdown on outside click
-  document.addEventListener('click', e => {
-    const dropdown = document.querySelector('details.dropdown');
-    if (dropdown && dropdown.hasAttribute('open') && !dropdown.contains(e.target)) {
-      dropdown.removeAttribute('open');
-    }
-  });
-</script>
-</body>
+      // Close dropdown on outside click
+      document.addEventListener("click", (e) => {
+        const dropdown = document.querySelector("details.dropdown");
+        if (
+          dropdown &&
+          dropdown.hasAttribute("open") &&
+          !dropdown.contains(e.target)
+        ) {
+          dropdown.removeAttribute("open");
+        }
+      });
+    </script>
+  </body>
 </html>

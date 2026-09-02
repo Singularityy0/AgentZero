@@ -450,22 +450,22 @@ and web access. Read-only tools run without a prompt.
 ```mermaid
 flowchart TD
     Start(( )) -->|"task created"| Running("Running")
-    
+
     Running -->|"stage completed"| Checkpointed("Checkpointed")
     Checkpointed -->|"next stage"| Running
-    
+
     Checkpointed ~~~ Interrupted("Interrupted")
-    
+
     Running -->|"IDE closed / crash<br>timeout"| Interrupted
     Interrupted -->|"resumeTask replays<br>checkpoint"| Running
-    
+
     Interrupted ~~~ Paused("Paused")
-    
+
     Running -->|"approval denied"| Paused
     Paused -->|"resumeTask"| Running
-    
+
     Paused ~~~ Completed("Completed")
-    
+
     Running --> Completed
     Completed --> Stop((( )))
 ```
