@@ -465,6 +465,13 @@ const FILE_REFERENCE_PATTERN =
 
 const FILE_REFERENCE_URL_SCHEME = "agentic-file://";
 
+interface MarkdownAstNode {
+  type?: string;
+  value?: string;
+  url?: string;
+  children?: MarkdownAstNode[];
+}
+
 /**
  * Remark plugin that turns file-reference tags inside text nodes into mdast
  * link nodes (`agentic-file://<path>:<start>-<end>`), so the markdown renderer
@@ -472,18 +479,18 @@ const FILE_REFERENCE_URL_SCHEME = "agentic-file://";
  * as inert text.
  */
 function remarkFileReferences() {
-  return (tree: { children: unknown[] }) => {
-    const walk = (node: any) => {
+  return (tree: MarkdownAstNode) => {
+    const walk = (node: MarkdownAstNode) => {
       if (!Array.isArray(node.children)) return;
       for (let i = node.children.length - 1; i >= 0; i--) {
         const child = node.children[i];
-        if (child.type !== "text") {
+        if (child.type !== "text" || typeof child.value !== "string") {
           walk(child);
           continue;
         }
-        const text: string = child.value;
+        const text = child.value;
         FILE_REFERENCE_PATTERN.lastIndex = 0;
-        const parts: any[] = [];
+        const parts: MarkdownAstNode[] = [];
         let cursor = 0;
         let found = false;
         for (
@@ -494,9 +501,14 @@ function remarkFileReferences() {
           found = true;
           const [tag, path, startLine, endLine] = match;
           if (match.index > cursor) {
-            parts.push({ type: "text", value: text.slice(cursor, match.index) });
+            parts.push({
+              type: "text",
+              value: text.slice(cursor, match.index),
+            });
           }
-          const range = startLine ? `:${startLine}-${endLine ?? startLine}` : "";
+          const range = startLine
+            ? `:${startLine}-${endLine ?? startLine}`
+            : "";
           parts.push({
             type: "link",
             url: `${FILE_REFERENCE_URL_SCHEME}${encodeURIComponent(path!)}${range}`,
@@ -531,7 +543,9 @@ function markdownComponents(
             onClick={() =>
               onOpenReference(
                 path,
-                start ? { startLine: Number(start), endLine: Number(end) } : undefined,
+                start
+                  ? { startLine: Number(start), endLine: Number(end) }
+                  : undefined,
               )
             }
             className="rounded-sm bg-indigo-400/10 px-1 font-mono text-[10px] text-indigo-300 hover:bg-indigo-400/20"
@@ -557,7 +571,9 @@ function markdownComponents(
       <ul className="mb-2 list-disc space-y-0.5 pl-4 last:mb-0">{children}</ul>
     ),
     ol: ({ children }) => (
-      <ol className="mb-2 list-decimal space-y-0.5 pl-4 last:mb-0">{children}</ol>
+      <ol className="mb-2 list-decimal space-y-0.5 pl-4 last:mb-0">
+        {children}
+      </ol>
     ),
     li: ({ children }) => <li>{children}</li>,
     h1: ({ children }) => (

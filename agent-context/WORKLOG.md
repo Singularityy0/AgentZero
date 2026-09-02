@@ -792,6 +792,13 @@ algorithm in @vishu.cpp`. Its persisted root span was 554,416 ms, not the
   slash-free Linux artifact name. Electron Builder is also invoked with
   `--publish never` because GitHub Actions owns release publication. A
   regression test protects the required Linux metadata.
+- Integrated remote commit `2d399e5`, which adds Markdown chat rendering and
+  last-workspace persistence. Replaced its two explicit `any` annotations in
+  the custom Remark file-reference transformer with a bounded structural AST
+  type and a text-value guard so the stricter Linux CI lint job remains green.
+  The same commit regenerated `pnpm-lock.yaml` in pnpm's canonical format,
+  which Prettier would rewrite by thousands of lines, so the generated lockfile
+  is now explicitly excluded from formatting checks.
 
 ## Next Steps
 
