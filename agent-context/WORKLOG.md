@@ -775,6 +775,12 @@ algorithm in @vishu.cpp`. Its persisted root span was 554,416 ms, not the
   medium/hard long-horizon tasks while routing explicit one-file work through
   the bounded fast path. Full validation passed: 113 TypeScript tests, 16 Rust
   tests, and the production GUI build.
+- Audited the GitHub Actions release work added through `db194df`. The macOS
+  runner exposed the expected `/var` versus canonical `/private/var` alias in
+  the TUI workspace test; the assertion now compares canonical paths. Linux
+  reached Electron packaging but rejected the scoped npm package name as an
+  executable/AppImage path; desktop metadata now explicitly uses
+  `agent-zero`/`agent-zero.desktop` and synchronizes the Linux desktop entry.
 
 ## Next Steps
 

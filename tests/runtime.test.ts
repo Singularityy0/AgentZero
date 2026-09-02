@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -264,8 +264,12 @@ test("TUI reducer selects individual approval hunks and tracks pipeline retries"
 test("TUI resolves an explicit workspace root and rejects invalid sandbox paths", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-tui-workspace-"));
   try {
-    assert.equal(resolveWorkspaceRoot([root]), root);
-    assert.equal(resolveWorkspaceRoot(["--", root]), root);
+    // macOS exposes /var through /private/var. The resolver deliberately
+    // canonicalizes paths, so compare against the canonical temporary path
+    // instead of the spelling returned by os.tmpdir().
+    const canonicalRoot = realpathSync(root);
+    assert.equal(resolveWorkspaceRoot([root]), canonicalRoot);
+    assert.equal(resolveWorkspaceRoot(["--", root]), canonicalRoot);
     assert.throws(
       () => resolveWorkspaceRoot([join(root, "missing")]),
       /does not exist/,
