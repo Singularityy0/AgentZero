@@ -4857,6 +4857,17 @@ function ProviderCard({
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(provider.baseUrl ?? "");
   const [modelId, setModelId] = useState(provider.manualModelId ?? "");
+  const [freeModels, setFreeModels] = useState<
+    Array<{
+      id: string;
+      name: string;
+      totalParameters?: number;
+      contextWindow?: number;
+      freeTier: boolean;
+      unverified?: boolean;
+    }>
+  >([]);
+  const [freeLoading, setFreeLoading] = useState(false);
   const save = async () => {
     const body: Record<string, string> = { baseUrl, manualModelId: modelId };
     if (apiKey) body.apiKey = apiKey;
@@ -4888,6 +4899,27 @@ function ProviderCard({
     setModelId("");
     onMessage(`Cleared ${provider.label}.`);
     await onChanged();
+  };
+  const scrapeFree = async () => {
+    setFreeLoading(true);
+    try {
+      const body = await requestJson<{
+        models: Array<{
+          id: string;
+          name: string;
+          totalParameters?: number;
+          contextWindow?: number;
+          freeTier: boolean;
+          unverified?: boolean;
+        }>;
+      }>(`/api/providers/${provider.id}/free-models`);
+      setFreeModels(body.models);
+      onMessage(`Found ${body.models.length} free tier <80B models for ${provider.label}.`);
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFreeLoading(false);
+    }
   };
   const state = provider.lastValidation?.ok
     ? "Validated"
@@ -4964,6 +4996,46 @@ function ProviderCard({
             )}
           </label>
         )}
+        <details className="mt-2 rounded border border-white/5 bg-black/20 px-2 py-1.5">
+          <summary className="flex cursor-pointer items-center justify-between text-[10px] text-neutral-500 hover:text-neutral-300">
+            <span>Free tier &lt;80B (scraped) {freeLoading ? "…" : `(${freeModels.length})`}</span>
+            <span className="text-[9px] text-neutral-600">click to expand</span>
+          </summary>
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={() => void scrapeFree()}
+              disabled={freeLoading}
+              className="mb-2 w-full rounded bg-white/5 px-2 py-1 text-[10px] text-neutral-300 hover:bg-white/10 disabled:opacity-50"
+            >
+              {freeLoading ? "Scraping…" : `Scrape free tier <80B from ${provider.label}`}
+            </button>
+            {freeModels.length > 0 ? (
+              <ul className="max-h-40 space-y-1 overflow-y-auto">
+                {freeModels.map((m) => (
+                  <li key={m.id} className="flex items-center justify-between gap-2 rounded px-1.5 py-1 hover:bg-white/5">
+                    <button
+                      type="button"
+                      onClick={() => setModelId(m.id)}
+                      className="flex-1 truncate text-left text-[10px] text-neutral-300 hover:text-white"
+                      title={`${m.id} — ${m.totalParameters ? `${(m.totalParameters / 1e9).toFixed(1)}B` : "unverified"} ${m.contextWindow ? `· ${m.contextWindow} ctx` : ""}`}
+                    >
+                      {m.id}
+                    </button>
+                    <span className="shrink-0 text-[9px] text-neutral-600">
+                      {m.totalParameters ? `${(m.totalParameters / 1e9).toFixed(1)}B` : "unverified"}
+                      {m.unverified ? " · unverified" : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[10px] text-neutral-600">
+                {freeLoading ? "Fetching…" : "No free tier models scraped yet. Click Scrape."}
+              </p>
+            )}
+          </div>
+        </details>
       </div>
       <div className="mt-4 flex items-center gap-2">
         <button

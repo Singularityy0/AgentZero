@@ -28,6 +28,17 @@ const MODEL_PARAMETER_CATALOG: Record<string, Record<string, number>> = {
   },
   openrouter: {
     "nvidia/nemotron-3.5-lightning:free": 30_000_000_000,
+    // Common free-tier <80B (scraped via pricing prompt==0 or :free suffix)
+    "meta-llama/llama-3.1-8b-instruct:free": 8_030_000_000,
+    "meta-llama/llama-3.2-3b-instruct:free": 3_210_000_000,
+    "google/gemma-2-9b-it:free": 9_240_000_000,
+    "qwen/qwen-2.5-7b-instruct:free": 7_620_000_000,
+    "mistralai/mistral-7b-instruct:free": 7_250_000_000,
+    "mistralai/mistral-nemo:free": 12_900_000_000,
+    "deepseek/deepseek-r1:free": 37_000_000_000,
+    "deepseek/deepseek-chat:free": 37_000_000_000,
+    "qwen/qwen3-30b-a3b:free": 30_500_000_000,
+    "google/gemini-2.0-flash-001:free": 32_000_000_000,
   },
   ollama: {
     "llama2:7b": 7_000_000_000,
@@ -1451,6 +1462,13 @@ function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
     ? architecture.input_modalities
     : [];
   const totalParams = lookupTotalParameters("openrouter", model.id);
+  // Detect free-tier: :free suffix or zero pricing (prompt/completion 0)
+  const isFreeTier =
+    model.id.endsWith(":free") ||
+    pricing.prompt === "0" ||
+    pricing.prompt === 0 ||
+    pricing.completion === "0" ||
+    pricing.completion === 0;
   return {
     id: model.id,
     name: typeof model.name === "string" ? model.name : model.id,
@@ -1475,7 +1493,8 @@ function normalizeOpenRouterModel(raw: unknown): ModelInfo | undefined {
     },
     metadata: {
       ...(model as Record<string, unknown>),
-      ...(model.totalParameters ? {} : { unverified: true }),
+      ...(totalParams ? {} : { unverified: true }),
+      ...(isFreeTier ? { freeTier: true } : {}),
     },
   };
 }

@@ -954,6 +954,22 @@ async function handleRequest(
     return;
   }
 
+  const freeModelsMatch = url.pathname.match(
+    /^\/api\/providers\/([^/]+)\/free-models$/,
+  );
+  if (freeModelsMatch && method === "GET") {
+    const providerId = decodeURIComponent(freeModelsMatch[1]!);
+    try {
+      const freeModels = await scrapeFreeTierModels(providerId, store);
+      sendJson(response, 200, { models: freeModels });
+    } catch (error) {
+      sendJson(response, 500, {
+        error: error instanceof Error ? error.message : "Failed to scrape free models.",
+      });
+    }
+    return;
+  }
+
   if (staticDir && method === "GET" && !url.pathname.startsWith("/api/")) {
     serveStatic(url.pathname, staticDir, response);
     return;
@@ -1125,6 +1141,117 @@ async function validateProvider(
   const result = { ...outcome, at: Date.now() };
   store.setProviderSetting(spec.id, "lastValidation", JSON.stringify(result));
   return result;
+}
+
+async function scrapeFreeTierModels(
+  providerId: string,
+  store: SessionStore,
+): Promise<
+  Array<{
+    id: string;
+    name: string;
+    providerId: string;
+    contextWindow?: number;
+    totalParameters?: number;
+    pricing?: { inputPerMillion?: number; outputPerMillion?: number };
+    freeTier: boolean;
+    unverified?: boolean;
+  }>
+> {
+  // Catalog for 80B check (mirrors gateway catalog for GUI without importing gateway)
+  const catalog: Record<string, number> = {
+    "mixtral-8x7b-32768": 46_700_000_000,
+    "qwen/qwen3.6-27b": 27_000_000_000,
+    "qwen/qwen3.8-27b": 27_000_000_000,
+    "openai/gpt-oss-20b": 20_000_000_000,
+    "nvidia/nemotron-3.5-lightning:free": 30_000_000_000,
+    "meta-llama/llama-3.1-8b-instruct:free": 8_030_000_000,
+    "meta-llama/llama-3.2-3b-instruct:free": 3_210_000_000,
+    "google/gemma-2-9b-it:free": 9_240_000_000,
+    "qwen/qwen-2.5-7b-instruct:free": 7_620_000_000,
+    "mistralai/mistral-7b-instruct:free": 7_250_000_000,
+    "mistralai/mistral-nemo:free": 12_900_000_000,
+    "deepseek/deepseek-r1:free": 37_000_000_000,
+    "deepseek/deepseek-chat:free": 37_000_000_000,
+    "qwen/qwen3-30b-a3b:free": 30_500_000_000,
+    "google/gemini-2.0-flash-001:free": 32_000_000_000,
+    "ministral-3b-latest": 3_000_000_000,
+    "ministral-8b-latest": 8_000_000_000,
+    "ministral-14b-latest": 14_000_000_000,
+    "gemma-4-31b": 31_000_000_000,
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct": 30_500_000_000,
+    "Qwen/Qwen2.5-Coder-32B-Instruct": 32_500_000_000,
+  };
+  const isUnder80B = (id: string, total?: number) => {
+    const known = total ?? catalog[id];
+    return known === undefined ? true : known <= 80_000_000_000;
+  };
+
+  if (providerId === "openrouter") {
+    const key = store.getCredential("openrouter");
+    const headers: Record<string, string> = {};
+    if (key) headers.Authorization = `Bearer ${key}`;
+    const res = await fetch("https://openrouter.ai/api/v1/models", { headers });
+    if (!res.ok) throw new Error(`OpenRouter discovery failed (${res.status})`);
+    const body = (await res.json()) as { data?: unknown };
+    if (!Array.isArray(body.data)) throw new Error("Malformed OpenRouter catalog");
+    const free = body.data
+      .filter((raw) => {
+        if (!raw || typeof raw !== "object") return false;
+        const m = raw as Record<string, unknown>;
+        if (typeof m.id !== "string") return false;
+        const pricing = m.pricing as Record<string, unknown> | undefined;
+        const isFree =
+          (m.id as string).endsWith(":free") ||
+          pricing?.prompt === "0" ||
+          pricing?.prompt === 0 ||
+          pricing?.completion === "0" ||
+          pricing?.completion === 0;
+        if (!isFree) return false;
+        const total = catalog[m.id as string];
+        return isUnder80B(m.id as string, total);
+      })
+      .map((raw) => {
+        const m = raw as Record<string, unknown>;
+        const id = m.id as string;
+        const total = catalog[id];
+        const pricing = m.pricing as Record<string, unknown> | undefined;
+        return {
+          id,
+          name: typeof m.name === "string" ? (m.name as string) : id,
+          providerId,
+          contextWindow:
+            typeof m.context_length === "number" ? (m.context_length as number) : undefined,
+          totalParameters: total,
+          pricing: {
+            inputPerMillion:
+              pricing?.prompt !== undefined ? Number(pricing.prompt) * 1_000_000 : undefined,
+            outputPerMillion:
+              pricing?.completion !== undefined
+                ? Number(pricing.completion) * 1_000_000
+                : undefined,
+          },
+          freeTier: true,
+          unverified: total === undefined,
+        };
+      })
+      .sort((a, b) => (a.totalParameters ?? 0) - (b.totalParameters ?? 0));
+    return free;
+  }
+
+  // For other providers, return the verified <80B allowlist as scraped list
+  const spec = PROVIDER_FIELD_SPECS.find((s) => s.id === providerId);
+  if (!spec?.modelOptions) return [];
+  return spec.modelOptions
+    .filter((id) => isUnder80B(id))
+    .map((id) => ({
+      id,
+      name: id,
+      providerId,
+      totalParameters: catalog[id],
+      freeTier: true,
+      unverified: catalog[id] === undefined,
+    }));
 }
 
 function maskSecret(value: string): string {
