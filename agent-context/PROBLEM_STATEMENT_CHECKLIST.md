@@ -284,6 +284,12 @@ null` means "this path must not exist", which is what makes save-as report
 
 - [x] Source repository with full Git history.
 - [ ] Submission ZIP including `.git`.
+- [x] CI on every push and pull request (`.github/workflows/ci.yml`): lint,
+      format, Rust suite, TypeScript suite, GUI bundle.
+- [x] Release automation (`.github/workflows/release.yml`): a push to `main`
+      refreshes a `latest` prerelease carrying installers for all three
+      platforms, and a `v*` tag publishes a permanent versioned release. The
+      publish step runs only if every platform built.
 - [~] **Windows installers built and verified** at 125 MB, in
   `packages/desktop/release`: `Agent Zero Setup 0.1.0.exe` (NSIS) and
   `Agent Zero 0.1.0.exe` (portable). Both bundle ripgrep and the release-mode

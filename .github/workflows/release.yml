@@ -1,19 +1,41 @@
-name: Build desktop installers
+name: Release
 
-# The bundled ripgrep binary is platform-specific and electron-builder cannot
-# produce a macOS image off macOS, so each installer is built on its own native
-# runner rather than cross-compiled from one machine.
+# Two ways to get installers, and they mean different things.
+#
+# A push to `main` refreshes the `latest` prerelease, so there is always one URL
+# holding a build of current main - which is what a reviewer or teammate needs
+# between versions. A `v*` tag publishes a permanent, versioned release.
+#
+# Both build each platform on its own native runner. Cross-building is refused
+# on purpose: the bundled ripgrep binary and the Rust sidecar are both
+# platform-specific, so a package built for another OS would ship executables
+# that cannot run.
 on:
-  workflow_dispatch:
   push:
+    branches: [main]
     tags:
       - "v*"
+  workflow_dispatch:
+
+# No `paths-ignore`. It would skip documentation-only pushes, which is tempting,
+# but GitHub applies path filters to tag pushes as well - so tagging a commit
+# that happened to touch only documentation would silently publish nothing. A
+# release that quietly does not happen is worse than a few wasted CI minutes.
+# Concurrency cancellation below keeps a burst of pushes to one build.
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # One platform failing should not hide whether the others work.
       fail-fast: false
       matrix:
         include:
@@ -42,20 +64,29 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build workspace
-        run: pnpm build
-
-      - name: Run tests
+      # A release must not ship code the suite rejects, and running it on each
+      # platform is also the only cross-platform check the project has.
+      - name: Test
         run: pnpm test
 
       - name: Build GUI bundle
         run: pnpm --filter @agentic-runtime/gui build
 
-      # Release mode for the shipped sidecar: 13.5 MB against 39.5 MB debug,
-      # and faster at parsing and graph ranking.
+      # Release mode for the shipped sidecar: 13.5 MB against 39.5 MB debug, and
+      # faster at parsing and graph ranking.
       - name: Build release sidecar
         run: pnpm build:rust:release
 
@@ -75,3 +106,69 @@ jobs:
             packages/desktop/release/*.deb
             packages/desktop/release/*.dmg
             packages/desktop/release/*.exe
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    # Only publish when every platform produced an installer. A release missing
+    # one OS is worse than no new release, because the gap is not visible from
+    # the download page.
+    if: success()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List what will be published
+        run: ls -lh artifacts
+
+      # `gh` is preinstalled on the runner, so this needs no third-party action
+      # with write access to the repository.
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" artifacts/* \
+            --title "Agent Zero ${{ github.ref_name }}" \
+            --generate-notes
+
+      # Written to a file rather than passed inline: a multi-line string inside
+      # a YAML block would carry the block's indentation into the notes, and ten
+      # leading spaces turn a Markdown table into a code block.
+      - name: Compose rolling release notes
+        if: github.ref == 'refs/heads/main'
+        run: |
+          cat > notes.md <<'NOTES'
+          Automatic build of `main`.
+
+          Unsigned: on macOS, right-click the app and choose Open on first
+          launch; on Windows, SmartScreen warns on an unsigned installer.
+
+          | Platform | Download |
+          | -------- | -------- |
+          | Windows | `Agent Zero Setup <version>.exe` (installer) or `Agent Zero <version>.exe` (portable) |
+          | macOS | `.dmg` |
+          | Linux | `.AppImage` or `.deb` |
+          NOTES
+          echo "" >> notes.md
+          echo "Built from ${{ github.sha }}." >> notes.md
+
+      # Deleted and recreated rather than edited, so the `latest` tag always
+      # points at the commit these binaries were actually built from.
+      - name: Refresh the rolling build from main
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest artifacts/* \
+            --title "Agent Zero - latest from main" \
+            --target "${{ github.sha }}" \
+            --prerelease \
+            --notes-file notes.md

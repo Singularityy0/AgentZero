@@ -435,6 +435,40 @@ project has a separate database keyed by the canonical project path. Provider
 keys can be saved through `/settings` or `pnpm settings`; environment variables
 remain supported as fallback configuration.
 
+## Releases and CI
+
+Two workflows, doing different jobs.
+
+**`ci.yml`** runs on every push and pull request, on Ubuntu only: lint, format
+check, the Rust suite, the TypeScript suite, and the GUI bundle. It is the fast
+answer to "did I break something", and finishes in a few minutes because it
+builds no installers.
+
+**`release.yml`** builds installers on all three platforms and publishes them:
+
+| Trigger         | Result                                                                               |
+| --------------- | ------------------------------------------------------------------------------------ |
+| push to `main`  | Refreshes the `latest` prerelease, so one URL always holds a build of current `main` |
+| push a `v*` tag | Publishes a permanent versioned release with generated notes                         |
+| manual dispatch | Same, on demand                                                                      |
+
+Cutting a version:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Each platform builds on its own native runner. Cross-building is refused on
+purpose: the bundled ripgrep binary and the Rust sidecar are both
+platform-specific, so a package built for another OS would ship executables that
+cannot run. `prepare-runtime-assets.mjs` fails loudly rather than producing one.
+
+The release job runs only when every platform succeeded — a release missing one
+OS is worse than no new release, because the gap is invisible from the download
+page. Builds are unsigned, which needs paid Apple and Windows certificates: on
+macOS, right-click → Open on first launch; on Windows, SmartScreen warns.
+
 ## Scripts
 
 - `pnpm build` compiles all current packages (incremental)

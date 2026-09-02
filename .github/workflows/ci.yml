@@ -1,0 +1,67 @@
+name: CI
+
+# Fast feedback on every push and pull request. Installers are not built here -
+# that is the release workflow's job, on native runners - so this stays a few
+# minutes rather than tens of them.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push to the same branch makes the previous run's answer irrelevant.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint, build, test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.5
+
+      - uses: actions/setup-node@v4
+        with:
+          # `node:sqlite` landed in 22.5; anything older cannot open a session.
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # The sidecar's tree-sitter grammars are the slowest part of a cold build,
+      # and they change only when a grammar is added.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      # `pnpm test` forces a full TypeScript rebuild and runs the Rust suite
+      # first, so a green run here means the current sources are green - not a
+      # stale `dist/` that `tsc -b` declined to refresh.
+      - name: Test
+        run: pnpm test
+
+      # The workbench is not covered by the Node test suite, so a type error or
+      # a broken import in the React app would otherwise reach a release build.
+      - name: Build GUI bundle
+        run: pnpm --filter @agentic-runtime/gui build
