@@ -54,6 +54,11 @@ jobs:
       - name: Build GUI bundle
         run: pnpm --filter @agentic-runtime/gui build
 
+      # Release mode for the shipped sidecar: 13.5 MB against 39.5 MB debug,
+      # and faster at parsing and graph ranking.
+      - name: Build release sidecar
+        run: pnpm build:rust:release
+
       # Unsigned builds are intentional: signing needs paid Apple and Windows
       # certificates. Reviewers on macOS must right-click → Open on first launch.
       - name: Package installers
@@ -63,7 +68,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: agentic-ide-${{ matrix.artifact }}
+          name: agent-zero-${{ matrix.artifact }}
           if-no-files-found: error
           path: |
             packages/desktop/release/*.AppImage
