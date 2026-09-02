@@ -1,6 +1,29 @@
 # Agent Zero
 
-Minimal TypeScript monorepo workspace for building an agent runtime.
+An agentic coding IDE built for small open-weight models. Every model it uses is
+80B parameters or fewer, on free-tier or pay-as-you-go APIs or local hardware.
+
+A single small model cannot carry a hard multi-step coding task, so the work is
+split across specialised agents and the system is designed around their limits:
+
+- **A planner that decides the plan's shape.** It may split one objective into
+  several narrowly scoped coding steps, each seeing only its own slice.
+- **Retrieval that reads code, not text.** TypeScript and JavaScript through the
+  compiler API; Python, Go, Rust, C, and C++ through tree-sitter in a Rust
+  sidecar. Ranking follows the project's call graph with personalised PageRank,
+  so a function several calls from a match still surfaces.
+- **Routing that explains itself.** Every request is placed on a provider by
+  task complexity, context fit, cost, spend so far, and rate-limit cooldown, and
+  the reason is visible live.
+- **Compaction with no model in the loop.** Context is folded into structured
+  state deterministically, so it cannot hallucinate what it summarises.
+- **Twelve independent safeguards** against runaway or stuck tasks, including a
+  Merkle state tree that notices when the workspace returns to a state it has
+  already occupied.
+- **A trace for everything.** Every agent, tool, and model call with its exact
+  input, output, context, tokens, and time - inspectable while running.
+
+Clients: a desktop IDE (Electron), the same workbench in a browser, and a TUI.
 
 ## Requirements
 
@@ -320,6 +343,53 @@ OLLAMA_ENDPOINT=http://localhost:11434/api/chat
 OLLAMA_MODEL=your-local-model
 ```
 
+## Code retrieval
+
+Each codebase gets its own SQLite index, keyed by the canonical project root, so
+retrieval and agent memory never cross between projects. Extraction runs in three
+tiers, strongest first:
+
+| Tier           | Languages                  | Produces                                           |
+| -------------- | -------------------------- | -------------------------------------------------- |
+| `typescript`   | TS, TSX, JS, JSX, MJS, CJS | Bindings-resolved symbols, imports, exports, calls |
+| `tree-sitter`  | Python, Go, Rust, C, C++   | Parsed symbols, multi-line spans, attributed calls |
+| `ripgrep-text` | everything else            | Regex declaration and import lines                 |
+
+TypeScript and JavaScript stay in-process on purpose: the compiler API resolves
+bindings, so its reference edges point at the declaration a name actually refers
+to, where a syntax tree can only match text. The middle tier gives each language
+its own visibility rule - Rust `pub`, Go's leading capital, C's `static`,
+Python's underscore - and a call graph attributed to the enclosing function.
+
+Ranking then widens by structure. A per-file expansion reaches a direct caller
+and stops; personalised PageRank over the project's symbol graph reaches the
+function three calls away that a change actually breaks, and leaves a
+disconnected file out. Every returned slice carries the reason it was chosen,
+and the dashboard shows it.
+
+Indexing is incremental and stat-gated: a file whose size and mtime match the
+index is not re-read at all, so the refresh that runs on every query stays cheap.
+
+## Rust sidecar
+
+A small Rust process, spawned on demand and shut down with the runtime, backs
+five things the TypeScript side does not do well:
+
+- **Symbol extraction** for the five non-JavaScript languages, over tree-sitter.
+- **The code property graph** in flat arrays, with personalised PageRank.
+- **A write-ahead log** that persists each project's graph as a
+  length-framed, memory-mapped record, so a restart adopts it instead of
+  rebuilding.
+- **A Merkle state tree** that hashes the changed files with the action that
+  produced them, catching a run that edits, reverts, and re-edits - which a
+  per-step failure fingerprint cannot see.
+- **Structural slicing and signature pruning** for the `analyze_code_structure`
+  tool and for context compaction.
+
+The sidecar is an enhancement, not a prerequisite. A missing or failing binary
+degrades each of these rather than failing the task, so a machine where the
+native build did not run still has a working IDE.
+
 ## Provider Gateway
 
 `@agentic-runtime/gateway` separates provider configuration, discovered models,
@@ -372,11 +442,17 @@ remain supported as fallback configuration.
   because `tsc -b` has skipped files whose timestamps moved backwards during a
   git operation and left stale JavaScript behind
 - `pnpm typecheck` runs the TypeScript build in checking mode
-- `pnpm test` runs the core agent and tool contract tests
+- `pnpm test` forces a full rebuild, runs the Rust suite, then the TypeScript
+  suite. It forces the rebuild deliberately: a green run must mean the current
+  sources are green, and `tsc -b` has silently skipped a file before
+- `pnpm test:rust` runs the Rust crate's tests alone
 - `pnpm tui` builds the workspace and starts the interactive agentic TUI
 - `pnpm start` builds and opens the desktop IDE
 - `pnpm desktop:quick` opens an already-built desktop IDE
-- `pnpm desktop:package` creates desktop installers for the current platform
+- `pnpm desktop:package` creates desktop installers for the current platform,
+  building the Rust sidecar in release mode first (13.5 MB against 39.5 MB
+  debug). Cross-building is refused: both bundled binaries are
+  platform-specific, so each platform builds on its own machine or CI runner
 - `pnpm lint` runs ESLint
 - `pnpm format` formats supported files with Prettier
 - `pnpm format:check` checks formatting without changing files

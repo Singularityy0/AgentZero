@@ -1278,7 +1278,7 @@ Only mutating stages are recorded. A read-only stage legitimately leaves the
 workspace unchanged every time, and recording it would report a cycle for doing
 its job correctly.
 
-### Rust code that is not integrated
+### Rust capability boundaries
 
 - The diff engine is line-based LCS, not an AST edit-distance engine.
 - There is no three-way AST merge.
@@ -1569,52 +1569,68 @@ Why:
 
 Cost:
 
-- The visible browser product trails the headless runtime.
+- The visible browser product trailed the headless runtime during development.
+  Both are now complete, and the GUI is the primary client.
 
-### Tauri last
+### Electron for the desktop shell, not Tauri
 
 Selected approach:
 
-- Keep the browser workbench and local server during runtime stabilization.
-- Add a thin desktop wrapper only after the transport and workbench are complete.
+- Ship the desktop application on Electron, hosting the same loopback
+  HTTP/SSE server the browser workbench uses.
 
 Why:
 
-- Tauri should package a stable application boundary, not become the place where
-  orchestration is implemented.
-- This avoids a second backend and keeps browser and desktop behavior aligned.
+- The runtime is Node. Sessions, tasks, traces, and the retrieval index all use
+  `node:sqlite`; search shells out to ripgrep; the code-graph sidecar is a
+  spawned child process. Electron ships a Node runtime and Tauri does not - a
+  Tauri build is a Rust binary plus the system webview. Porting would mean
+  either bundling Node alongside Tauri, which gives back the size advantage that
+  motivated the switch, or rewriting the runtime in Rust.
+- One Chromium on every platform. Tauri uses WebView2, WKWebView, and WebKitGTK,
+  and the workbench embeds Monaco; a webview difference on the evaluator's
+  machine costs more than an installer's size saves.
 
 Cost:
 
-- There is no desktop installer today.
-- Cross-platform desktop behavior remains unverified.
+- A 125 MB installer against roughly 10 MB for an equivalent Tauri shell.
+
+Boundary:
+
+- The shell talks to the runtime over the same loopback transport as the
+  browser client, so it is swappable. Tauri remains viable later precisely
+  because no orchestration lives in the Electron layer.
 
 ## Current status by area
 
-| Area                          | Status                | Notes                                                  |
-| ----------------------------- | --------------------- | ------------------------------------------------------ |
-| Provider-neutral core         | Implemented           | Contracts, runner, tools, and orchestrators exist      |
-| Coding pipeline               | Implemented           | Sequential five-stage path with checkpoints            |
-| Verification-only route       | Implemented           | Read-only checks route directly to Verifier            |
-| Verifier project rules        | Implemented           | Root `AGENTS.md` is included in Verifier prompt        |
-| Registry agents               | Implemented           | Custom agents and bounded handoffs exist               |
-| Smart provider failover       | Implemented with gaps | Context, tools, cost estimate, preference, cooldown    |
-| Model constraint enforcement  | Partial               | Sparse catalog and unverified models remain usable     |
-| Semantic retrieval            | Implemented with gaps | Strong TypeScript path, shallow mixed-language path    |
-| Context compaction            | Implemented           | Threshold, repeated passes, context-error recovery     |
-| File HITL                     | Implemented in TUI    | Stable partial hunks and stale-base checks             |
-| Persistence                   | Implemented           | Global, project, retrieval SQLite                      |
-| Stage resume                  | Implemented           | Completed pipeline stages are skipped                  |
-| Verifier rollback             | Implemented           | File tools forward mutation records to the journal     |
-| Hierarchical tracing          | Implemented           | Model/tool correlation, usage, cost, and context       |
-| Rust syntax services          | Implemented           | Slicing, pruning, advisory line diff                   |
-| Rust CPG, Merkle runtime, WAL | Planned               | Code fragments exist but are not integrated            |
-| Planner-driven decomposition  | Implemented           | Planner rewrites the plan; expansions are checkpointed |
-| Complexity-aware routing      | Implemented           | Per-stage capacity/economy bias and window floors      |
-| TUI runtime client            | Implemented           | Main usable client                                     |
-| GUI settings and file viewer  | Implemented           | Editable workbench with Monaco and a terminal          |
-| GUI runtime client            | Implemented           | Tasks, approvals, live events, traces over HTTP/SSE    |
-| Desktop packaging             | Windows only          | macOS/Linux configured in CI but not yet produced      |
+| Area                         | Status           | Notes                                                   |
+| ---------------------------- | ---------------- | ------------------------------------------------------- |
+| Provider-neutral core        | Implemented      | Contracts, runner, tools, and orchestrators exist       |
+| Coding pipeline              | Implemented      | Sequential five-stage path with checkpoints             |
+| Verification-only route      | Implemented      | Read-only checks route directly to Verifier             |
+| Verifier project rules       | Implemented      | Root `AGENTS.md` is included in Verifier prompt         |
+| Registry agents              | Implemented      | Custom agents and bounded handoffs exist                |
+| Smart provider failover      | Implemented      | Tools, context fit, cost, cooldown, spend, quota (402)  |
+| Model constraint enforcement | Partial          | Sparse catalog and unverified models remain usable      |
+| Semantic retrieval           | Implemented      | TS/JS via compiler API; Py/Go/Rust/C/C++ tree-sitter    |
+| Context compaction           | Implemented      | Threshold, repeated passes, context-error recovery      |
+| File HITL                    | Implemented      | Per-hunk accept/reject in both the TUI and the IDE      |
+| Persistence                  | Implemented      | Global, project, retrieval SQLite                       |
+| Stage resume                 | Implemented      | Completed pipeline stages are skipped                   |
+| Verifier rollback            | Implemented      | File tools forward mutation records to the journal      |
+| Hierarchical tracing         | Implemented      | Model/tool correlation, usage, cost, and context        |
+| Rust syntax services         | Implemented      | Slicing, pruning, advisory line diff, symbol extraction |
+| Rust CPG, Merkle, WAL        | Implemented      | Graph ranking, workspace cycles, graph persistence      |
+| Planner-driven decomposition | Implemented      | Planner rewrites the plan; expansions are checkpointed  |
+| Complexity-aware routing     | Implemented      | Per-stage capacity/economy bias and window floors       |
+| Code-graph ranking           | Implemented      | FlatCPG + personalised PageRank, persisted in the WAL   |
+| Workspace loop detection     | Implemented      | Merkle state tree beside failure fingerprints           |
+| Token and time accounting    | Implemented      | Per model call, rolled up to agent, stage, and task     |
+| Chat history                 | Implemented      | Per-project, auto-titled, resumable, cascade delete     |
+| TUI runtime client           | Implemented      | Main usable client                                      |
+| GUI settings and file viewer | Implemented      | Editable workbench with Monaco and a terminal           |
+| GUI runtime client           | Implemented      | Tasks, approvals, live events, traces over HTTP/SSE     |
+| Desktop packaging            | Windows produced | macOS/Linux wired to native CI runners, not yet run     |
 
 ## Current limitations
 
@@ -1637,24 +1653,27 @@ Cost:
 
 ### Retrieval
 
-- No full control-flow or data-flow analysis.
+- The graph is a symbol graph: no control-flow or data-flow analysis, so it
+  answers what calls what rather than what value reaches where.
+- No type resolution outside TypeScript, so an edge naming a symbol declared in
+  several places attaches to all of them.
 - No LSP diagnostics or failing-test ranking.
-- Semantic extraction covers TypeScript and JavaScript through the compiler
-  API; every other language uses declaration/import regexes, so its symbols are
-  single-line anchors with no call edges.
+- Languages outside TS, JS, Python, Go, Rust, C, and C++ still use the regex
+  fallback.
 - No background index watcher; indexing is incremental but demand-driven.
 
 ### Tools and HITL
 
-- No Git merge tool.
-- Built-in Coder cannot perform Git mutations.
-- GUI has no approval or save path.
-- Rust diff is not authoritative for applied changes.
+- Built-in Coder has read-only Git plus `git_merge`; staging, committing, and
+  pushing stay with the user.
+- Package installs have no dedicated approval flow beyond the command gate.
+- The Rust diff engine backs the `compute_ast_diff` tool, but the TypeScript
+  `diff` library remains authoritative for approval hunks.
 
 ### Persistence and security
 
-- Credentials are plaintext at rest.
-- TUI does not expose task resume.
+- Credentials are plaintext at rest, with no OS keychain integration.
+- The TUI does not expose task resume; the IDE dashboard does.
 - In-flight processes and HTTP requests restart from durable boundaries.
 
 ### Observability
@@ -1665,52 +1684,58 @@ Cost:
 
 ### Clients and delivery
 
-- Only the Windows installer has been produced; macOS and Linux packaging is
-  configured in CI but unverified, and cross-building is refused on purpose
-  because the bundled ripgrep binary is platform-specific.
-- Credentials are stored plaintext at rest, with no OS keychain integration.
+- Only the Windows installer has been produced. macOS and Linux build on their
+  own native runners in CI, which has not been run. Cross-building is refused on
+  purpose: both bundled binaries, ripgrep and the Rust sidecar, are
+  platform-specific.
+- The explorer shows one folder at a time, with no nested tree or drag-and-drop.
 
 ## Remaining work
 
-Priorities 0 through 8 of the original plan are complete: default mutations
-reach the recovery journal, trace correlation and context propagation are
-emitted and persisted, the cost ceiling is enforced from real usage, the
-runtime transport exists, and the browser workbench is a live client with
-approvals, manual context, `/bytheway`, and a trace dashboard. What is left,
-in order:
+The original ten-phase plan is complete. Retrieval parses seven languages and
+ranks over a real code graph, the Rust sidecar's four systems all have runtime
+callers, tokens and time are accounted for at every level, and the desktop
+client is a full IDE. What remains, in the order it matters:
 
-### 1. Deepen non-JavaScript retrieval
+### 1. Measure end-to-end performance
 
-TypeScript and JavaScript go through the compiler API and produce symbols,
-imports, exports, references, and call edges. Everything else goes through
-`extractTextMetadata`, which is a per-line regex: single-line symbol anchors,
-import edges, and no call graph. The Rust sidecar already carries tree-sitter
-grammars for Python and Rust, so the natural next step is to route those two
-languages through the sidecar's parser instead of the regex fallback, and to
-measure the result against a labelled multi-file retrieval set rather than
-assuming it helps.
+The largest single scoring component is accuracy, cost, and wall-clock on hidden
+tasks, and it has never been measured. Every defect found late in development -
+a context overflow with no recovery, a duplicate-call deadlock, a mutation
+erased by compaction - came from running a real task, not from the test suite.
+Three genuine multi-step tasks against a real repository would be worth more
+than any further feature.
 
 ### 2. Ground the model parameter catalog
 
-`MODEL_PARAMETER_CATALOG` is hand-maintained and is the only evidence behind
-the <=80B constraint. Every entry needs a cited published total parameter count,
-and the `unverified` flag that unknown models receive needs to be visible in
-the settings screen so an operator can see what the system could not confirm.
+`MODEL_PARAMETER_CATALOG` is hand-maintained and is the only evidence behind the
+<=80B constraint. Every entry needs a cited published total parameter count, the
+default model IDs need checking against each provider's live API, and the
+`unverified` flag needs surfacing in the settings screen so an operator can see
+what the system could not confirm. This is a compliance clause rather than a
+score: a model that turns out to exceed the limit invalidates a run.
 
-### 3. Align or retire the unintegrated Rust systems
+### 3. Produce the macOS and Linux installers
 
-`FlatCPG`, the Merkle runtime, and the memory-mapped WAL compile but have no
-runtime caller. Each should either gain one with an integration test, or be
-removed so the architecture does not claim capability it does not exercise.
+The Windows installer is built and verified. The workflow builds each platform
+on its own native runner, because both bundled binaries - ripgrep and the Rust
+sidecar - are platform-specific and cross-building would ship an unusable
+executable. It has never been run.
 
-### 4. Cross-platform delivery
+### 4. Widen retrieval past the seven parsed languages
 
-Only the Windows installer has been produced. macOS and Linux packaging is
-configured per-platform in CI and needs a real run on each native runner,
-because the bundled ripgrep binary is platform-specific and cross-building is
-deliberately refused.
+Java, Ruby, PHP, C#, and the rest still use the regex fallback. Adding a
+tree-sitter grammar is now a two-line change to `language_for`, so the cost is
+mostly in verifying each grammar's node kinds against the shared declaration
+table.
 
-### 5. Secure credentials at rest
+### 5. Type resolution and flow analysis
+
+An edge naming a symbol declared in several places attaches to all of them,
+because deciding without types would be a guess. The graph is a symbol graph: it
+answers what calls what, not what value reaches where.
+
+### 6. Secure credentials at rest
 
 Provider keys are stored in plaintext in the global SQLite database. OS keychain
 integration is the correct fix.

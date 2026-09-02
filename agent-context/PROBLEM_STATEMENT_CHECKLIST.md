@@ -28,22 +28,36 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
       invalid rewrite silently, so a model that cannot emit structured output
       falls back to the single generic step. Expansions are checkpointed and
       replayed on resume.
-- [~] Verifier failure triggers recovery, fresh retrieval, replanning, corrective
-  coding, and reverification. Hash-guarded rollback primitives exist, but
-  default file tools do not yet forward mutation records into the journal.
+- [x] Verifier failure triggers recovery: hash-guarded rollback, fresh
+      retrieval, replanning, corrective coding, and reverification. The default
+      file tools forward their mutation records as `ToolResult.workspaceMutation`
+      (`packages/tools/src/index.ts:331`), which the runtime writes into the
+      recovery journal, so rollback covers ordinary edits and not just the
+      primitives. A created file is preserved rather than deleted, and a
+      rollback that would overwrite a later user edit stops instead.
+- [x] Twelve independent safeguards against runaway or stuck tasks: attempts per
+      step, total attempts, model steps, tool calls, wall clock, dollar cost,
+      handoff depth, handoff count, consecutive duplicate tool calls, truncated
+      output retries, repeated failure fingerprints, and a Merkle workspace
+      state tree that catches an edit/revert/re-edit loop a fingerprint cannot
+      see.
 
 ## 2. Model and Hosting Constraints
 
 - [x] OpenAI and Ollama provider boundaries exist.
 - [x] Local Ollama support exists.
-- [~] Provider/model configuration exists through environment variables and
-  the settings screen.
-- [x] Formal enforcement that every selected model is `<=80B` parameters:
-      `ModelRegistry.replace()` drops any model with a _known_ count over
-      80B. Partial — the parameter catalog backing this only has 2 real
-      entries so far, and models with an _unknown_ count are flagged
-      `unverified` rather than blocked (that flag isn't surfaced in any UI
-      yet). See `IMPLEMENTATION_PLAN.md` Phase 1.
+- [x] Provider/model configuration through the settings screen, with
+      environment variables as fallback. Validation sends a one-token completion
+      rather than only listing models, so a key that can list but not infer -
+      an unverified trial, an account without billing - fails at configuration
+      time instead of mid-task, and the message names the likely cause.
+- [~] Formal enforcement that every selected model is `<=80B` parameters:
+  `ModelRegistry.replace()` drops any model with a _known_ count over 80B.
+  Partial, and this is the one compliance risk worth naming: the catalog has
+  15 entries, models with an _unknown_ count are flagged `unverified` rather
+  than blocked, that flag is not surfaced in the settings screen, and the
+  default Groq, Mistral, and Cerebras model IDs have not been checked against
+  a live API.
 - [x] Local models are assessed against the `16GB RAM / 8GB VRAM` reference
       machine. `assessLocalModel` judges an Ollama model by its reported weight
       size — the quantity that actually decides whether it loads — returning
@@ -64,7 +78,9 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## 3. Smart Routing
 
-- [~] Provider abstraction exists (Groq, OpenRouter, Ollama, OpenAI-compatible).
+- [x] Provider abstraction covers Groq, OpenRouter, Mistral, Cerebras, Hugging
+      Face, Ollama, and any OpenAI-compatible endpoint. Registration rejects any
+      provider not on the free-tier / pay-as-you-go / local allowlist.
 - [x] Ordered provider/model route preferences are configurable.
 - [x] Routing uses tool need, context fit, cost, preference, cooldown, and a
       per-stage bias driven by syntactic task-complexity classification
@@ -95,7 +111,12 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 - [x] Workspace-isolated filesystem access.
 - [x] Ripgrep-backed text and file search.
-- [~] Search results are normalized to workspace-relative paths.
+- [x] Search and index results are normalized to workspace-relative paths, with
+      separators unified so a path means the same thing on every platform.
+- [x] Discovery honours ignore rules at the source. A positive ripgrep `--glob`
+      overrides `.gitignore`, so the previous wildcard turned a 116-file listing
+      into a 40,000-file one; the wildcard case now passes no positive glob and
+      every call carries explicit exclusions.
 - [x] Per-project persistent SQLite code index.
 - [x] TypeScript/TSX/JS/JSX semantic structure plus mixed-language text fallback.
 - [x] Incremental indexing is stat-gated, so the refresh that runs on every
@@ -185,20 +206,25 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 - [x] Git status, diff, log, branches, add, commit, checkout, merge, and push.
       `git_merge` reports conflicted paths as a normal result so the agent can
       resolve them rather than treating a conflict as a crash.
-- [~] Git mutations require explicit approval; package-install side effects do
-  not yet have a dedicated approval flow.
+- [~] Git mutations require explicit approval. Package installs are gated by the
+  general command approval rather than a dedicated flow that names the packages.
 
 ## 9. Style and Project Memory
 
 - [x] Root `AGENTS.md` exists.
 - [x] Project workspace and architecture context exists.
 - [x] Build, lint, formatting, and testing commands are documented.
-- [~] Agent context is maintained manually.
 - [x] Automatic discovery of nested `AGENTS.md` rules. Every rule file in the
       project is collected nearest-to-root first, each labelled with the subtree
       it governs, skipping generated directories and bounded to 4 levels and 24
       files so a deep tree cannot flood the system prompt.
-- [ ] Persistence of project preferences across sessions and compaction.
+- [x] Project preferences survive both. `AGENTS.md` is re-read when a session
+      opens, so a rule applies to every later conversation; and compaction
+      copies the instruction messages into `CompactedTaskState.projectRules`
+      (`packages/core/src/agent.ts:1115`), so a rule stated before a compaction
+      is still in front of the model after it. This is a direct consequence of
+      compacting deterministically: a summarising model could drop a rule, a
+      structured fold carries it by construction.
 
 ## 10. Human-in-the-Loop Review
 
@@ -210,7 +236,10 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
       partial approval applies only the accepted blocks and returns the rejected
       ones to agent context so the task continues around them. Non-diff
       approvals (commands, pushes) keep the plain approve/deny choice.
-- [~] Conflict detection prevents stale writes.
+- [x] Conflict detection prevents stale writes. Every write carries the hash it
+      read; a mismatch fails closed rather than overwriting, and `expectedHash:
+null` means "this path must not exist", which is what makes save-as report
+      a collision instead of clobbering a file.
 - [x] Workspace previews emit stable line hunks bound to the expected base hash.
 - [x] Runtime/TUI support per-hunk decisions plus accept-all/reject-all.
 - [x] Partial application is atomic, stale bases fail closed, and rejected hunks
@@ -218,12 +247,17 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## 11. Observability Dashboard
 
-- [~] Runtime emits and persists task, pipeline, agent, provider, compaction, and
-  isolated-question trace spans.
+- [x] Runtime emits and persists task, pipeline-step, plan-expansion, agent,
+      model-call, provider-attempt, tool, compaction, and isolated-question
+      trace spans, each with one stable parent.
 - [x] TUI agent, tool, approval, routing, pipeline, and task events are persisted.
-- [~] The trace schema supports the complete hierarchy, but `AgentRunner` does not
-  yet emit model/tool correlation IDs and complete request/response payloads.
-- [~] Safe progress and routing/recovery events are persisted.
+- [x] `AgentRunner` emits a stable model call ID before each request and the
+      matching ID on the response, and tool spans carry the model call that
+      requested them, so every node has one parent and the hierarchy
+      reconstructs exactly after reopening SQLite. Credentials are redacted from
+      recorded inputs and outputs.
+- [x] Safe progress, routing, and recovery events are persisted and rendered as
+      the per-task execution summary.
 - [x] Every trace node shows the files and slices that were in its context,
       each with the reason it was selected (exact symbol match, call-graph
       proximity, text hit) and the analyser tier that produced its symbols.
@@ -248,54 +282,41 @@ Legend: `[x]` done, `[~]` partial, `[ ]` remaining.
 
 ## Deliverables
 
-- [~] Source repository with Git history exists.
+- [x] Source repository with full Git history.
 - [ ] Submission ZIP including `.git`.
-- [~] Windows installers are built and present in `packages/desktop/release`.
-  macOS and Linux are configured and wired to CI
-  (`.github/workflows/release.yml`, native runner per platform) but have not
-  been produced yet. Cross-building from one host is deliberately refused:
-  the bundled ripgrep binary is platform-specific and only the host's copy
-  is installed, so a cross-built package would ship an unusable binary.
-  `prepare-runtime-assets.mjs` now fails loudly instead of producing one.
-- [ ] Clean-machine setup documentation.
-- [x] Linux setup instructions from scratch with a per-provider API-key table
+- [~] **Windows installers built and verified** at 125 MB, in
+  `packages/desktop/release`: `Agent Zero Setup 0.1.0.exe` (NSIS) and
+  `Agent Zero 0.1.0.exe` (portable). Both bundle ripgrep and the release-mode
+  Rust sidecar. macOS and Linux build on their own native runners in
+  `.github/workflows/release.yml`, which has not been run. Cross-building is
+  refused on purpose: both bundled binaries are platform-specific, so a
+  cross-built package would ship unusable executables, and
+  `prepare-runtime-assets.mjs` fails loudly rather than producing one.
+- [x] Setup from scratch on Linux, with a per-provider API-key table
       (README, "Setup from scratch on Linux").
-- [x] Architecture documentation with diagrams.
+- [x] Architecture documentation with diagrams
+      (`docs/ARCHITECTURE_AND_STATUS.md`).
 - [x] Tool-calling format and tradeoff documentation.
-- [x] `docs/DESIGN_DECISIONS.md`: ten decisions, each with the alternative
-      tried or rejected and the evidence that settled it, including four we got
-      wrong first, plus a stated known-gaps section.
-- [ ] Presentation plan for a maximum 10-minute presentation with at least 2 presenters.
+- [x] `docs/DESIGN_DECISIONS.md`: 37 decisions, each with the alternative tried
+      or rejected and the evidence that settled it - including the ones we got
+      wrong first - plus a stated known-gaps section.
+- [ ] Presentation for a maximum of 10 minutes with at least 2 presenters.
 
-## Highest-Priority Remaining Work (superseded)
+## Verification
 
-The list below is kept for history. Items 1-8 are done; what actually remains is
-in `docs/ARCHITECTURE_AND_STATUS.md` under "Remaining work": deepen
-non-JavaScript retrieval, ground the model parameter catalog, align or retire
-the unintegrated Rust systems, produce the macOS and Linux builds, and move
-credentials off plaintext at rest.
+- 113 TypeScript tests and 16 Rust tests, run by `pnpm test`, which forces a
+  full rebuild first so a green run means the current sources are green.
+- ESLint and Prettier clean.
+- **Not verified: end-to-end performance.** No real multi-step task has been run
+  against a real repository and measured for accuracy, cost, and wall clock.
+  That is the largest single scoring component and the biggest open risk.
+- **Not verified: the default model IDs.** `MODEL_PARAMETER_CATALOG` is the only
+  evidence behind the <=80B constraint, and the Groq, Mistral, and Cerebras
+  defaults have not been checked against a live API.
 
-## Original plan
+## Remaining work
 
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the ordered,
-file-level plan. Summary (Phase 0 - settings screen - is done; Phase 1 -
-model/hosting constraints - is mostly done):
-
-1. ~~Mandatory settings screen.~~ Done (Phase 0). The GUI was also rebuilt
-   from a static 4-pane mockup into a real editor shell (file explorer,
-   Monaco viewer, live status bar) in the same pass - not itself a scored
-   requirement, but it's what the settings screen and future manual-context/
-   dashboard work (7, 9 below) will build on top of.
-2. ~~80B/free-tier enforcement (the hard-block half).~~ Done (Phase 1).
-   Remaining: populate `MODEL_PARAMETER_CATALOG` with real entries, surface
-   the `unverified` flag in a UI, and add the 16GB/8GB local-hardware
-   soft-check.
-3. Connect default workspace mutations to verifier rollback.
-4. Complete model/tool trace correlation and context propagation.
-5. Enforce task cost, parameter verification, and local-hardware constraints.
-6. Add task discovery and resume to clients.
-7. Add the IDE runtime transport and connect the browser workbench.
-8. Connect live runtime events/approvals to the browser and make the existing
-   historical observability dashboard update while tasks are running.
-9. Verify cross-platform builds and prepare submission materials.
-10. Add the thin Tauri packaging layer last.
+See `docs/ARCHITECTURE_AND_STATUS.md`, "Remaining work", for the ordered list:
+measure end-to-end performance, ground the model parameter catalog, produce the
+macOS and Linux installers, widen retrieval past the seven parsed languages, add
+type resolution and flow analysis, and move credentials off plaintext at rest.

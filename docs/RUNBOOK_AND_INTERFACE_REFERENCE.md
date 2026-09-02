@@ -1486,4 +1486,4 @@ The legacy example files and their root scripts were removed. Provider setup and
 - `packages/gui/README.md`, the Tauri VS Code recommendation, and `tauri.svg` are legacy template artifacts.
 - `packages/server/` is empty.
 - Shell, Git, package-manager, network, and external-process side effects cannot be automatically rolled back.
-- Hash-guarded file rollback primitives exist, but default file tools do not yet forward mutation records into the runtime recovery journal.
+- The default file tools forward mutation records as `ToolResult.workspaceMutation`, which the runtime writes into the recovery journal, so hash-guarded rollback covers ordinary edits. It cannot reverse command, Git, network, or other external side effects, and stops rather than overwriting a later user edit.

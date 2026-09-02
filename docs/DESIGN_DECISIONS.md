@@ -1012,3 +1012,9 @@ fails under questioning.
   macOS and Linux packaging is configured but unverified.
 - **Credentials at rest.** Provider keys are stored plaintext in the global
   SQLite database, with no OS keychain integration.
+- **End-to-end performance is unmeasured.** The accuracy, cost, and wall-clock
+  of a real multi-step task against a real repository has never been recorded.
+  Every late defect - a context overflow with no recovery, a duplicate-call
+  deadlock, a mutation erased by compaction - was found by running the product,
+  not by the 113 TypeScript and 16 Rust tests, which is the strongest argument that the number matters
+  more than another feature.
