@@ -647,7 +647,8 @@ function hashBuffer(content: Buffer): string {
 
 const SYMBOL_DECLARATION_PATTERN =
   /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?class\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm;
-const EXPORT_LIST_PATTERN = /(?:export\s*\{([^}]*)\}|module\.exports\s*=\s*\{([^}]*)\})/g;
+const EXPORT_LIST_PATTERN =
+  /(?:export\s*\{([^}]*)\}|module\.exports\s*=\s*\{([^}]*)\})/g;
 
 /**
  * Best-effort extraction of top-level JS/TS symbol names, so a full-file
@@ -664,7 +665,11 @@ function extractTopLevelSymbols(content: string): Set<string> {
   for (const match of content.matchAll(EXPORT_LIST_PATTERN)) {
     const list = match[1] ?? match[2] ?? "";
     for (const entry of list.split(",")) {
-      const name = entry.split(":")[0]?.trim().split(/\s+as\s+/)[0]?.trim();
+      const name = entry
+        .split(":")[0]
+        ?.trim()
+        .split(/\s+as\s+/)[0]
+        ?.trim();
       if (name) names.add(name);
     }
   }
