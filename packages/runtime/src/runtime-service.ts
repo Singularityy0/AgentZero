@@ -138,6 +138,18 @@ export class HeadlessRuntimeService {
   private readonly activeStepSpans = new Map<string, string>();
   private readonly activeModelSpans = new Map<string, string>();
   private readonly activeRouteSpans = new Map<string, string>();
+  /**
+   * Every span currently open for a task, independent of which subsystem
+   * opened it (pipeline step, a nested MultiAgentOrchestrator's own agent
+   * span, a model call, a provider route attempt). Each of those lives in
+   * its own map above with its own key scheme - one keyed by an inner
+   * runId a pipeline step's caller never sees - so a single source of truth
+   * populated at the startTraceSpan/finishTraceSpan choke point is what
+   * lets a terminal orchestration event close everything still open for a
+   * task, instead of only the spans whose map happens to be keyed by
+   * something the closer has in hand.
+   */
+  private readonly openSpansByTask = new Map<string, Set<string>>();
   private closed = false;
   private closePromise?: Promise<void>;
 
@@ -1527,16 +1539,36 @@ export class HeadlessRuntimeService {
             },
           });
         }
+        // Nothing else checks that every file the objective actually named
+        // was touched: the coder's own "reread and summarize" instruction is
+        // prose, and a small model skipping a second requested file (write
+        // the fix, forget the test file it was also asked to add) leaves no
+        // trace anywhere else in the pipeline. The objective already names
+        // its targets explicitly, so require the verifier to account for
+        // each one instead of only judging what the coder happened to touch.
+        const requiredPaths = extractAllExplicitWorkspacePaths(task.prompt);
+        const missingRequiredPaths = requiredPaths.filter(
+          (path) => !changed.some((changedPath) => changedPath.endsWith(path)),
+        );
+        const notes = [
+          changed.length > 0
+            ? `This task changed ${changed.length} file(s). Call read_file on every one before judging: ${changed.join(", ")}`
+            : undefined,
+          missingRequiredPaths.length > 0
+            ? `The objective explicitly names these paths, but none of them were created or modified: ${missingRequiredPaths.join(", ")}. ` +
+              "Confirm whether each one still exists from before this task, and fail verification naming the missing path if it does not."
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n\n");
         return runAgentWorker(VERIFIER_AGENT_ID)(
-          changed.length === 0
+          notes.length === 0
             ? request
             : {
                 ...request,
                 step: {
                   ...request.step,
-                  prompt:
-                    `${request.step.prompt}\n\nThis task changed ${changed.length} file(s). Call read_file on every one before judging: ` +
-                    changed.join(", "),
+                  prompt: `${request.step.prompt}\n\n${notes}`,
                 },
               },
         );
@@ -1550,7 +1582,12 @@ export class HeadlessRuntimeService {
         : runAgentWorker(REVIEWER_AGENT_ID),
     };
     const orchestrator = new TaskOrchestrator(workers, {
-      maxAttemptsPerStep: focusedFileEdit ? 1 : 2,
+      // A single focused-edit attempt gave a weak model no room to recover
+      // from a malformed tool call, which is a common failure mode, not a
+      // rare one. Two attempts (same as every non-focused coder step
+      // already gets) costs little since the retry reuses the same narrow
+      // budget.
+      maxAttemptsPerStep: 2,
       maxTotalAttempts: 10,
       maxDurationMs: this.limits.maxDurationMs,
       signal,
@@ -1963,6 +2000,22 @@ export class HeadlessRuntimeService {
         status: "completed",
         output: { steps: event.steps },
       });
+    } else if (
+      trace &&
+      (event.type === "orchestration_failed" ||
+        event.type === "orchestration_paused")
+    ) {
+      // A step that exhausts its attempts (or gets stuck on a repeated
+      // failure) ends the run without ever emitting a step_completed or
+      // step_retrying for that last attempt, so its span - and every span
+      // still open beneath it (agent, model call, provider route) - would
+      // otherwise stay "running" forever, even after the task is long dead.
+      this.closeOpenSpansForTask(
+        taskId,
+        trace.traceId,
+        event.type === "orchestration_failed" ? "failed" : "paused",
+        event.reason,
+      );
     }
     this.store.appendEvent({
       sessionId,
@@ -2337,6 +2390,34 @@ export class HeadlessRuntimeService {
       .find(([key]) => key.startsWith(`${taskId}:`))?.[1];
   }
 
+  /**
+   * Closes every span still open for this task - regardless of which
+   * subsystem opened it, including a nested MultiAgentOrchestrator's own
+   * runId-keyed agent spans that this caller never sees - so a terminal
+   * orchestration event (failed or paused) never leaves the dashboard
+   * showing "running" for a task that is no longer running. finishTraceSpan
+   * is a no-op on an already-closed span, so this is safe to call even when
+   * some spans already finished normally moments earlier.
+   */
+  private closeOpenSpansForTask(
+    taskId: string,
+    traceId: string,
+    status: "failed" | "paused",
+    reason?: string,
+  ): void {
+    const open = this.openSpansByTask.get(taskId);
+    if (!open || open.size === 0) return;
+    for (const spanId of [...open]) {
+      const rolled = this.rollUpUsage(taskId, traceId, spanId);
+      this.finishTraceSpan(traceId, spanId, {
+        status,
+        ...(status === "failed" && reason ? { error: reason } : {}),
+        ...(rolled.usage ? { usage: rolled.usage } : {}),
+        ...(rolled.cost !== undefined ? { cost: rolled.cost } : {}),
+      });
+    }
+  }
+
   private latestRouteForModelSpan(
     taskId: string,
     modelSpanId: string,
@@ -2364,6 +2445,14 @@ export class HeadlessRuntimeService {
       this.credentialValues(),
     ) as typeof span;
     const record = this.store.startTraceSpan(sanitized);
+    if (record.taskId) {
+      let open = this.openSpansByTask.get(record.taskId);
+      if (!open) {
+        open = new Set();
+        this.openSpansByTask.set(record.taskId, open);
+      }
+      open.add(record.spanId);
+    }
     void this.emit({
       type: "trace_updated",
       sessionId: record.sessionId ?? "",
@@ -2385,6 +2474,15 @@ export class HeadlessRuntimeService {
     ) as typeof update;
     const record = this.store.finishTraceSpan(traceId, spanId, sanitized);
     if (record) {
+      const open = record.taskId
+        ? this.openSpansByTask.get(record.taskId)
+        : undefined;
+      if (open) {
+        open.delete(spanId);
+        if (open.size === 0 && record.taskId) {
+          this.openSpansByTask.delete(record.taskId);
+        }
+      }
       void this.emit({
         type: "trace_updated",
         sessionId: record.sessionId ?? "",
@@ -2860,6 +2958,42 @@ function extractExplicitWorkspacePath(prompt: string): string | undefined {
   return explicitPathCapturePattern.exec(prompt)?.[1]?.replaceAll("\\", "/");
 }
 
+const explicitPathCapturePatternGlobal = new RegExp(
+  explicitPathCapturePattern.source,
+  "gu",
+);
+
+/**
+ * Distinct workspace paths the prompt names explicitly as edit targets.
+ * AGENTS.md is excluded: citing it ("per AGENTS.md, ...") is a routine style
+ * reference, not an edit target, and project rules are already loaded into
+ * every coding step regardless of what this returns.
+ */
+function extractAllExplicitWorkspacePaths(prompt: string): string[] {
+  return [
+    ...new Set(
+      [...prompt.matchAll(explicitPathCapturePatternGlobal)]
+        .map((match) => match[1]?.replaceAll("\\", "/"))
+        .filter(
+          (path): path is string =>
+            !!path && path.toLowerCase() !== "agents.md",
+        ),
+    ),
+  ];
+}
+
+/**
+ * How many distinct workspace paths the prompt names explicitly as edit
+ * targets. A request naming two or more files ("fix X and create the
+ * missing test file Y") is not a single-file edit even when it reads like
+ * one grammatically; treating it as focused starves it of the attempts and
+ * token budget a second file needs, and a failed lone attempt then has no
+ * retry left.
+ */
+function countExplicitWorkspacePaths(prompt: string): number {
+  return extractAllExplicitWorkspacePaths(prompt).length;
+}
+
 const existingWorkPattern =
   /\b(?:existing|current|opened|this)\s+(?:file|page|document|component|website|webpage|app|application|project|workspace|repo|repository|codebase)\b/iu;
 
@@ -3206,7 +3340,9 @@ function isGreenfieldArtifactRequest(prompt: string): boolean {
  */
 function isFocusedFileEditRequest(prompt: string): boolean {
   return (
-    FOCUSED_FILE_VERB_PATTERN.test(prompt) && explicitPathPattern.test(prompt)
+    FOCUSED_FILE_VERB_PATTERN.test(prompt) &&
+    explicitPathPattern.test(prompt) &&
+    countExplicitWorkspacePaths(prompt) <= 1
   );
 }
 

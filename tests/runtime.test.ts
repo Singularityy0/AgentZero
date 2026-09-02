@@ -1524,6 +1524,37 @@ test("nested AGENTS.md files are discovered with their scope and bounded", async
   }
 });
 
+test("AGENTS.md rules appear near the top of every stage's prompt, not buried at the end", () => {
+  // A rule appended after a hundred lines of generic policy is the text a
+  // small model is most likely to under-weight and ignore. Every stage that
+  // can affect or judge workspace content must see project rules early,
+  // under a header that states the consequence of ignoring them - Architect
+  // and Reviewer previously did not receive them at all.
+  const rule = "Use CommonJS (module.exports), not ES modules.";
+  const agents = createDefaultAgents([rule]);
+  for (const agentId of [
+    DEFAULT_AGENT_ID,
+    CODING_AGENT_ID,
+    VERIFIER_AGENT_ID,
+    REVIEWER_AGENT_ID,
+  ]) {
+    const agent = agents.find((candidate) => candidate.id === agentId);
+    assert.ok(agent, `${agentId} must be a default agent`);
+    const prompt = agent.systemPrompt;
+    const ruleIndex = prompt.indexOf(rule);
+    assert.notEqual(ruleIndex, -1, `${agentId} must receive the project rule`);
+    assert.ok(
+      ruleIndex < 400,
+      `${agentId} must surface the project rule near the top of its prompt, not after ${ruleIndex} characters of generic policy`,
+    );
+    assert.match(
+      prompt.slice(0, ruleIndex),
+      /MANDATORY PROJECT RULES/u,
+      `${agentId}'s prompt must label the rule with the consequence of ignoring it`,
+    );
+  }
+});
+
 test("project agent files load separately from AGENTS.md instructions", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-agents-"));
   try {
@@ -2504,6 +2535,259 @@ test("HeadlessRuntimeService keeps a focused single-file edit local and stops af
   }
 });
 
+test("a prompt naming two files is not misclassified as a single-file focused edit", async () => {
+  // "Fix X ... and create the missing Y" reads like a focused edit (one verb,
+  // one file mentioned first) but names two distinct targets. Misclassifying
+  // it starves the run of planning, budget, and retry room it actually needs.
+  const root = await mkdtemp(join(tmpdir(), "agentic-two-file-edit-"));
+  await writeFile(
+    join(root, "math_utils.js"),
+    "function add(a, b) {\n  return a + b;\n}\n",
+  );
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+  let plannerCalls = 0;
+  const coderRequests: ModelRequest[] = [];
+  const models = new Map<string, LanguageModel>([
+    [
+      DEFAULT_AGENT_ID,
+      {
+        respond: async () => {
+          plannerCalls += 1;
+          return assistantResponse("Plan: extend math_utils.js and add its test file.");
+        },
+      },
+    ],
+    [
+      CODING_AGENT_ID,
+      {
+        respond: async (request) => {
+          coderRequests.push(request);
+          return assistantResponse("", [
+            {
+              id: "write-1",
+              name: "write_file",
+              arguments: { path: "math_utils.js", content: "changed" },
+            },
+          ]);
+        },
+      },
+    ],
+    [VERIFIER_AGENT_ID, new FakeModel([assistantResponse("VERIFICATION_PASSED")])],
+    [REVIEWER_AGENT_ID, new FakeModel([assistantResponse("Review complete.")])],
+  ]);
+  const tools = new ToolRegistry();
+  for (const tool of createIdeTools()) tools.register(tool);
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "openrouter", modelId: "fake" },
+    resolveModel: (agent) => models.get(agent.id)!,
+    resolveTools: () => tools,
+    requestApproval: async () => true,
+    retrieval,
+  });
+
+  try {
+    const session = service.createSession("Two-file edit");
+    await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt:
+        "Fix math_utils.js to keep add and subtract, and create the missing math_utils.test.js with tests.",
+    });
+
+    assert.ok(
+      plannerCalls >= 1,
+      "naming a second file must route through the planner, not the focused fast path",
+    );
+    assert.notEqual(
+      coderRequests[0]?.maxOutputTokens,
+      3_072,
+      "the coder must not get the focused edit's narrow token budget",
+    );
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the verifier is told about an explicitly requested file the coder never touched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-missing-file-"));
+  await writeFile(
+    join(root, "math_utils.js"),
+    "function add(a, b) {\n  return a + b;\n}\n",
+  );
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+  const verifierRequests: ModelRequest[] = [];
+  const models = new Map<string, LanguageModel>([
+    [
+      DEFAULT_AGENT_ID,
+      {
+        respond: async () =>
+          assistantResponse("Plan: extend math_utils.js and add its test file."),
+      },
+    ],
+    [
+      CODING_AGENT_ID,
+      {
+        // Only ever touches the first file, exactly like the free-tier model
+        // that skipped the requested test file in live testing. Stops after
+        // one mutation instead of repeating it, like the other pipeline
+        // tests' coder mocks - otherwise the identical second write is a
+        // genuine no-op the workspace cycle detector correctly rejects.
+        respond: async (request) =>
+          request.messages.some((message) => message.role === "tool")
+            ? assistantResponse("Updated math_utils.js.")
+            : assistantResponse("", [
+                {
+                  id: "write-1",
+                  name: "write_file",
+                  arguments: {
+                    path: "math_utils.js",
+                    // Distinct from other tests' fixture content: the cycle
+                    // detector is a process-wide singleton keyed on
+                    // path:contentHash, so reusing "changed" here would
+                    // collide with an unrelated test's identical edit.
+                    content:
+                      "function add(a, b) {\n  return a + b;\n}\n\nfunction subtract(a, b) {\n  return a - b;\n}\n",
+                  },
+                },
+              ]),
+      },
+    ],
+    [
+      VERIFIER_AGENT_ID,
+      {
+        respond: async (request) => {
+          verifierRequests.push(request);
+          return request.messages.some((message) => message.role === "tool")
+            ? assistantResponse("VERIFICATION_PASSED")
+            : assistantResponse("", [
+                {
+                  id: "v-read",
+                  name: "read_file",
+                  arguments: { path: "math_utils.js" },
+                },
+              ]);
+        },
+      },
+    ],
+    [REVIEWER_AGENT_ID, new FakeModel([assistantResponse("Review complete.")])],
+  ]);
+  const tools = new ToolRegistry();
+  for (const tool of createIdeTools()) tools.register(tool);
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "openrouter", modelId: "fake" },
+    resolveModel: (agent) => models.get(agent.id)!,
+    resolveTools: () => tools,
+    requestApproval: async () => true,
+    retrieval,
+  });
+
+  try {
+    const session = service.createSession("Missing file");
+    await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt:
+        "Fix math_utils.js to keep add and subtract, and create the missing math_utils.test.js with tests.",
+    });
+
+    const verifierPrompt =
+      verifierRequests[0]?.messages.find((message) => message.role === "user")
+        ?.content ?? "";
+    assert.match(
+      verifierPrompt,
+      /math_utils\.test\.js/u,
+      "the verifier must be told the objective named a file the coder never touched",
+    );
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a step that exhausts its only attempt does not leave the dashboard stuck on running", async () => {
+  // A focused single-file edit gets maxAttemptsPerStep: 1, so a coder
+  // failure has no retry - the step ends via the terminal orchestration
+  // event, not step_retrying. Every span still open under it (the pipeline
+  // step, the agent, the in-flight model call) must close out, not linger
+  // as "running" forever the way they did before this fix.
+  const root = await mkdtemp(join(tmpdir(), "agentic-stuck-span-"));
+  const original = "function add(a, b) {\n  return a + b;\n}\n";
+  await writeFile(join(root, "math.js"), original);
+  const store = new SessionStore({
+    projectRoot: root,
+    dataRoot: join(root, ".runtime-data"),
+  });
+  for (const agent of createDefaultAgents([])) store.registerAgent(agent);
+  const retrieval = new SemanticRetrievalIndex({
+    root,
+    databasePath: join(root, ".runtime-data", "retrieval.db"),
+  });
+  await retrieval.indexProject();
+  const models = new Map<string, LanguageModel>([
+    [
+      CODING_AGENT_ID,
+      {
+        respond: async () => {
+          throw new Error("simulated malformed tool call from a weak model");
+        },
+      },
+    ],
+  ]);
+  const tools = new ToolRegistry();
+  for (const tool of createIdeTools()) tools.register(tool);
+  const service = new HeadlessRuntimeService({
+    store,
+    model: { providerId: "openrouter", modelId: "fake" },
+    resolveModel: (agent) => models.get(agent.id)!,
+    resolveTools: () => tools,
+    requestApproval: async () => true,
+    retrieval,
+  });
+
+  try {
+    const session = service.createSession("Stuck span");
+    const result = await service.runTask({
+      sessionId: session.id,
+      agentId: DEFAULT_AGENT_ID,
+      prompt: "fix add in @math.js",
+    });
+
+    assert.notEqual(result.status, "completed");
+    const spans = service.listTraceSpans(result.taskId);
+    assert.ok(spans.length > 0, "the run must have recorded at least one span");
+    const stillRunning = spans.filter((span) => span.status === "running");
+    assert.deepEqual(
+      stillRunning.map((span) => span.name),
+      [],
+      "no span should still read running once the task has failed",
+    );
+  } finally {
+    await service.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HeadlessRuntimeService writes every requested artifact instead of answering in chat", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentic-multi-artifact-"));
   const store = new SessionStore({
@@ -2826,6 +3110,39 @@ test("WorkspaceFileService applies selected stable hunks and rejects stale bases
       ),
       /changed after approval preview/,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("prepareChange flags exported symbols a full-file rewrite would silently drop", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentic-removed-symbols-"));
+  const path = join(root, "math_utils.js");
+  await writeFile(
+    path,
+    "function add(a, b) {\n  return a + b;\n}\n\nfunction subtract(a, b) {\n  return a - b;\n}\n\nmodule.exports = { add, subtract };\n",
+  );
+  const service = new WorkspaceFileService(root);
+  try {
+    const overwrite = await service.prepareChange({
+      path: "math_utils.js",
+      newContent:
+        "function multiply(a, b) {\n  return a * b;\n}\n\nmodule.exports = { multiply };\n",
+    });
+    assert.deepEqual(new Set(overwrite.removedSymbols), new Set(["add", "subtract"]));
+
+    const additive = await service.prepareChange({
+      path: "math_utils.js",
+      newContent:
+        "function add(a, b) {\n  return a + b;\n}\n\nfunction subtract(a, b) {\n  return a - b;\n}\n\nfunction multiply(a, b) {\n  return a * b;\n}\n\nmodule.exports = { add, subtract, multiply };\n",
+    });
+    assert.deepEqual(additive.removedSymbols, []);
+
+    const created = await service.prepareChange({
+      path: "new-file.js",
+      newContent: "function onlyHere() {}\n",
+    });
+    assert.deepEqual(created.removedSymbols, []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

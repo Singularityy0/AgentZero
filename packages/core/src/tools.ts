@@ -23,6 +23,8 @@ export interface FileDiffPreview {
   proposedHash: string;
   text: string;
   hunks: ProposedHunk[];
+  /** Symbols present before the change but absent after it. See workspace's PreparedFileChange. */
+  warnings?: string[];
 }
 
 export type ToolPreview = string | FileDiffPreview;
