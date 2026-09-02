@@ -459,7 +459,7 @@ function IconButton({
  * from being rendered as a file tag.
  */
 const FILE_REFERENCE_PATTERN =
-  /((?:[\w.-]+\/)*[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|scss|html|htm|py|rs|go|java|rb|php|c|h|cpp|hpp|cs|sh|yml|yaml|toml|sql|txt|ini|env))(?::(\d+)(?:-(\d+))?)?/gu;
+  /@?([\w.-]+(?:[/\\][\w.-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|scss|html|htm|py|rs|go|java|rb|php|c|h|cpp|hpp|cs|sh|yml|yaml|toml|sql|txt|ini|env))(?::(\d+)(?:-(\d+))?)?(?![\w/\\]|\.(?=\w))/gu;
 
 /**
  * Renders chat text with every file reference turned into a button that opens

@@ -781,6 +781,17 @@ algorithm in @vishu.cpp`. Its persisted root span was 554,416 ms, not the
   reached Electron packaging but rejected the scoped npm package name as an
   executable/AppImage path; desktop metadata now explicitly uses
   `agent-zero`/`agent-zero.desktop` and synchronizes the Linux desktop entry.
+- Fixed chat file-reference rendering so extension alternatives cannot accept
+  a prefix of a longer extension (`.c` from `.cpp`, `.ts` from `.tsx`, and
+  similar cases). The clickable tag now includes the leading `@` while still
+  passing the clean workspace path to the file opener.
+- Followed the next native Linux release run after the executable-name fix:
+  AppImage creation succeeded, while the Debian target correctly rejected
+  missing package metadata. The desktop package now provides a project
+  homepage, repository, author email, explicit Debian maintainer, and a
+  slash-free Linux artifact name. Electron Builder is also invoked with
+  `--publish never` because GitHub Actions owns release publication. A
+  regression test protects the required Linux metadata.
 
 ## Next Steps
 

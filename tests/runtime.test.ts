@@ -279,6 +279,35 @@ test("TUI resolves an explicit workspace root and rejects invalid sandbox paths"
   }
 });
 
+test("desktop release metadata is safe for Linux packages", async () => {
+  const packageJson = JSON.parse(
+    await readFile(
+      join(process.cwd(), "packages", "desktop", "package.json"),
+      "utf8",
+    ),
+  ) as {
+    author?: { email?: string };
+    homepage?: string;
+    desktopName?: string;
+    build?: {
+      linux?: {
+        artifactName?: string;
+        executableName?: string;
+        maintainer?: string;
+        syncDesktopName?: boolean;
+      };
+    };
+  };
+
+  assert.match(packageJson.homepage ?? "", /^https:\/\//u);
+  assert.match(packageJson.author?.email ?? "", /@/u);
+  assert.equal(packageJson.desktopName, "agent-zero.desktop");
+  assert.equal(packageJson.build?.linux?.executableName, "agent-zero");
+  assert.equal(packageJson.build?.linux?.syncDesktopName, true);
+  assert.match(packageJson.build?.linux?.maintainer ?? "", /<.+@.+>/u);
+  assert.doesNotMatch(packageJson.build?.linux?.artifactName ?? "", /[@/\\]/u);
+});
+
 test("ProviderGateway discovers, selects, and executes an OpenRouter model without logging credentials", async () => {
   const events: string[] = [];
   const secret = "secret-not-for-events";

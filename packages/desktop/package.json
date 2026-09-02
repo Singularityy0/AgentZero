@@ -3,7 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "description": "Native desktop host for the Agent Zero workbench",
-  "author": "Takneek Team",
+  "author": {
+    "name": "Takneek Team",
+    "email": "vishukhare01@gmail.com"
+  },
+  "homepage": "https://github.com/rudrakumar07/agent-0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rudrakumar07/agent-0.git"
+  },
   "desktopName": "agent-zero.desktop",
   "type": "module",
   "main": "./dist/main.js",
@@ -12,7 +20,7 @@
     "start": "electron .",
     "prepare:runtime": "node ./scripts/prepare-runtime-assets.mjs",
     "pack": "pnpm prepare:runtime && electron-builder --dir",
-    "dist": "pnpm prepare:runtime && electron-builder"
+    "dist": "pnpm prepare:runtime && electron-builder --publish never"
   },
   "dependencies": {
     "@agentic-runtime/gui-server": "workspace:*"
@@ -59,7 +67,9 @@
       "icon": "build/icon.png"
     },
     "linux": {
+      "artifactName": "Agent-Zero-${version}-${arch}.${ext}",
       "executableName": "agent-zero",
+      "maintainer": "Takneek Team <vishukhare01@gmail.com>",
       "syncDesktopName": true,
       "target": [
         "AppImage",
