@@ -2562,7 +2562,9 @@ test("a prompt naming two files is not misclassified as a single-file focused ed
       {
         respond: async () => {
           plannerCalls += 1;
-          return assistantResponse("Plan: extend math_utils.js and add its test file.");
+          return assistantResponse(
+            "Plan: extend math_utils.js and add its test file.",
+          );
         },
       },
     ],
@@ -2581,7 +2583,10 @@ test("a prompt naming two files is not misclassified as a single-file focused ed
         },
       },
     ],
-    [VERIFIER_AGENT_ID, new FakeModel([assistantResponse("VERIFICATION_PASSED")])],
+    [
+      VERIFIER_AGENT_ID,
+      new FakeModel([assistantResponse("VERIFICATION_PASSED")]),
+    ],
     [REVIEWER_AGENT_ID, new FakeModel([assistantResponse("Review complete.")])],
   ]);
   const tools = new ToolRegistry();
@@ -2641,7 +2646,9 @@ test("the verifier is told about an explicitly requested file the coder never to
       DEFAULT_AGENT_ID,
       {
         respond: async () =>
-          assistantResponse("Plan: extend math_utils.js and add its test file."),
+          assistantResponse(
+            "Plan: extend math_utils.js and add its test file.",
+          ),
       },
     ],
     [
@@ -3129,7 +3136,10 @@ test("prepareChange flags exported symbols a full-file rewrite would silently dr
       newContent:
         "function multiply(a, b) {\n  return a * b;\n}\n\nmodule.exports = { multiply };\n",
     });
-    assert.deepEqual(new Set(overwrite.removedSymbols), new Set(["add", "subtract"]));
+    assert.deepEqual(
+      new Set(overwrite.removedSymbols),
+      new Set(["add", "subtract"]),
+    );
 
     const additive = await service.prepareChange({
       path: "math_utils.js",

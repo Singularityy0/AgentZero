@@ -27,18 +27,17 @@ const MODEL_PARAMETER_CATALOG: Record<string, Record<string, number>> = {
     "openai/gpt-oss-20b": 20_000_000_000,
   },
   openrouter: {
+    // 10 hardcoded free-tier <80B (verified live, always show regardless of scrape)
+    "google/gemma-4-31b-it:free": 31_000_000_000,
+    "google/gemma-4-26b-a4b-it:free": 26_000_000_000,
     "nvidia/nemotron-3.5-lightning:free": 30_000_000_000,
-    // Common free-tier <80B (scraped via pricing prompt==0 or :free suffix)
-    "meta-llama/llama-3.1-8b-instruct:free": 8_030_000_000,
-    "meta-llama/llama-3.2-3b-instruct:free": 3_210_000_000,
-    "google/gemma-2-9b-it:free": 9_240_000_000,
-    "qwen/qwen-2.5-7b-instruct:free": 7_620_000_000,
-    "mistralai/mistral-7b-instruct:free": 7_250_000_000,
-    "mistralai/mistral-nemo:free": 12_900_000_000,
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": 30_000_000_000,
+    "nvidia/nemotron-3.5-content-safety:free": 7_000_000_000,
     "deepseek/deepseek-r1:free": 37_000_000_000,
     "deepseek/deepseek-chat:free": 37_000_000_000,
     "qwen/qwen3-30b-a3b:free": 30_500_000_000,
-    "google/gemini-2.0-flash-001:free": 32_000_000_000,
+    "liquid/lfm-2.5-2.6b:free": 2_600_000_000,
+    "cohere/north-mini-code:free": 3_000_000_000,
   },
   ollama: {
     "llama2:7b": 7_000_000_000,
@@ -334,15 +333,27 @@ export class ProviderRegistry {
   }
 }
 
+function isOver80BHeuristic(id: string): boolean {
+  const m = id.match(/(\d+(?:\.\d+)?)\s*b\b/i);
+  if (m) {
+    const n = parseFloat(m[1]!);
+    if (!Number.isNaN(n) && n > 80) return true;
+  }
+  return false;
+}
+
 export class ModelRegistry {
   private readonly models = new Map<string, ModelInfo>();
   replace(providerId: string, models: ModelInfo[]): void {
     for (const key of this.models.keys())
       if (key.startsWith(`${providerId}:`)) this.models.delete(key);
     for (const model of models) {
-      // Enforce 80B parameter cap; drop oversized models.
+      // Enforce 80B parameter cap; drop oversized models (including heuristic for unknown).
       if (model.totalParameters && model.totalParameters > 80_000_000_000) {
         // Skip adding this model.
+        continue;
+      }
+      if (!model.totalParameters && isOver80BHeuristic(model.id)) {
         continue;
       }
       // Flag unknown parameter count as unverified.

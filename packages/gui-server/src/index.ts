@@ -1160,31 +1160,29 @@ async function scrapeFreeTierModels(
 > {
   // Catalog for 80B check (mirrors gateway catalog for GUI without importing gateway)
   const catalog: Record<string, number> = {
-    "mixtral-8x7b-32768": 46_700_000_000,
-    "qwen/qwen3.6-27b": 27_000_000_000,
-    "qwen/qwen3.8-27b": 27_000_000_000,
-    "openai/gpt-oss-20b": 20_000_000_000,
+    // 10 hardcoded free-tier <80B (mirrors gateway catalog, always show)
+    "google/gemma-4-31b-it:free": 31_000_000_000,
+    "google/gemma-4-26b-a4b-it:free": 26_000_000_000,
     "nvidia/nemotron-3.5-lightning:free": 30_000_000_000,
-    "meta-llama/llama-3.1-8b-instruct:free": 8_030_000_000,
-    "meta-llama/llama-3.2-3b-instruct:free": 3_210_000_000,
-    "google/gemma-2-9b-it:free": 9_240_000_000,
-    "qwen/qwen-2.5-7b-instruct:free": 7_620_000_000,
-    "mistralai/mistral-7b-instruct:free": 7_250_000_000,
-    "mistralai/mistral-nemo:free": 12_900_000_000,
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": 30_000_000_000,
+    "nvidia/nemotron-3.5-content-safety:free": 7_000_000_000,
     "deepseek/deepseek-r1:free": 37_000_000_000,
     "deepseek/deepseek-chat:free": 37_000_000_000,
     "qwen/qwen3-30b-a3b:free": 30_500_000_000,
-    "google/gemini-2.0-flash-001:free": 32_000_000_000,
-    "ministral-3b-latest": 3_000_000_000,
-    "ministral-8b-latest": 8_000_000_000,
-    "ministral-14b-latest": 14_000_000_000,
-    "gemma-4-31b": 31_000_000_000,
-    "Qwen/Qwen3-Coder-30B-A3B-Instruct": 30_500_000_000,
-    "Qwen/Qwen2.5-Coder-32B-Instruct": 32_500_000_000,
+    "liquid/lfm-2.5-2.6b:free": 2_600_000_000,
+    "cohere/north-mini-code:free": 3_000_000_000,
   };
   const isUnder80B = (id: string, total?: number) => {
     const known = total ?? catalog[id];
-    return known === undefined ? true : known <= 80_000_000_000;
+    if (known !== undefined) return known <= 80_000_000_000;
+    // Heuristic: if id contains e.g. 550b, 120b, 405b -> >80B
+    const m = id.match(/(\d+(?:\.\d+)?)\s*b\b/i);
+    if (m) {
+      const n = parseFloat(m[1]!);
+      if (!Number.isNaN(n) && n > 80) return false;
+    }
+    // Unknown size: treat as unverified but show as <80B only if no large number hint
+    return true;
   };
 
   // Real-time Ollama scrape via `ollama list` CLI and /api/tags (no cache)

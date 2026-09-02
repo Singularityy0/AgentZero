@@ -25,12 +25,14 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "typecheck": "tsc -b packages/core/tsconfig.json packages/openai/tsconfig.json packages/ollama/tsconfig.json packages/gateway/tsconfig.json packages/command/tsconfig.json packages/search/tsconfig.json packages/session/tsconfig.json packages/workspace/tsconfig.json packages/tools/tsconfig.json packages/retrieval/tsconfig.json packages/runtime/tsconfig.json packages/gui-server/tsconfig.json packages/tui/tsconfig.json packages/desktop/tsconfig.json --pretty",
-    "test:rust": "cargo test --manifest-path rust/Cargo.toml"
+    "test:rust": "cargo test --manifest-path rust/Cargo.toml",
+    "prepare": "husky"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.5",
     "eslint": "^9.17.0",
+    "husky": "^9.1.7",
     "prettier": "^3.4.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
