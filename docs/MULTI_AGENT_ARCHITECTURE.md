@@ -20,11 +20,11 @@ flowchart TD
         TUI["Terminal UI"]
     end
 
-    subgraph Boundary["Loopback HTTP + SSE"]
+    subgraph Boundary ["Loopback HTTP + SSE"]
         Server["gui-server"]
     end
 
-    subgraph Runtime["Headless runtime"]
+    subgraph Runtime ["Headless runtime"]
         Service["HeadlessRuntimeService"]
         Orchestrator["TaskOrchestrator"]
         MultiAgent["MultiAgentOrchestrator"]
@@ -39,7 +39,7 @@ flowchart TD
         Store["SQLite session store"]
     end
 
-    subgraph Native["Rust sidecar"]
+    subgraph Native ["Rust sidecar"]
         Sidecar["tree-sitter, CPG, Merkle, WAL, diff"]
     end
 
@@ -78,10 +78,10 @@ pipeline wastes five model calls and produces worse output than answering it.
 
 ```mermaid
 flowchart TD
-    Prompt["User prompt"] --> Classify{"References or mutates<br/>the open workspace?"}
-    Classify -->|No| Chat["Conversation agent<br/>no tools, no system prompt"]
-    Classify -->|Yes| Focused{"Names exactly one<br/>file with @path?"}
-    Focused -->|Yes| Fast["Focused edit path<br/>deterministic plan and retrieval"]
+    Prompt["User prompt"] --> Classify{"References or mutates<br>the open workspace?"}
+    Classify -->|No| Chat["Conversation agent<br>no tools, no system prompt"]
+    Classify -->|Yes| Focused{"Names exactly one<br>file with @path?"}
+    Focused -->|Yes| Fast["Focused edit path<br>deterministic plan and retrieval"]
     Focused -->|No| Pipeline["Five-stage pipeline"]
     Chat --> Answer["Answer"]
     Fast --> Answer
@@ -105,15 +105,15 @@ and skips the rollback and replan graph.
 ```mermaid
 flowchart TD
     Start["Task accepted"] --> Plan["1. Planner"]
-    Plan --> Expand{"Returned a<br/>subtasks block?"}
+    Plan --> Expand{"Returned a<br>subtasks block?"}
     Expand -->|No| Retrieve["2. Retriever (deterministic)"]
-    Expand -->|Yes| Rewrite["Plan rewritten:<br/>one coding step per subtask, max 4"]
+    Expand -->|Yes| Rewrite["Plan rewritten:<br>one coding step per subtask, max 4"]
     Rewrite --> Retrieve
     Retrieve --> Code["3. Coder (once per coding step)"]
-    Code --> More{"More coding<br/>steps?"}
+    Code --> More{"More coding<br>steps?"}
     More -->|Yes| Code
     More -->|No| Verify["4. Verifier"]
-    Verify --> Passed{"VERIFICATION_PASSED<br/>on its own line?"}
+    Verify --> Passed{"VERIFICATION_PASSED<br>on its own line?"}
     Passed -->|Yes| Review["5. Reviewer"]
     Passed -->|No| Recover["Recovery"]
     Recover --> Verify
@@ -203,13 +203,13 @@ A failed verification is not a failed task.
 
 ```mermaid
 flowchart TD
-    Fail["Verifier failed"] --> Safe{"Untracked side effects<br/>during this step?"}
-    Safe -->|Yes| Stop["Stop and report.<br/>Do not guess."]
-    Safe -->|No| Roll["Roll back journaled mutations<br/>in reverse order"]
-    Roll --> Hash{"Current hash matches<br/>the journal?"}
-    Hash -->|No| Preserve["Keep the user's later edit.<br/>Stop replanning."]
+    Fail["Verifier failed"] --> Safe{"Untracked side effects<br>during this step?"}
+    Safe -->|Yes| Stop["Stop and report.<br>Do not guess."]
+    Safe -->|No| Roll["Roll back journaled mutations<br>in reverse order"]
+    Roll --> Hash{"Current hash matches<br>the journal?"}
+    Hash -->|No| Preserve["Keep the user's later edit.<br>Stop replanning."]
     Hash -->|Yes| Reindex["Refresh retrieval"]
-    Reindex --> Replan["Replan with the verifier<br/>evidence attached"]
+    Reindex --> Replan["Replan with the verifier<br>evidence attached"]
     Replan --> Recode["Corrective Coder call"]
     Recode --> Verify["Verify again"]
 ```
@@ -241,9 +241,9 @@ a provider.
 flowchart TD
     Req["Model request"] --> Est["Estimate context and output tokens"]
     Est --> Filter["Eligibility"]
-    Filter --> E1{"Tools supported<br/>if required?"}
-    Filter --> E2{"Context + output<br/>fits the window?"}
-    Filter --> E3{"Meets the stage's<br/>minimum window?"}
+    Filter --> E1{"Tools supported<br>if required?"}
+    Filter --> E2{"Context + output<br>fits the window?"}
+    Filter --> E3{"Meets the stage's<br>minimum window?"}
     E1 --> Rank["Rank eligible routes"]
     E2 --> Rank
     E3 --> Rank
@@ -286,19 +286,19 @@ open at once cannot see each other's structure, symbols, or agent memory.
 
 ```mermaid
 flowchart TD
-    subgraph Index["Indexing"]
+    subgraph Index ["Indexing"]
         Files["Changed files (stat, then hash)"] --> Tier{"Language"}
-        Tier -->|"TS, JS, TSX"| Compiler["TypeScript compiler API<br/>resolves bindings"]
-        Tier -->|"Python, Go, Rust, C, C++"| TS["tree-sitter in the sidecar"]
+        Tier -->|TS, JS, TSX| Compiler["TypeScript compiler API<br>resolves bindings"]
+        Tier -->|Python, Go, Rust, C, C++| TS["tree-sitter in the sidecar"]
         Tier -->|Everything else| Regex["Regex fallback"]
-        Compiler --> Rows["Symbols, imports, exports,<br/>references, calls, spans, hashes"]
+        Compiler --> Rows["Symbols, imports, exports,<br>references, calls, spans, hashes"]
         TS --> Rows
         Regex --> Rows
         Rows --> SQLite["Project SQLite"]
-        Rows --> Graph["FlatCPG in the sidecar,<br/>persisted through a WAL"]
+        Rows --> Graph["FlatCPG in the sidecar,<br>persisted through a WAL"]
     end
 
-    subgraph Query["Querying"]
+    subgraph Query ["Querying"]
         Q["Query"] --> Sym["Exact and partial symbol matches"]
         Sym --> Hop["One-hop file edge expansion"]
         Hop --> PPR["Personalised PageRank from matched symbols"]
@@ -339,13 +339,13 @@ Compaction is deterministic. It never calls a model.
 
 ```mermaid
 flowchart TD
-    Turn["Before each model request"] --> Check{"Input tokens above<br/>the trigger ratio?"}
+    Turn["Before each model request"] --> Check{"Input tokens above<br>the trigger ratio?"}
     Check -->|No| Send["Send"]
-    Check -->|Yes| Prune["Prune read_file results<br/>to signatures via the sidecar"]
+    Check -->|Yes| Prune["Prune read_file results<br>to signatures via the sidecar"]
     Prune --> Target{"Under the target?"}
     Target -->|Yes| Send
-    Target -->|No| Fold["Fold the oldest exchanges into<br/>a structured CompactedTaskState"]
-    Fold --> Shrank{"Did the pass shrink<br/>the request?"}
+    Target -->|No| Fold["Fold the oldest exchanges into<br>a structured CompactedTaskState"]
+    Fold --> Shrank{"Did the pass shrink<br>the request?"}
     Shrank -->|No| Stop["Stop folding"]
     Shrank -->|Yes| Target
     Stop --> Send
@@ -370,23 +370,23 @@ Twelve independent limits, at four scopes.
 
 ```mermaid
 flowchart TD
-    subgraph Task["Per task"]
-        C1["$0.50 real provider spend"]
+    subgraph Task ["Per task"]
+        C1["0.50 USD real provider spend"]
         C2["30 minutes per execution"]
         C3["48 model requests"]
         C4["192 tool calls"]
     end
-    subgraph Step["Per step"]
+    subgraph Step ["Per step"]
         S1["2 attempts per stage (1 when focused)"]
         S2["10 stage attempts in total"]
         S3["Failure fingerprint: identical failure twice stops the step"]
     end
-    subgraph Handoff["Per delegation"]
+    subgraph Handoff ["Per delegation"]
         H1["Depth 4"]
         H2["8 handoffs"]
         H3["2 handoffs per agent pair"]
     end
-    subgraph Loop["Per workspace state"]
+    subgraph Loop ["Per workspace state"]
         L1["Duplicate tool call returns the cached result"]
         L2["Merkle state tree: workspace returned to an earlier state"]
     end
