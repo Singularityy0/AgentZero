@@ -645,8 +645,15 @@ function hashBuffer(content: Buffer): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+// Leading whitespace is deliberately unbounded, not just `^`: real-world JS
+// is almost never at column 0. A .js/.ts file's top-level declarations
+// usually are, but the same code embedded in an HTML <script> block -
+// exactly where a single-file interactive artifact keeps its logic - is
+// conventionally indented, and an anchor that only matched column 0 missed
+// every declaration in exactly that case: a full-file rewrite silently
+// dropped a working app's entire body with no warning at all.
 const SYMBOL_DECLARATION_PATTERN =
-  /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?class\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm;
+  /^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)|^[ \t]*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)|^[ \t]*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm;
 const EXPORT_LIST_PATTERN =
   /(?:export\s*\{([^}]*)\}|module\.exports\s*=\s*\{([^}]*)\})/g;
 

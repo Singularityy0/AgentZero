@@ -1576,6 +1576,16 @@ export function estimateModelCost(
  * Eligibility and cooldown always dominate: an ineligible or cooling route is
  * worse than any usable one regardless of bias. The bias only decides what
  * comes first among routes that can all actually serve the request.
+ *
+ * Local (Ollama) is a dedicated tier below that, ahead of bias/cost: without
+ * it, "economy" bias sorted by estimated cost alone, and estimateModelCost
+ * hard-codes Ollama to exactly 0 while a hosted free-tier route with
+ * unparseable or missing pricing metadata falls back to Infinity - so a
+ * hosted route the operator configured and prefers could lose to local
+ * inference purely because its price could not be read, not because local
+ * was actually the better choice. Local hardware is meant to be the fallback
+ * of last resort, not a route that can out-rank a working hosted key on a
+ * pricing-metadata gap.
  */
 function comparatorFor(
   bias: ModelRouteBias | undefined,
@@ -1583,6 +1593,9 @@ function comparatorFor(
   return (left, right) => {
     if (left.eligible !== right.eligible) return left.eligible ? -1 : 1;
     if (left.inCooldown !== right.inCooldown) return left.inCooldown ? 1 : -1;
+    const leftLocal = left.model.providerId === "ollama";
+    const rightLocal = right.model.providerId === "ollama";
+    if (leftLocal !== rightLocal) return leftLocal ? 1 : -1;
     if (bias === "capacity") {
       // An unknown parameter count sorts last rather than first: we only
       // promote a model above the operator's order on evidence it is bigger.

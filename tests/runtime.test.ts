@@ -2515,17 +2515,10 @@ test("HeadlessRuntimeService keeps a focused single-file edit local and stops af
         (tool) => tool.name !== "web_search" && tool.name !== "browse_url",
       ),
     );
-    assert.equal(verifierRequests.length, 1);
-    assert.equal(verifierRequests[0]?.routePolicy, undefined);
-    assert.deepEqual(
-      verifierRequests[0]?.tools.map((tool) => tool.name),
-      ["compile_code", "syntax_check"],
-    );
-    assert.match(
-      verifierRequests[0]?.messages.find((message) => message.role === "user")
-        ?.content ?? "",
-      /Authoritative changed file snapshot[\s\S]*insertion_sort/u,
-    );
+    // The objective did not ask for the result to be verified or tested, so
+    // the verifier stage - the one most prone to spending many turns
+    // second-guessing a correct result - must not run at all.
+    assert.equal(verifierRequests.length, 0);
     const saved = await readFile(join(root, "singu.rs"), "utf8");
     assert.match(saved, /insertion_sort/u);
     assert.doesNotMatch(saved, /merge_sort/u);
@@ -2715,7 +2708,7 @@ test("the verifier is told about an explicitly requested file the coder never to
       sessionId: session.id,
       agentId: DEFAULT_AGENT_ID,
       prompt:
-        "Fix math_utils.js to keep add and subtract, and create the missing math_utils.test.js with tests.",
+        "Fix math_utils.js to keep add and subtract, and create the missing math_utils.test.js with tests. Verify the result.",
     });
 
     const verifierPrompt =
@@ -3153,6 +3146,73 @@ test("prepareChange flags exported symbols a full-file rewrite would silently dr
       newContent: "function onlyHere() {}\n",
     });
     assert.deepEqual(created.removedSymbols, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("removed-symbol detection reaches indented code inside an HTML <script> block", async () => {
+  // Reproduces a live failure: a single-file interactive artifact's real
+  // logic lives inside an indented <script type="module"> block, which a
+  // column-0-anchored `^` regex never matched. A full-file rewrite silently
+  // dropped the entire working app - a slider, an info panel, sphere point
+  // generation, nearest-neighbor edges, drag rotation - with zero warning,
+  // because every declaration in it was indented.
+  const root = await mkdtemp(join(tmpdir(), "agentic-html-removed-symbols-"));
+  const path = join(root, "index.html");
+  await writeFile(
+    path,
+    [
+      "<!DOCTYPE html>",
+      "<html>",
+      "<body>",
+      '  <input id="pointCount">',
+      '  <div id="info"></div>',
+      '  <canvas id="c"></canvas>",',
+      '  <script type="module">',
+      "    const points = [];",
+      "    function generateSpherePoints(count) {",
+      "      return [];",
+      "    }",
+      "    function computeNearestNeighborEdges(pts) {",
+      "      return [];",
+      "    }",
+      "    function animate() {",
+      "      requestAnimationFrame(animate);",
+      "    }",
+      "    animate();",
+      "  </script>",
+      "</body>",
+      "</html>",
+    ].join("\n"),
+  );
+  const service = new WorkspaceFileService(root);
+  try {
+    const overwrite = await service.prepareChange({
+      path: "index.html",
+      newContent: [
+        "<!DOCTYPE html>",
+        "<html>",
+        "<body>",
+        '  <canvas id="c"></canvas>',
+        '  <script type="module">',
+        "    function animate() {",
+        "      requestAnimationFrame(animate);",
+        "    }",
+        "    animate();",
+        "  </script>",
+        "</body>",
+        "</html>",
+      ].join("\n"),
+    });
+    assert.deepEqual(
+      new Set(overwrite.removedSymbols),
+      new Set([
+        "points",
+        "generateSpherePoints",
+        "computeNearestNeighborEdges",
+      ]),
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

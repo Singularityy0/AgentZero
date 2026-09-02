@@ -153,9 +153,24 @@ export class OpenAICompatibleChatModel implements LanguageModel {
         },
         { signal: request.signal },
       );
-      const choice = response.choices[0];
+      // `response.choices` itself can be missing, not just empty, when a
+      // proxying provider (OpenRouter routes to many backends) answers HTTP
+      // 200 with an error-shaped body instead of the expected completion
+      // shape. Indexing straight into it throws a bare TypeError that
+      // classifyModelError cannot recognize - it has no status code or
+      // familiar wording - so it was falling through to { retryable: false }
+      // and killing the whole task instead of failing over to the next
+      // provider. Classifying it explicitly here, the same way the
+      // finish_reason "error" case just below already is, is what lets the
+      // gateway actually retry elsewhere.
+      const choice = response.choices?.[0];
       const message = choice?.message;
-      if (!message) throw new Error("Provider returned no completion choices.");
+      if (!message) {
+        throw new ModelError(
+          `${this.options.model} returned a response with no completion choices.`,
+          { code: "server", retryable: true },
+        );
+      }
       // OpenRouter proxies to many backends and, when the upstream model itself
       // fails, still answers with HTTP 200 and a populated (often empty)
       // message - only `finish_reason` reveals the failure. Left unchecked,
